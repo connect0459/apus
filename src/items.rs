@@ -5,6 +5,7 @@ use crate::lexer::{Spanned, Token};
 pub enum ItemKind {
     Func,
     Struct,
+    Enum,
 }
 
 #[derive(Debug, Clone)]
@@ -69,10 +70,11 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         let kind = match tokens[i].token() {
             Token::Ident(k) if k == "func" => ItemKind::Func,
             Token::Ident(k) if k == "struct" => ItemKind::Struct,
+            Token::Ident(k) if k == "enum" => ItemKind::Enum,
             _ => {
                 return Err(SplitError {
                     line: tokens[i].line(),
-                    message: "expected 'func' or 'struct' at top level".to_string(),
+                    message: "expected 'func', 'struct' or 'enum' at top level".to_string(),
                 });
             }
         };
@@ -123,7 +125,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         let slice = tokens[start..end].to_vec();
         let hash = hash_tokens(&slice);
         let signature_hash = match kind {
-            ItemKind::Struct => hash,
+            ItemKind::Struct | ItemKind::Enum => hash,
             ItemKind::Func => {
                 let header_end = slice
                     .iter()
@@ -198,6 +200,21 @@ mod tests {
                 (ItemKind::Func, "f"),
                 (ItemKind::Func, "g"),
             ]
+        );
+    }
+
+    #[test]
+    fn an_enum_is_an_item_of_its_own_kind() {
+        let found = items("enum Color { case red, green }\nfunc f() { }");
+        assert_eq!(found[0].kind(), ItemKind::Enum);
+        assert_eq!(found[0].name(), "Color");
+    }
+
+    #[test]
+    fn changing_an_enum_case_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("enum Color { case red }"),
+            digest_of("enum Color { case blue }")
         );
     }
 
