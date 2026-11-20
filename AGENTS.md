@@ -34,6 +34,8 @@ Respect these layer boundaries: never introduce a dependency that points backwar
 
 - Format with `cargo fmt`; pass `cargo clippy --all-targets --all-features -- -D warnings`.
 - Use `Result` for error handling; avoid `unwrap()`/`expect()` in production code.
+- Keep struct fields private. Expose data through methods named after the property (`name()`, not `get_name()`) and put behavior on the type that owns the data. Make a field `pub` only when there is no alternative.
+- Enum variant fields are public by language rule; pattern matching is the interface of a sum type such as `Stmt` and `Expr`.
 - Avoid `unsafe` unless justified in an ADR.
 - Cache keys must be deterministic across runs and Rust versions; do not use `std::hash::DefaultHasher` for anything persisted.
 

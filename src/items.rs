@@ -8,38 +8,66 @@ pub enum ItemKind {
 
 #[derive(Debug, Clone)]
 pub struct Item {
-    pub kind: ItemKind,
-    pub name: String,
-    pub tokens: Vec<Spanned>,
-    pub hash: u64,
+    kind: ItemKind,
+    name: String,
+    tokens: Vec<Spanned>,
+    hash: u64,
+}
+
+impl Item {
+    pub fn kind(&self) -> ItemKind {
+        self.kind
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn tokens(&self) -> &[Spanned] {
+        &self.tokens
+    }
+
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitError {
-    pub line: u32,
-    pub message: String,
+    line: u32,
+    message: String,
+}
+
+impl SplitError {
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
     let mut items = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
-        let kind = match &tokens[i].token {
+        let kind = match tokens[i].token() {
             Token::Ident(k) if k == "func" => ItemKind::Func,
             Token::Ident(k) if k == "struct" => ItemKind::Struct,
             _ => {
                 return Err(SplitError {
-                    line: tokens[i].line,
+                    line: tokens[i].line(),
                     message: "expected 'func' or 'struct' at top level".to_string(),
                 });
             }
         };
         let start = i;
-        let name = match tokens.get(i + 1).map(|t| &t.token) {
+        let name = match tokens.get(i + 1).map(|t| t.token()) {
             Some(Token::Ident(n)) => n.clone(),
             _ => {
                 return Err(SplitError {
-                    line: tokens[i].line,
+                    line: tokens[i].line(),
                     message: "expected a name".to_string(),
                 });
             }
@@ -48,7 +76,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         let mut opened = false;
         let mut end = None;
         for (j, t) in tokens.iter().enumerate().skip(i + 2) {
-            match &t.token {
+            match t.token() {
                 Token::Punct(p) if p == "{" => {
                     depth += 1;
                     opened = true;
@@ -56,7 +84,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
                 Token::Punct(p) if p == "}" => {
                     if depth == 0 {
                         return Err(SplitError {
-                            line: t.line,
+                            line: t.line(),
                             message: "unbalanced '}'".to_string(),
                         });
                     }
@@ -73,7 +101,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             (Some(e), _) => e,
             _ => {
                 return Err(SplitError {
-                    line: tokens[start].line,
+                    line: tokens[start].line(),
                     message: "unbalanced '{'".to_string(),
                 });
             }
@@ -100,7 +128,7 @@ pub fn hash_tokens(tokens: &[Spanned]) -> u64 {
         }
     };
     for t in tokens {
-        match &t.token {
+        match t.token() {
             Token::Ident(s) => {
                 feed(&[1]);
                 feed(s.as_bytes());
@@ -135,7 +163,7 @@ mod tests {
     fn hash_of(src: &str, name: &str) -> u64 {
         items(src)
             .into_iter()
-            .find(|i| i.name == name)
+            .find(|i| i.name() == name)
             .unwrap()
             .hash
     }
@@ -143,8 +171,7 @@ mod tests {
     #[test]
     fn top_level_funcs_and_structs_become_items_in_source_order() {
         let found = items("struct P { var x: Int }\nfunc f() { }\nfunc g() -> Int { return 1 }");
-        let summary: Vec<(ItemKind, &str)> =
-            found.iter().map(|i| (i.kind, i.name.as_str())).collect();
+        let summary: Vec<(ItemKind, &str)> = found.iter().map(|i| (i.kind(), i.name())).collect();
         assert_eq!(
             summary,
             vec![
@@ -189,7 +216,7 @@ mod tests {
     #[test]
     fn a_stray_top_level_token_is_an_error_with_its_line() {
         let err = split_items(&lex("func f() { }\n\nx = 1").unwrap()).unwrap_err();
-        assert_eq!(err.line, 3);
+        assert_eq!(err.line(), 3);
     }
 
     #[test]

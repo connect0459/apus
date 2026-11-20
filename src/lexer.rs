@@ -8,14 +8,34 @@ pub enum Token {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spanned {
-    pub token: Token,
-    pub line: u32,
+    token: Token,
+    line: u32,
+}
+
+impl Spanned {
+    pub fn token(&self) -> &Token {
+        &self.token
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexError {
-    pub line: u32,
-    pub message: String,
+    line: u32,
+    message: String,
+}
+
+impl LexError {
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 const THREE_CHAR_PUNCTS: [&str; 2] = ["..<", "..."];
@@ -160,7 +180,7 @@ mod tests {
     use super::*;
 
     fn tokens(src: &str) -> Vec<Token> {
-        lex(src).unwrap().into_iter().map(|s| s.token).collect()
+        lex(src).unwrap().into_iter().map(|s| s.token().clone()).collect()
     }
 
     fn ident(s: &str) -> Token {
@@ -219,14 +239,14 @@ mod tests {
 
     #[test]
     fn tokens_remember_their_line() {
-        let lines: Vec<u32> = lex("a\n\nb").unwrap().iter().map(|s| s.line).collect();
+        let lines: Vec<u32> = lex("a\n\nb").unwrap().iter().map(|s| s.line()).collect();
         assert_eq!(lines, vec![1, 3]);
     }
 
     #[test]
     fn unterminated_string_is_an_error_with_its_line() {
         let err = lex("a\n\"abc").unwrap_err();
-        assert_eq!(err.line, 2);
+        assert_eq!(err.line(), 2);
     }
 
     #[test]
