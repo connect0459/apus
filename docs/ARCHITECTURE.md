@@ -7,7 +7,7 @@ apus compiles a Swift subset (a dialect, not Swift) to a native macOS arm64 exec
 The unit of incremental work is the top-level **item** (a `func`, a `struct` or an `enum`). Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
 
 ```text
-source → lexer → items → parser → check → codegen → link → driver
+source → lexer → items → parser → check → mono → codegen → link → driver
                                            ↑
                                   cache (function entries)
 ```
@@ -22,7 +22,9 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`ast` and `parser`** define the syntax tree and parse a single item into it. The parser never looks at tokens outside the item it was given. Every statement and expression remembers its line.
 
-**`types` and `check`** hold the type system and the checker. `Signatures` is built once from the declarations of all items. `check_func` then checks one function using only that function's body and the signatures, and produces typed IR. The only whole-program information a function body can see is a signature, never another body.
+**`types`, `sigs` and `check`** hold the type system and the checker. `Signatures` (in `sigs`) is built once from the declarations of all items; it also interns the instances of generic structs and enums, so it grows while functions are checked. `check_func` checks one function using only that function's body and the signatures, and produces typed IR. A generic function is checked once with opaque type parameters (`Ty::Param`), and calls to generic functions record their `type_args`. The only whole-program information a function body can see is a signature, never another body.
+
+**`mono`** turns calls with concrete type arguments into instances: it substitutes the types of the generic function's typed IR, names the instance `name<Type,...>`, and does the same for the calls inside it, one instance per name. An instance is an ordinary typed function from then on.
 
 **`tir`** is the typed IR that `check` produces and `codegen` consumes. Every expression carries its type, so `codegen` never infers anything.
 
@@ -32,7 +34,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`entry`, `cache` and `stamp`** hold the persistent state under `.apus-cache/` next to the output. `entry` serializes one function. `cache` keeps entries in one pack file and saves only the entries the latest build used, so the cache never outgrows the program. `stamp` records the last build (source hash, object hash and the output file's size and modification time) so an unchanged build can stop immediately.
 
-**`memo`** stores, next to the cache, which function key each item hash produced in the last successful build and the signature digest it was built under. The driver trusts it only while the compiler stamp and the digest match, and then skips parsing and checking of functions it still knows.
+**`memo`** stores, next to the cache, which function keys each item hash produced in the last successful build (its own entry and the generic instances it needs) and the signature digest it was built under. The driver trusts it only while the compiler stamp and the digest match, and then skips parsing and checking of functions it still knows.
 
 **`link`** runs the system linker on the object file: `ld` called directly with the SDK location cached, falling back to `cc`.
 
@@ -47,6 +49,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 - Syntax nodes compare by shape; their lines are metadata and do not affect equality.
 - Layers depend only on earlier layers. Nothing points backwards.
 - Struct fields are private. Data is read through methods; behavior lives on the type that owns the data. Fields of enum variants are public because pattern matching is the interface of a sum type.
+- A generic function is an exception to the callee-body rule below: its whole text is part of the signature digest, so editing it rechecks every function. Its instances are still recompiled only when their typed IR changes.
 - A cache key depends only on a function's typed IR and the layouts of the structs it uses. Editing a callee's body therefore never invalidates its callers; changing a callee's signature does, because the caller's typed IR changes.
 - Compilation of a function is deterministic and independent of other functions, so parallel and sequential builds produce identical entries.
 - Cache files are untrusted input: a corrupt or truncated file is ignored, never trusted partially.

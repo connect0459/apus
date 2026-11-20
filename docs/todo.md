@@ -22,7 +22,7 @@
 - [ ] M4: enum, generics (monomorphization), simple class
   - [x] Enum without payloads: `enum`, `Enum.case`, `==`/`!=`, enum struct fields, exhaustive `switch`
   - [x] Enum with payloads: `Shape.circle(5)`, `case .circle(let r)`, `_` to skip a value
-  - [ ] Generics (monomorphization); needs a design note on instance cache keys first
+  - [x] Generics by monomorphization: generic functions, structs and enums, inferred type arguments
   - [ ] Simple class; needs a decision on memory management first
 
 ## Open decisions
@@ -42,7 +42,7 @@
 - Entry point is `func main()` instead of top-level statements.
 - Linking cost with the system linker on macOS is unmeasured.
 - Coverage gate stays at 80% line / 90% function; branch coverage is not gated.
-- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, payloads are unlabeled and limited to `Int`, `Bool`, `String` and enums without payloads, a case with bindings has a single pattern, `.circle(5)` without the type name is not accepted, and a `case` may repeat a pattern without a warning.
+- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, generic arguments cannot be structs or enums with payloads where they end up as a struct field or a payload, there are no protocol constraints so a value of a type parameter can only be copied, passed, returned and stored, explicit type arguments are not accepted on function calls, an expected type reaches only the top expression of a `let` initializer or a `return`, payloads are unlabeled and limited to `Int`, `Bool`, `String` and enums without payloads, a case with bindings has a single pattern, `.circle(5)` without the type name is not accepted, and a `case` may repeat a pattern without a warning.
 
 ## Decisions
 
@@ -97,3 +97,13 @@
 **Decision.** An enum with at least one payload becomes `Ty::Struct` over a synthesized layout of `1 + widest payload` slots of 8 bytes. Slot 0 holds the case index and slot `1 + n` holds the nth payload value. All slots are typed `Int` in the layout, so a copy moves whole slots whatever case they hold; a value of another type is read back with the type recorded in the `Field` node. Construction is `TStruct`-style `StructInit` with the case index first, and the checker lowers `switch` as before, reading the tag with `Field` and binding payload values with `Let` statements at the start of the case body. Enums without payloads stay scalar (`Ty::Enum`). The layout is registered after the declared structs, so their ids do not move.
 
 **Consequences.** Copy, parameter, result and cache key code is unchanged, and the key encodes a payload enum as a struct of `Int` slots. A value occupies the widest case's size even for `empty`. Equality, printing and member access on a payload enum are rejected. Payloads cannot be structs or payload enums, which would need nested layouts and recursion rules, and a struct field cannot hold a payload enum for the same reason. The bound names are immutable copies of the payload.
+
+### Generics are checked once with opaque type parameters and monomorphized by substitution (2026-11-20)
+
+**Problem.** Generic functions, structs and enums need a checking model, a representation per instantiation, and a place in the function cache and the item memo, without breaking the rule that a callee's body edit does not invalidate its callers.
+
+**Options.** Check a generic body again for every instantiation with concrete types (C++ templates: permissive, uninstantiated bodies unchecked, operators on type parameters allowed); check it once with each type parameter opaque and substitute types in the typed IR (Swift without protocols: sound, uninstantiated bodies checked, no operators on type parameters).
+
+**Decision.** `Ty::Param(i)` is an opaque type. A generic function is checked once into a typed IR that mentions `Param` and carries `type_args` on each call. `Signatures` (`src/sigs.rs`) interns struct and enum instances by definition and type arguments, so `Box<Int>` is a layout of its own and `Box<T>` inside a generic body is a symbolic instance. Type arguments are inferred by unifying parameter types with argument types, and for a `let` annotation or a `return` the expected type seeds the unification. `mono` (`src/mono.rs`) turns each call with concrete `type_args` into an instance: it substitutes the types of the generic typed IR, names the result `name<Type,...>` and rewrites calls transitively, with one instance per name. An instance is an ordinary function, keyed by its typed IR like any other. Generic function items hash their whole text into the signature digest, and the item memo keeps, for each non-generic function, the keys of its own entry and of every instance it needs.
+
+**Consequences.** Editing a generic function body rechecks every function, but only instances whose typed IR changed are recompiled. Editing a non-generic function leaves the instances of other callers in the cache and the object. Instances are compiled once however many callers use them. A type parameter supports no operators until protocol constraints exist. A generic argument that becomes a struct field or an enum payload must not be a struct or an enum with payloads; the error is reported where the instance is created. Instance names are readable (`id<Int>`), so a user function can never collide with one.
