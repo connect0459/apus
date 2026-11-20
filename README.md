@@ -50,7 +50,9 @@ Cold builds of generated programs (`python3 bench/vs_swiftc.py`, Apple Silicon, 
 | 1000 functions (~110 KB) | 2.3 s | 115 ms |
 | 5000 functions (~570 KB) | 10.9 s | 350 ms |
 
-Of the 115 ms, linking through `cc` takes 56 ms and Cranelift 47 ms. Rebuilds are not faster yet: there is no cache. See `docs/todo.md` for milestones.
+Those are cold builds measured before the cache existed. Of the 115 ms, linking through `cc` took 56 ms and Cranelift 47 ms.
+
+Rebuilds use a per-function cache in `.apus-cache/` next to the output. After editing one function only that function is recompiled; after a comment-only edit nothing is recompiled or linked; with no change nothing runs. The tests assert these counts. Rebuild timings have not been measured yet on a quiet machine; `python3 bench/vs_swiftc.py` produces them. See `docs/todo.md` for milestones.
 
 ## Documentation
 

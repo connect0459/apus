@@ -8,9 +8,11 @@ The unit of incremental work is the top-level **item** (a `func` or a `struct`).
 
 ```text
 source → lexer → items → parser → check → codegen → link → driver
+                                           ↑
+                                  cache (function entries)
 ```
 
-All stages through `link` exist. The per-function cache is not implemented yet. See `todo.md` for what is planned.
+All stages exist. `codegen` is split into `compile_function`, which turns one typed function into a cacheable entry, and `assemble`, which builds the object file from entries. See `todo.md` for what is planned.
 
 ## Code Map
 
@@ -24,9 +26,13 @@ All stages through `link` exist. The per-function cache is not implemented yet. 
 
 **`tir`** is the typed IR that `check` produces and `codegen` consumes. Every expression carries its type, so `codegen` never infers anything.
 
-**`codegen`** turns typed IR into a Mach-O object through Cranelift, with no optimization. It also emits the C `main` that calls the program's `main`.
+**`codegen`** turns typed IR into a Mach-O object through Cranelift, with no optimization. `compile_function` is a pure function of one typed function and the struct layouts. It returns a `FuncEntry` (machine code, relocations that name their targets by symbol, and the string literals it uses) without touching any shared state, so entries can be cached and compiled in parallel. `assemble` defines the entries in one object file and emits the C `main` that calls the program's `main`.
 
-**`link`** runs the system linker on the object file.
+**`key`** computes the cache key of a function: a stable hash of its typed IR, with struct types encoded by their field types rather than by declaration order, plus a stamp identifying the compiler.
+
+**`entry`, `cache` and `stamp`** hold the persistent state under `.apus-cache/` next to the output. `entry` serializes one function. `cache` keeps entries in one pack file and saves only the entries the latest build used, so the cache never outgrows the program. `stamp` records the last build (source hash, object hash and the output file's size and modification time) so an unchanged build can stop immediately.
+
+**`link`** runs the system linker on the object file: `ld` called directly with the SDK location cached, falling back to `cc`.
 
 **`driver`** wires the stages together and reports errors with their line. `src/main.rs` is the command line on top of it.
 
@@ -39,6 +45,9 @@ All stages through `link` exist. The per-function cache is not implemented yet. 
 - Syntax nodes compare by shape; their lines are metadata and do not affect equality.
 - Layers depend only on earlier layers. Nothing points backwards.
 - Struct fields are private. Data is read through methods; behavior lives on the type that owns the data. Fields of enum variants are public because pattern matching is the interface of a sum type.
+- A cache key depends only on a function's typed IR and the layouts of the structs it uses. Editing a callee's body therefore never invalidates its callers; changing a callee's signature does, because the caller's typed IR changes.
+- Compilation of a function is deterministic and independent of other functions, so parallel and sequential builds produce identical entries.
+- Cache files are untrusted input: a corrupt or truncated file is ignored, never trusted partially.
 - Integer arithmetic traps on overflow and on division by zero, as Swift does.
 - A struct is a value. It lives in memory as one 8-byte slot per field, and an expression of struct type evaluates to the address of its storage. A struct is copied at `let` and assignment. A parameter is passed as a pointer and is immutable, so the callee never changes the caller's value. A result is written to memory supplied by the caller.
 
