@@ -18,6 +18,12 @@ impl Fnv1a {
     }
 }
 
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = Fnv1a::new();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
 impl Default for Fnv1a {
     fn default() -> Self {
         Self::new()
@@ -43,6 +49,11 @@ mod tests {
     fn known_inputs_hash_to_their_published_fnv1a_values() {
         assert_eq!(hash_of(b"a"), 0xaf63dc4c8601ec8c);
         assert_eq!(hash_of(b"foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn hash_bytes_equals_hashing_with_a_hasher() {
+        assert_eq!(hash_bytes(b"foobar"), hash_of(b"foobar"));
     }
 
     #[test]
