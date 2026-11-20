@@ -1,3 +1,4 @@
+use crate::hash::Fnv1a;
 use crate::lexer::{Spanned, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,35 +121,29 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
 }
 
 pub fn hash_tokens(tokens: &[Spanned]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    let mut feed = |bytes: &[u8]| {
-        for b in bytes {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    };
+    let mut hasher = Fnv1a::new();
     for t in tokens {
         match t.token() {
             Token::Ident(s) => {
-                feed(&[1]);
-                feed(s.as_bytes());
+                hasher.write(&[1]);
+                hasher.write(s.as_bytes());
             }
             Token::Int(v) => {
-                feed(&[2]);
-                feed(&v.to_le_bytes());
+                hasher.write(&[2]);
+                hasher.write(&v.to_le_bytes());
             }
             Token::Str(s) => {
-                feed(&[3]);
-                feed(s.as_bytes());
+                hasher.write(&[3]);
+                hasher.write(s.as_bytes());
             }
             Token::Punct(s) => {
-                feed(&[4]);
-                feed(s.as_bytes());
+                hasher.write(&[4]);
+                hasher.write(s.as_bytes());
             }
         }
-        feed(&[0xff]);
+        hasher.write(&[0xff]);
     }
-    h
+    hasher.finish()
 }
 
 #[cfg(test)]
