@@ -363,3 +363,64 @@ fn a_non_exhaustive_switch_fails_the_build() {
     let err = build(&source, &dir.path().join("prog")).unwrap_err();
     assert!(err.message().contains("exhaustive"), "{}", err.message());
 }
+
+const SHAPE: &str = "enum Shape { case circle(Int), rect(Int, Int), label(String, Bool), empty }\n\
+    func describe(_ s: Shape) {\n\
+    switch s {\n\
+    case .circle(let r): print(r)\n\
+    case .rect(let w, let h): print(w * h)\n\
+    case .label(let text, let flag): print(text)\nprint(flag)\n\
+    case .empty: print(-1)\n\
+    }\n\
+    }\n";
+
+fn with_shape(body: &str) -> String {
+    format!("{SHAPE}func main() {{\n{body}\n}}")
+}
+
+#[test]
+fn a_switch_binds_the_values_carried_by_the_matching_case() {
+    let source = with_shape(
+        "describe(Shape.circle(5))\ndescribe(Shape.rect(3, 4))\ndescribe(Shape.label(\"hi\", true))\ndescribe(Shape.empty)",
+    );
+    assert_eq!(run(&source), "5\n12\nhi\ntrue\n-1\n");
+}
+
+#[test]
+fn a_payload_enum_is_copied_by_value() {
+    let source = with_shape(
+        "var a = Shape.circle(1)\nlet b = a\na = Shape.circle(2)\ndescribe(b)\ndescribe(a)",
+    );
+    assert_eq!(run(&source), "1\n2\n");
+}
+
+#[test]
+fn a_payload_enum_can_be_returned_from_a_function() {
+    let source = format!(
+        "{SHAPE}func grow(_ s: Shape) -> Shape {{\nswitch s {{\ncase .circle(let r): return Shape.circle(r + 1)\ndefault: return s\n}}\n}}\n\
+         func main() {{ describe(grow(Shape.circle(9)))\ndescribe(grow(Shape.empty)) }}"
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_case_without_bindings_matches_whatever_it_carries() {
+    let source =
+        with_shape("switch Shape.rect(1, 2) {\ncase .rect: print(1)\ndefault: print(0)\n}");
+    assert_eq!(run(&source), "1\n");
+}
+
+#[test]
+fn a_payload_may_be_an_enum_without_values() {
+    let source = "enum Color { case red, green }\nenum Paint { case solid(Color), none }\n\
+        func main() {\nswitch Paint.solid(Color.green) {\ncase .solid(let c): print(c == Color.green)\ncase .none: print(false)\n}\n}";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn a_switch_with_a_default_handles_the_unlisted_payload_cases() {
+    let source = with_shape(
+        "switch Shape.label(\"a\", false) {\ncase .circle(let r): print(r)\ndefault: print(7)\n}",
+    );
+    assert_eq!(run(&source), "7\n");
+}

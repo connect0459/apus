@@ -271,13 +271,28 @@ impl Parser<'_> {
                 break;
             }
             self.expect_keyword("case")?;
-            cases.push(self.name()?);
+            cases.push(self.enum_case_decl()?);
             while self.eat_punct(",") {
-                cases.push(self.name()?);
+                cases.push(self.enum_case_decl()?);
             }
             self.end_of_statement()?;
         }
         Ok(EnumDecl::new(line, name, cases))
+    }
+
+    fn enum_case_decl(&mut self) -> PResult<EnumCaseDecl> {
+        let name = self.name()?;
+        let mut payload = Vec::new();
+        if self.eat_punct("(") {
+            loop {
+                payload.push(self.name()?);
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            self.expect_punct(")")?;
+        }
+        Ok(EnumCaseDecl::new(name, payload))
     }
 
     fn switch_kind(&mut self) -> PResult<StmtKind> {
@@ -328,7 +343,30 @@ impl Parser<'_> {
             Some(self.name()?)
         };
         self.expect_punct(".")?;
-        Ok(Pattern::new(type_name, self.name()?))
+        let case = self.name()?;
+        let bindings = if self.eat_punct("(") {
+            let mut bindings = Vec::new();
+            loop {
+                bindings.push(self.binding()?);
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            self.expect_punct(")")?;
+            Some(bindings)
+        } else {
+            None
+        };
+        Ok(Pattern::new(type_name, case, bindings))
+    }
+
+    fn binding(&mut self) -> PResult<Option<String>> {
+        if matches!(self.peek(), Some(Token::Ident(s)) if s == "_") {
+            self.pos += 1;
+            return Ok(None);
+        }
+        self.expect_keyword("let")?;
+        self.name().map(Some)
     }
 
     fn block(&mut self) -> PResult<Vec<Stmt>> {
@@ -550,6 +588,17 @@ impl Parser<'_> {
                     },
                 );
             } else if self.is_punct("(") {
+                if let ExprKind::Member { base, name } = expr.kind().clone() {
+                    expr = Expr::new(
+                        line,
+                        ExprKind::MemberCall {
+                            base,
+                            name,
+                            args: self.args()?,
+                        },
+                    );
+                    continue;
+                }
                 let ExprKind::Ident(callee) = expr.kind().clone() else {
                     return self.fail("only a named function can be called");
                 };
@@ -1060,7 +1109,11 @@ mod tests {
             Decl::Enum(EnumDecl::new(
                 1,
                 "Color".to_string(),
-                vec!["red".into(), "green".into(), "blue".into()]
+                vec![
+                    EnumCaseDecl::new("red".into(), vec![]),
+                    EnumCaseDecl::new("green".into(), vec![]),
+                    EnumCaseDecl::new("blue".into(), vec![]),
+                ]
             ))
         );
     }
@@ -1080,8 +1133,8 @@ mod tests {
         assert_eq!(
             *cases[0].label(),
             CaseLabel::Patterns(vec![
-                Pattern::new(None, "red".into()),
-                Pattern::new(Some("Color".into()), "green".into()),
+                Pattern::new(None, "red".into(), None),
+                Pattern::new(Some("Color".into()), "green".into(), None),
             ])
         );
         assert_eq!(cases[0].body().len(), 1);
@@ -1100,5 +1153,41 @@ mod tests {
     #[test]
     fn a_statement_directly_in_a_switch_body_is_an_error() {
         assert!(try_parse("func f() { switch c { print(1) } }").is_err());
+    }
+
+    #[test]
+    fn enum_cases_may_carry_payload_types() {
+        let decl = try_parse("enum Shape { case circle(Int), rect(Int, Int), none }").unwrap();
+        let Decl::Enum(shape) = decl else {
+            panic!("expected an enum");
+        };
+        assert!(shape.has_payload());
+        assert_eq!(shape.cases()[1].payload(), ["Int", "Int"]);
+        assert!(shape.cases()[2].payload().is_empty());
+    }
+
+    #[test]
+    fn a_pattern_binds_payload_values_or_ignores_them() {
+        let stmts = body("switch s {\ncase .rect(let w, _):\nprint(w)\ndefault:\nprint(0)\n}");
+        let StmtKind::Switch { cases, .. } = stmts[0].kind() else {
+            panic!("expected a switch");
+        };
+        let CaseLabel::Patterns(patterns) = cases[0].label() else {
+            panic!("expected patterns");
+        };
+        assert_eq!(
+            patterns[0].bindings(),
+            Some(&[Some("w".to_string()), None][..])
+        );
+    }
+
+    #[test]
+    fn calling_a_member_parses_as_a_member_call() {
+        let call = expr("Shape.circle(5)");
+        let ExprKind::MemberCall { name, args, .. } = call.kind() else {
+            panic!("expected a member call");
+        };
+        assert_eq!(name, "circle");
+        assert_eq!(args.len(), 1);
     }
 }

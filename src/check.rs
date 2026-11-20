@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    Arg, BinOp, CaseLabel, Decl, EnumDecl, Expr, ExprKind, FuncDecl, Stmt, StmtKind, StructDecl,
-    SwitchCase, UnaryOp,
+    Arg, BinOp, CaseLabel, Decl, EnumDecl, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind,
+    StructDecl, SwitchCase, UnaryOp,
 };
 use crate::tir::{LocalId, TExpr, TFunc, TStmt, TStruct};
 use crate::types::{EnumId, StructId, Ty};
@@ -108,9 +108,27 @@ impl StructSig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CaseSig {
+    name: String,
+    payload: Vec<Ty>,
+}
+
+impl CaseSig {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn payload(&self) -> &[Ty] {
+        &self.payload
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumSig {
     name: String,
-    cases: Vec<String>,
+    cases: Vec<CaseSig>,
+    has_payload: bool,
+    layout: Option<StructId>,
 }
 
 impl EnumSig {
@@ -118,12 +136,12 @@ impl EnumSig {
         &self.name
     }
 
-    pub fn cases(&self) -> &[String] {
+    pub fn cases(&self) -> &[CaseSig] {
         &self.cases
     }
 
     fn case_index(&self, name: &str) -> Option<usize> {
-        self.cases.iter().position(|c| c == name)
+        self.cases.iter().position(|c| c.name == name)
     }
 }
 
@@ -145,10 +163,15 @@ impl Signatures {
             enums: Vec::new(),
             enum_ids: HashMap::new(),
         };
-        for decl in decls {
-            if let Decl::Enum(decl) = decl {
-                sigs.register_enum(decl)?;
-            }
+        let enum_decls: Vec<&EnumDecl> = decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Enum(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        for decl in &enum_decls {
+            sigs.register_enum_name(decl)?;
         }
         let struct_decls: Vec<&StructDecl> = decls
             .iter()
@@ -160,12 +183,18 @@ impl Signatures {
         for decl in &struct_decls {
             sigs.register_struct_name(decl)?;
         }
+        for (index, decl) in enum_decls.iter().enumerate() {
+            sigs.register_enum_cases(EnumId::new(index), decl)?;
+        }
         for decl in &struct_decls {
             let fields = sigs.struct_fields(decl)?;
             sigs.structs.push(StructSig {
                 name: decl.name().to_string(),
                 fields,
             });
+        }
+        for index in 0..enum_decls.len() {
+            sigs.register_enum_layout(EnumId::new(index));
         }
         for decl in decls {
             if let Decl::Func(func) = decl {
@@ -175,7 +204,7 @@ impl Signatures {
         Ok(sigs)
     }
 
-    fn register_enum(&mut self, decl: &EnumDecl) -> CResult<()> {
+    fn register_enum_name(&mut self, decl: &EnumDecl) -> CResult<()> {
         let id = EnumId::new(self.enums.len());
         if self.enum_ids.insert(decl.name().to_string(), id).is_some() {
             return Err(CheckError::at(
@@ -183,21 +212,99 @@ impl Signatures {
                 format!("duplicate type '{}'", decl.name()),
             ));
         }
-        let mut cases: Vec<String> = Vec::new();
-        for case in decl.cases() {
-            if cases.contains(case) {
-                return Err(CheckError::at(
-                    decl.line(),
-                    format!("duplicate case '{case}' in '{}'", decl.name()),
-                ));
-            }
-            cases.push(case.clone());
-        }
         self.enums.push(EnumSig {
             name: decl.name().to_string(),
-            cases,
+            cases: Vec::new(),
+            has_payload: decl.has_payload(),
+            layout: None,
         });
         Ok(())
+    }
+
+    fn register_enum_cases(&mut self, id: EnumId, decl: &EnumDecl) -> CResult<()> {
+        let mut cases: Vec<CaseSig> = Vec::new();
+        for case in decl.cases() {
+            if cases.iter().any(|c| c.name == case.name()) {
+                return Err(CheckError::at(
+                    decl.line(),
+                    format!("duplicate case '{}' in '{}'", case.name(), decl.name()),
+                ));
+            }
+            let payload = case
+                .payload()
+                .iter()
+                .map(|name| self.payload_type(decl, name))
+                .collect::<CResult<Vec<_>>>()?;
+            cases.push(CaseSig {
+                name: case.name().to_string(),
+                payload,
+            });
+        }
+        self.enums[id.index()].cases = cases;
+        Ok(())
+    }
+
+    fn payload_type(&self, decl: &EnumDecl, name: &str) -> CResult<Ty> {
+        if let Some(ty) = Ty::from_builtin_name(name) {
+            return Ok(ty);
+        }
+        match self.enum_ids.get(name).map(|id| &self.enums[id.index()]) {
+            Some(sig) if !sig.has_payload => self.resolve_type(name, decl.line()),
+            Some(_) => Err(CheckError::at(
+                decl.line(),
+                format!("a payload cannot have the type '{name}' yet: it carries values"),
+            )),
+            None if self.struct_ids.contains_key(name) => Err(CheckError::at(
+                decl.line(),
+                format!(
+                    "a payload cannot have a struct type yet: '{name}' in '{}'",
+                    decl.name()
+                ),
+            )),
+            None => Err(CheckError::at(
+                decl.line(),
+                format!("unknown payload type: '{name}' in '{}'", decl.name()),
+            )),
+        }
+    }
+
+    fn register_enum_layout(&mut self, id: EnumId) {
+        let sig = &self.enums[id.index()];
+        if !sig.has_payload {
+            return;
+        }
+        let widest = sig.cases.iter().map(|c| c.payload.len()).max().unwrap_or(0);
+        let mut fields = vec![FieldSig {
+            name: "tag".to_string(),
+            ty: Ty::Int,
+            mutable: false,
+        }];
+        for slot in 0..widest {
+            fields.push(FieldSig {
+                name: format!("payload{slot}"),
+                ty: Ty::Int,
+                mutable: false,
+            });
+        }
+        let layout = StructId::new(self.structs.len());
+        let name = sig.name.clone();
+        self.structs.push(StructSig { name, fields });
+        self.enums[id.index()].layout = Some(layout);
+    }
+
+    pub fn enum_ty(&self, id: EnumId) -> Ty {
+        match self.enums[id.index()].layout {
+            Some(layout) => Ty::Struct(layout),
+            None => Ty::Enum(id),
+        }
+    }
+
+    pub fn enum_of(&self, ty: Ty) -> Option<&EnumSig> {
+        match ty {
+            Ty::Enum(id) => self.enum_sig(id),
+            Ty::Struct(layout) => self.enums.iter().find(|e| e.layout == Some(layout)),
+            _ => None,
+        }
     }
 
     fn register_struct_name(&mut self, decl: &StructDecl) -> CResult<()> {
@@ -224,10 +331,15 @@ impl Signatures {
     fn struct_fields(&self, decl: &StructDecl) -> CResult<Vec<FieldSig>> {
         let mut fields: Vec<FieldSig> = Vec::new();
         for field in decl.fields() {
-            let Some(ty) = Ty::from_builtin_name(field.ty())
-                .or_else(|| self.enum_ids.get(field.ty()).map(|id| Ty::Enum(*id)))
-            else {
-                let reason = if self.struct_ids.contains_key(field.ty()) {
+            let payload_free_enum = self
+                .enum_ids
+                .get(field.ty())
+                .filter(|id| !self.enums[id.index()].has_payload)
+                .map(|id| Ty::Enum(*id));
+            let Some(ty) = Ty::from_builtin_name(field.ty()).or(payload_free_enum) else {
+                let reason = if self.struct_ids.contains_key(field.ty())
+                    || self.enum_ids.contains_key(field.ty())
+                {
                     "a struct field cannot have a struct type yet"
                 } else {
                     "unknown field type"
@@ -296,7 +408,7 @@ impl Signatures {
     pub fn resolve_type(&self, name: &str, line: u32) -> CResult<Ty> {
         Ty::from_builtin_name(name)
             .or_else(|| self.struct_ids.get(name).map(|id| Ty::Struct(*id)))
-            .or_else(|| self.enum_ids.get(name).map(|id| Ty::Enum(*id)))
+            .or_else(|| self.enum_ids.get(name).map(|id| self.enum_ty(*id)))
             .ok_or_else(|| CheckError::at(line, format!("unknown type '{name}'")))
     }
 
@@ -473,23 +585,20 @@ impl FnCx<'_> {
         out: &mut Vec<TStmt>,
     ) -> CResult<()> {
         let subject_value = self.value(subject)?;
-        let Ty::Enum(id) = subject_value.ty() else {
+        let subject_ty = subject_value.ty();
+        let sigs = self.sigs;
+        let Some(sig) = sigs.enum_of(subject_ty) else {
             return Err(CheckError::at(
                 line,
                 format!(
                     "switch is supported only on enums, not {}",
-                    self.sigs.type_name(subject_value.ty())
+                    sigs.type_name(subject_ty)
                 ),
             ));
         };
-        let sigs = self.sigs;
-        let sig = sigs
-            .enum_sig(id)
-            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
         if cases.is_empty() {
             return Err(CheckError::at(line, "a switch needs at least one case"));
         }
-        let subject_ty = subject_value.ty();
         let temporary = LocalId::new(self.locals.len());
         self.locals.push(subject_ty);
         out.push(TStmt::Let {
@@ -501,7 +610,6 @@ impl FnCx<'_> {
         let mut default_body: Option<Vec<TStmt>> = None;
         let mut branches: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
         for (position, case) in cases.iter().enumerate() {
-            let body = self.block(case.body())?;
             match case.label() {
                 CaseLabel::Default => {
                     if position + 1 != cases.len() {
@@ -510,45 +618,28 @@ impl FnCx<'_> {
                             "'default' must be the last case of a switch",
                         ));
                     }
-                    default_body = Some(body);
+                    default_body = Some(self.block(case.body())?);
                 }
                 CaseLabel::Patterns(patterns) => {
                     let mut condition: Option<TExpr> = None;
-                    for pattern in patterns {
-                        if pattern.type_name().is_some_and(|n| n != sig.name()) {
-                            return Err(CheckError::at(
-                                case.line(),
-                                format!("expected a case of '{}'", sig.name()),
-                            ));
-                        }
-                        let index = sig.case_index(pattern.case()).ok_or_else(|| {
-                            CheckError::at(
-                                case.line(),
-                                format!("'{}' has no case '{}'", sig.name(), pattern.case()),
-                            )
-                        })?;
-                        covered[index] = true;
-                        let test = TExpr::Binary {
-                            op: BinOp::Eq,
-                            lhs: Box::new(TExpr::Local(temporary, subject_ty)),
-                            rhs: Box::new(TExpr::EnumCase {
-                                ty: subject_ty,
-                                index,
-                            }),
-                        };
-                        condition = Some(match condition {
-                            None => test,
-                            Some(previous) => TExpr::Binary {
-                                op: BinOp::Or,
-                                lhs: Box::new(previous),
-                                rhs: Box::new(test),
-                            },
-                        });
-                    }
+                    let mut prelude = Vec::new();
+                    self.scopes.push(HashMap::new());
+                    let outcome = self.case_patterns(
+                        case,
+                        patterns,
+                        (sig, temporary, subject_ty),
+                        &mut covered,
+                        &mut condition,
+                        &mut prelude,
+                    );
+                    let body = outcome.and_then(|()| self.block(case.body()));
+                    self.scopes.pop();
+                    let mut body = body?;
+                    prelude.append(&mut body);
                     let Some(condition) = condition else {
                         return Err(CheckError::at(case.line(), "a case needs a pattern"));
                     };
-                    branches.push((condition, body));
+                    branches.push((condition, prelude));
                 }
             }
         }
@@ -559,7 +650,7 @@ impl FnCx<'_> {
                 line,
                 format!(
                     "switch must be exhaustive: missing case '{}'",
-                    sig.cases()[missing]
+                    sig.cases()[missing].name()
                 ),
             ));
         }
@@ -575,6 +666,118 @@ impl FnCx<'_> {
             });
         }
         out.extend(tail.unwrap_or_default());
+        Ok(())
+    }
+
+    fn case_patterns(
+        &mut self,
+        case: &SwitchCase,
+        patterns: &[Pattern],
+        subject: (&EnumSig, LocalId, Ty),
+        covered: &mut [bool],
+        condition: &mut Option<TExpr>,
+        prelude: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let (sig, temporary, subject_ty) = subject;
+        for pattern in patterns {
+            if pattern.type_name().is_some_and(|n| n != sig.name()) {
+                return Err(CheckError::at(
+                    case.line(),
+                    format!("expected a case of '{}'", sig.name()),
+                ));
+            }
+            let index = sig.case_index(pattern.case()).ok_or_else(|| {
+                CheckError::at(
+                    case.line(),
+                    format!("'{}' has no case '{}'", sig.name(), pattern.case()),
+                )
+            })?;
+            covered[index] = true;
+            if let Some(bindings) = pattern.bindings() {
+                if patterns.len() > 1 {
+                    return Err(CheckError::at(
+                        case.line(),
+                        "a case with bindings must have a single pattern",
+                    ));
+                }
+                self.bind_payload(
+                    case.line(),
+                    sig,
+                    index,
+                    (temporary, subject_ty),
+                    bindings,
+                    prelude,
+                )?;
+            }
+            let tag = if sig.has_payload {
+                TExpr::Field {
+                    base: Box::new(TExpr::Local(temporary, subject_ty)),
+                    index: 0,
+                    ty: Ty::Int,
+                }
+            } else {
+                TExpr::Local(temporary, subject_ty)
+            };
+            let test = TExpr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(tag),
+                rhs: Box::new(self.case_tag(sig, subject_ty, index)),
+            };
+            *condition = Some(match condition.take() {
+                None => test,
+                Some(previous) => TExpr::Binary {
+                    op: BinOp::Or,
+                    lhs: Box::new(previous),
+                    rhs: Box::new(test),
+                },
+            });
+        }
+        Ok(())
+    }
+
+    fn case_tag(&self, sig: &EnumSig, ty: Ty, index: usize) -> TExpr {
+        if sig.has_payload {
+            TExpr::Int(index as i64)
+        } else {
+            TExpr::EnumCase { ty, index }
+        }
+    }
+
+    fn bind_payload(
+        &mut self,
+        line: u32,
+        sig: &EnumSig,
+        index: usize,
+        subject: (LocalId, Ty),
+        bindings: &[Option<String>],
+        prelude: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let case = &sig.cases()[index];
+        if bindings.len() != case.payload().len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{}.{}' carries {} value(s), but the pattern binds {}",
+                    sig.name(),
+                    case.name(),
+                    case.payload().len(),
+                    bindings.len()
+                ),
+            ));
+        }
+        let (temporary, subject_ty) = subject;
+        for (slot, (binding, ty)) in bindings.iter().zip(case.payload()).enumerate() {
+            let Some(name) = binding else { continue };
+            let local = self.declare(line, name, *ty, false)?;
+            prelude.push(TStmt::Let {
+                local,
+                init: TExpr::Field {
+                    base: Box::new(TExpr::Local(temporary, subject_ty)),
+                    index: 1 + slot,
+                    ty: *ty,
+                },
+            });
+        }
         Ok(())
     }
 
@@ -750,6 +953,12 @@ impl FnCx<'_> {
                 format!("a value of type {} has no members", self.sigs.type_name(ty)),
             ));
         };
+        if self.sigs.enum_of(ty).is_some() {
+            return Err(CheckError::at(
+                line,
+                format!("a value of type {} has no members", self.sigs.type_name(ty)),
+            ));
+        }
         let sig = self
             .sigs
             .struct_sig(id)
@@ -899,6 +1108,13 @@ impl FnCx<'_> {
             ExprKind::Member { base, name } if self.names_enum(base) => {
                 self.enum_case(line, base, name)
             }
+            ExprKind::MemberCall { base, name, args } if self.names_enum(base) => {
+                self.enum_construct(line, base, name, args)
+            }
+            ExprKind::MemberCall { .. } => Err(CheckError::at(
+                line,
+                "only an enum case can be called through a type name",
+            )),
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 let (index, field) = self.member_of(line, base.ty(), name)?;
@@ -925,26 +1141,86 @@ impl FnCx<'_> {
         }
     }
 
-    fn enum_case(&self, line: u32, base: &Expr, name: &str) -> CResult<TExpr> {
+    fn enum_named<'s>(
+        sigs: &'s Signatures,
+        line: u32,
+        base: &Expr,
+    ) -> CResult<(EnumId, &'s EnumSig)> {
         let ExprKind::Ident(type_name) = base.kind() else {
             return Err(CheckError::at(line, "internal error: not an enum name"));
         };
-        let id = self
-            .sigs
+        let id = sigs
             .enum_ids
             .get(type_name)
             .copied()
             .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
-        let sig = self
-            .sigs
+        let sig = sigs
             .enum_sig(id)
             .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
-        let index = sig
-            .case_index(name)
-            .ok_or_else(|| CheckError::at(line, format!("'{type_name}' has no case '{name}'")))?;
-        Ok(TExpr::EnumCase {
-            ty: Ty::Enum(id),
-            index,
+        Ok((id, sig))
+    }
+
+    fn enum_case(&self, line: u32, base: &Expr, name: &str) -> CResult<TExpr> {
+        let (id, sig) = Self::enum_named(self.sigs, line, base)?;
+        let index = sig.case_index(name).ok_or_else(|| {
+            CheckError::at(line, format!("'{}' has no case '{name}'", sig.name()))
+        })?;
+        if !sig.cases()[index].payload().is_empty() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{}.{name}' carries values and must be called with them",
+                    sig.name()
+                ),
+            ));
+        }
+        let ty = self.sigs.enum_ty(id);
+        if sig.has_payload {
+            Ok(TExpr::StructInit {
+                ty,
+                args: vec![TExpr::Int(index as i64)],
+            })
+        } else {
+            Ok(TExpr::EnumCase { ty, index })
+        }
+    }
+
+    fn enum_construct(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let (id, sig) = Self::enum_named(sigs, line, base)?;
+        let index = sig.case_index(name).ok_or_else(|| {
+            CheckError::at(line, format!("'{}' has no case '{name}'", sig.name()))
+        })?;
+        let payload = sig.cases()[index].payload();
+        if args.len() != payload.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{}.{name}' takes {} value(s), but {} were given",
+                    sig.name(),
+                    payload.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut values = vec![TExpr::Int(index as i64)];
+        for (arg, expected) in args.iter().zip(payload) {
+            if arg.label().is_some() {
+                return Err(CheckError::at(line, "a payload value cannot be labeled"));
+            }
+            let value = self.value(arg.value())?;
+            self.expect(line, *expected, value.ty())?;
+            values.push(value);
+        }
+        Ok(TExpr::StructInit {
+            ty: sigs.enum_ty(id),
+            args: values,
         })
     }
 
@@ -1483,5 +1759,112 @@ mod tests {
     #[test]
     fn an_enum_cannot_repeat_a_case() {
         assert!(check_all("enum A { case x, x }").is_err());
+    }
+
+    const SHAPE: &str =
+        "enum Shape { case circle(Int), rect(Int, Int), label(String, Bool), empty }\n";
+
+    fn with_shape(body: &str) -> String {
+        format!("{SHAPE}func main() {{\n{body}\n}}")
+    }
+
+    #[test]
+    fn a_payload_case_is_built_by_calling_it_with_its_values() {
+        let funcs = check_all(&with_shape(
+            "let a = Shape.circle(1)\nlet b = Shape.rect(2, 3)\nlet c = Shape.label(\"x\", true)\nlet d = Shape.empty",
+        ))
+        .unwrap();
+        let types = funcs[0].locals();
+        assert!(types.iter().all(|t| *t == types[0]));
+        assert!(types[0].is_struct());
+    }
+
+    #[test]
+    fn a_payload_case_with_the_wrong_values_is_rejected() {
+        assert!(check_all(&with_shape("let a = Shape.circle(true)")).is_err());
+        assert!(check_all(&with_shape("let a = Shape.rect(1)")).is_err());
+        assert!(check_all(&with_shape("let a = Shape.circle(x: 1)")).is_err());
+    }
+
+    #[test]
+    fn a_case_that_carries_values_cannot_be_used_without_them() {
+        let (_, message) = rejected_at(&with_shape("let a = Shape.circle"));
+        assert!(message.contains("must be called"), "{message}");
+    }
+
+    #[test]
+    fn calling_a_case_that_carries_nothing_is_rejected() {
+        assert!(check_all(&with_shape("let a = Shape.empty(1)")).is_err());
+    }
+
+    #[test]
+    fn a_member_call_on_something_other_than_an_enum_is_rejected() {
+        assert!(check_all(&with_shape("let a = 1\nlet b = a.foo(2)")).is_err());
+    }
+
+    #[test]
+    fn a_payload_enum_value_has_no_members_and_cannot_be_compared_or_printed() {
+        assert!(check_all(&with_shape("let a = Shape.circle(1)\nprint(a.tag)")).is_err());
+        assert!(check_all(&with_shape("let a = Shape.circle(1)\nprint(a == a)")).is_err());
+        assert!(check_all(&with_shape("print(Shape.empty)")).is_err());
+    }
+
+    #[test]
+    fn a_pattern_binds_the_payload_values_with_their_types() {
+        let body = "switch Shape.rect(1, 2) {\ncase .circle(let r): print(r)\ncase .rect(let w, _): print(w)\ncase .label(let t, let b): print(t)\nprint(b)\ncase .empty: print(0)\n}";
+        assert!(check_all(&with_shape(body)).is_ok());
+    }
+
+    #[test]
+    fn a_bound_value_is_not_visible_outside_its_case() {
+        let body = "switch Shape.circle(1) {\ncase .circle(let r): print(r)\ndefault: print(r)\n}";
+        assert!(check_all(&with_shape(body)).is_err());
+    }
+
+    #[test]
+    fn a_pattern_must_bind_every_value_or_none() {
+        let few = "switch Shape.rect(1, 2) {\ncase .rect(let w): print(w)\ndefault: print(0)\n}";
+        assert!(check_all(&with_shape(few)).is_err());
+        let none = "switch Shape.rect(1, 2) {\ncase .rect: print(1)\ndefault: print(0)\n}";
+        assert!(check_all(&with_shape(none)).is_ok());
+    }
+
+    #[test]
+    fn a_case_with_bindings_must_have_a_single_pattern() {
+        let body = "switch Shape.rect(1, 2) {\ncase .circle(let r), .empty: print(r)\ndefault: print(0)\n}";
+        assert!(check_all(&with_shape(body)).is_err());
+    }
+
+    #[test]
+    fn a_payload_switch_must_still_be_exhaustive() {
+        let body = "switch Shape.empty {\ncase .circle: print(1)\ncase .rect: print(2)\ncase .empty: print(3)\n}";
+        let (_, message) = rejected_at(&with_shape(body));
+        assert!(message.contains("missing case 'label'"), "{message}");
+    }
+
+    #[test]
+    fn a_payload_cannot_be_a_struct_or_an_enum_that_carries_values() {
+        assert!(check_all("struct P { var x: Int }\nenum E { case a(P) }").is_err());
+        assert!(check_all("enum A { case x(Int) }\nenum B { case y(A) }").is_err());
+        assert!(check_all("enum E { case a(Missing) }").is_err());
+    }
+
+    #[test]
+    fn a_payload_may_be_an_enum_without_values() {
+        assert!(check_all("enum Color { case red }\nenum E { case a(Color) }").is_ok());
+    }
+
+    #[test]
+    fn a_struct_field_cannot_be_an_enum_that_carries_values() {
+        let source = format!("{SHAPE}struct P {{ var s: Shape }}");
+        assert!(check_all(&source).is_err());
+    }
+
+    #[test]
+    fn a_payload_enum_can_be_a_parameter_a_result_and_an_annotation() {
+        let source = format!(
+            "{SHAPE}func make() -> Shape {{ return Shape.circle(1) }}\nfunc use(_ s: Shape) {{ let t: Shape = s }}\nfunc main() {{ use(make()) }}"
+        );
+        assert!(check_all(&source).is_ok());
     }
 }

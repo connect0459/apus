@@ -115,15 +115,39 @@ impl StructDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EnumCaseDecl {
+    name: String,
+    payload: Vec<TypeName>,
+}
+
+impl EnumCaseDecl {
+    pub fn new(name: String, payload: Vec<TypeName>) -> Self {
+        Self { name, payload }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn payload(&self) -> &[TypeName] {
+        &self.payload
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
     line: u32,
     name: String,
-    cases: Vec<String>,
+    cases: Vec<EnumCaseDecl>,
 }
 
 impl EnumDecl {
-    pub fn new(line: u32, name: String, cases: Vec<String>) -> Self {
+    pub fn new(line: u32, name: String, cases: Vec<EnumCaseDecl>) -> Self {
         Self { line, name, cases }
+    }
+
+    pub fn has_payload(&self) -> bool {
+        self.cases.iter().any(|c| !c.payload.is_empty())
     }
 
     pub fn line(&self) -> u32 {
@@ -134,7 +158,7 @@ impl EnumDecl {
         &self.name
     }
 
-    pub fn cases(&self) -> &[String] {
+    pub fn cases(&self) -> &[EnumCaseDecl] {
         &self.cases
     }
 }
@@ -260,11 +284,24 @@ pub enum CaseLabel {
 pub struct Pattern {
     type_name: Option<TypeName>,
     case: String,
+    bindings: Option<Vec<Option<String>>>,
 }
 
 impl Pattern {
-    pub fn new(type_name: Option<TypeName>, case: String) -> Self {
-        Self { type_name, case }
+    pub fn new(
+        type_name: Option<TypeName>,
+        case: String,
+        bindings: Option<Vec<Option<String>>>,
+    ) -> Self {
+        Self {
+            type_name,
+            case,
+            bindings,
+        }
+    }
+
+    pub fn bindings(&self) -> Option<&[Option<String>]> {
+        self.bindings.as_deref()
     }
 
     pub fn type_name(&self) -> Option<&str> {
@@ -329,6 +366,11 @@ pub enum ExprKind {
     Member {
         base: Box<Expr>,
         name: String,
+    },
+    MemberCall {
+        base: Box<Expr>,
+        name: String,
+        args: Vec<Arg>,
     },
 }
 
