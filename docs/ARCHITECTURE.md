@@ -32,6 +32,8 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`entry`, `cache` and `stamp`** hold the persistent state under `.apus-cache/` next to the output. `entry` serializes one function. `cache` keeps entries in one pack file and saves only the entries the latest build used, so the cache never outgrows the program. `stamp` records the last build (source hash, object hash and the output file's size and modification time) so an unchanged build can stop immediately.
 
+**`memo`** stores, next to the cache, which function key each item hash produced in the last successful build and the signature digest it was built under. The driver trusts it only while the compiler stamp and the digest match, and then skips parsing and checking of functions it still knows.
+
 **`link`** runs the system linker on the object file: `ld` called directly with the SDK location cached, falling back to `cc`.
 
 **`driver`** wires the stages together and reports errors with their line. `src/main.rs` is the command line on top of it.
