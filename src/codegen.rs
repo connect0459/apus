@@ -1,17 +1,26 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use cranelift_codegen::Context;
+use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::immediates::Imm64;
 use cranelift_codegen::ir::{
-    AbiParam, Block, BlockArg, InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind,
-    TrapCode, Type, Value, types,
+    AbiParam, Block, BlockArg, ExtFuncData, ExternalName, FuncRef, GlobalValue, GlobalValueData,
+    InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind, TrapCode, Type,
+    UserExternalName, Value, types,
 };
+use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names};
+use cranelift_module::{
+    DataDescription, DataId, FuncId, Linkage, Module, ModuleReloc, ModuleRelocTarget,
+    default_libcall_names,
+};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::ast::{BinOp, UnaryOp};
+use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
 use crate::tir::{TExpr, TFunc, TStmt, TStruct};
 use crate::types::Ty;
@@ -19,6 +28,18 @@ use crate::types::Ty;
 const VARIADIC_PADDING: usize = 7;
 const FIELD_SIZE: u32 = 8;
 const UNREACHABLE: TrapCode = TrapCode::unwrap_user(1);
+const NAMESPACE_FUNC: u32 = 0;
+const NAMESPACE_DATA: u32 = 1;
+
+pub const ENTRY_SYMBOL: &str = "apus_main";
+const RUNTIME_FORMAT_INT: &str = "apus_format_int";
+const RUNTIME_TRUE: &str = "apus_true";
+const RUNTIME_FALSE: &str = "apus_false";
+const RUNTIME_DATA: [(&str, &[u8]); 3] = [
+    (RUNTIME_FORMAT_INT, b"%ld\n\0"),
+    (RUNTIME_TRUE, b"true\0"),
+    (RUNTIME_FALSE, b"false\0"),
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodegenError {
@@ -41,43 +62,158 @@ impl<E: std::fmt::Display> From<E> for CodegenError {
 
 type GResult<T> = Result<T, CodegenError>;
 
-pub fn compile(funcs: &[TFunc], structs: &[TStruct]) -> GResult<Vec<u8>> {
-    let mut module = new_module()?;
-    let runtime = Runtime::declare(&mut module)?;
-    let mut pool = StringPool::default();
-    let mut ids = HashMap::new();
-    for func in funcs {
-        let sig = signature(&module, func.param_types(), func.ret());
-        let id = module.declare_function(&symbol(func.name()), Linkage::Export, &sig)?;
-        ids.insert(func.name().to_string(), id);
-    }
-    let mut ctx = module.make_context();
-    let mut builder_ctx = FunctionBuilderContext::new();
-    for func in funcs {
-        ctx.func.signature = signature(&module, func.param_types(), func.ret());
-        let env = Env {
-            runtime: &runtime,
-            ids: &ids,
-            structs,
-        };
-        emit_function(
-            &mut module,
-            &mut ctx,
-            &mut builder_ctx,
-            &mut pool,
-            env,
-            func,
-        )?;
-        let id = ids[func.name()];
-        module.define_function(id, &mut ctx)?;
-        module.clear_context(&mut ctx);
-    }
-    define_entry(&mut module, &mut ctx, &mut builder_ctx, &ids)?;
-    Ok(module.finish().emit()?)
+pub fn symbol(name: &str) -> String {
+    format!("apus_{name}")
 }
 
-fn symbol(name: &str) -> String {
-    format!("apus_{name}")
+pub fn compile(funcs: &[TFunc], structs: &[TStruct]) -> GResult<Vec<u8>> {
+    let backend = Backend::new()?;
+    let entries = funcs
+        .iter()
+        .map(|func| backend.compile_function(func, structs))
+        .collect::<GResult<Vec<_>>>()?;
+    backend.assemble(&entries)
+}
+
+pub struct Backend {
+    isa: Arc<dyn TargetIsa>,
+}
+
+impl Backend {
+    pub fn new() -> GResult<Self> {
+        let mut flags = settings::builder();
+        flags.set("opt_level", "none")?;
+        flags.set("is_pic", "true")?;
+        let isa = cranelift_native::builder()?.finish(settings::Flags::new(flags))?;
+        Ok(Self { isa })
+    }
+
+    pub fn compile_function(&self, func: &TFunc, structs: &[TStruct]) -> GResult<FuncEntry> {
+        let mut ctx = Context::new();
+        let mut builder_ctx = FunctionBuilderContext::new();
+        self.compile_with(&mut ctx, &mut builder_ctx, func, structs)
+    }
+
+    fn compile_with(
+        &self,
+        ctx: &mut Context,
+        builder_ctx: &mut FunctionBuilderContext,
+        func: &TFunc,
+        structs: &[TStruct],
+    ) -> GResult<FuncEntry> {
+        ctx.clear();
+        let call_conv = self.isa.default_call_conv();
+        ctx.func.signature = signature(call_conv, func.param_types(), func.ret());
+        let (symbols, literals) = emit_function(&*self.isa, ctx, builder_ctx, structs, func)?;
+        ctx.compile(&*self.isa, &mut ControlPlane::default())
+            .map_err(|e| CodegenError::from(format!("{:?}", e.inner)))?;
+        let compiled = ctx
+            .compiled_code()
+            .ok_or_else(|| CodegenError::from("compilation produced no code"))?;
+        let alignment = u64::from(compiled.buffer.min_alignment);
+        let code = compiled.buffer.data().to_vec();
+        let relocs = compiled
+            .buffer
+            .relocs()
+            .iter()
+            .map(|reloc| entry_reloc(reloc, &ctx.func, &symbols))
+            .collect::<GResult<Vec<_>>>()?;
+        Ok(FuncEntry::new(
+            symbol(func.name()),
+            alignment,
+            code,
+            relocs,
+            literals,
+        ))
+    }
+
+    pub fn assemble(&self, entries: &[FuncEntry]) -> GResult<Vec<u8>> {
+        let builder = ObjectBuilder::new(self.isa.clone(), "apus", default_libcall_names())?;
+        let mut module = ObjectModule::new(builder);
+        let mut funcs: HashMap<String, FuncId> = HashMap::new();
+        let mut data: HashMap<String, DataId> = HashMap::new();
+        let placeholder = module.make_signature();
+        for name in ["printf", "puts"] {
+            let id = module.declare_function(name, Linkage::Import, &placeholder)?;
+            funcs.insert(name.to_string(), id);
+        }
+        for (name, bytes) in RUNTIME_DATA {
+            data.insert(name.to_string(), define_text(&mut module, name, bytes)?);
+        }
+        for entry in entries {
+            let id = module.declare_function(entry.symbol(), Linkage::Export, &placeholder)?;
+            funcs.insert(entry.symbol().to_string(), id);
+            for literal in entry.literals() {
+                if !data.contains_key(literal.name()) {
+                    let id = define_text(&mut module, literal.name(), literal.bytes())?;
+                    data.insert(literal.name().to_string(), id);
+                }
+            }
+        }
+        for entry in entries {
+            let relocs = entry
+                .relocs()
+                .iter()
+                .map(|r| module_reloc(r, &funcs, &data))
+                .collect::<GResult<Vec<_>>>()?;
+            module.define_function_bytes(
+                funcs[entry.symbol()],
+                entry.alignment(),
+                entry.code(),
+                &relocs,
+            )?;
+        }
+        define_entry(&mut module, &self.isa, &funcs)?;
+        Ok(module.finish().emit()?)
+    }
+}
+
+fn module_reloc(
+    reloc: &EntryReloc,
+    funcs: &HashMap<String, FuncId>,
+    data: &HashMap<String, DataId>,
+) -> GResult<ModuleReloc> {
+    let name = match reloc.target() {
+        SymbolRef::Func(name) => {
+            let id = funcs
+                .get(name)
+                .ok_or_else(|| CodegenError::from(format!("unresolved function '{name}'")))?;
+            ModuleRelocTarget::user(NAMESPACE_FUNC, id.as_u32())
+        }
+        SymbolRef::Data(name) => {
+            let id = data
+                .get(name)
+                .ok_or_else(|| CodegenError::from(format!("unresolved data '{name}'")))?;
+            ModuleRelocTarget::user(NAMESPACE_DATA, id.as_u32())
+        }
+    };
+    Ok(ModuleReloc {
+        offset: reloc.offset(),
+        kind: reloc.kind(),
+        name,
+        addend: reloc.addend(),
+    })
+}
+
+fn entry_reloc(
+    reloc: &cranelift_codegen::MachReloc,
+    func: &cranelift_codegen::ir::Function,
+    symbols: &[SymbolRef],
+) -> GResult<EntryReloc> {
+    let module_reloc = ModuleReloc::from_mach_reloc(reloc, func, FuncId::from_u32(0));
+    let ModuleRelocTarget::User { index, .. } = module_reloc.name else {
+        return Err(CodegenError::from("unsupported relocation target"));
+    };
+    let target = symbols
+        .get(index as usize)
+        .cloned()
+        .ok_or_else(|| CodegenError::from("relocation refers to an unknown symbol"))?;
+    Ok(EntryReloc::new(
+        module_reloc.offset,
+        module_reloc.kind,
+        target,
+        module_reloc.addend,
+    ))
 }
 
 fn clif_type(ty: Ty) -> Option<Type> {
@@ -96,8 +232,8 @@ fn return_type(ret: Ty) -> Option<Type> {
     }
 }
 
-fn signature(module: &ObjectModule, params: &[Ty], ret: Ty) -> Signature {
-    let mut sig = module.make_signature();
+fn signature(call_conv: cranelift_codegen::isa::CallConv, params: &[Ty], ret: Ty) -> Signature {
+    let mut sig = Signature::new(call_conv);
     if ret.is_struct() {
         sig.params.push(AbiParam::new(types::I64));
     }
@@ -111,66 +247,6 @@ fn signature(module: &ObjectModule, params: &[Ty], ret: Ty) -> Signature {
     sig
 }
 
-fn new_module() -> GResult<ObjectModule> {
-    let mut flags = settings::builder();
-    flags.set("opt_level", "none")?;
-    flags.set("is_pic", "true")?;
-    let isa = cranelift_native::builder()?.finish(settings::Flags::new(flags))?;
-    let builder = ObjectBuilder::new(isa, "apus", default_libcall_names())?;
-    Ok(ObjectModule::new(builder))
-}
-
-#[derive(Default)]
-struct StringPool {
-    literals: HashMap<u64, DataId>,
-}
-
-impl StringPool {
-    fn intern(&mut self, module: &mut ObjectModule, text: &str) -> GResult<DataId> {
-        let mut bytes = text.as_bytes().to_vec();
-        bytes.push(0);
-        let mut hasher = Fnv1a::new();
-        hasher.write(&bytes);
-        let key = hasher.finish();
-        if let Some(id) = self.literals.get(&key) {
-            return Ok(*id);
-        }
-        let id = define_text(module, &format!("apus_str_{key:016x}"), &bytes)?;
-        self.literals.insert(key, id);
-        Ok(id)
-    }
-}
-
-struct Runtime {
-    printf: FuncId,
-    puts: FuncId,
-    format_int: DataId,
-    text_true: DataId,
-    text_false: DataId,
-}
-
-impl Runtime {
-    fn declare(module: &mut ObjectModule) -> GResult<Self> {
-        let mut printf_sig = module.make_signature();
-        for _ in 0..(2 + VARIADIC_PADDING) {
-            printf_sig.params.push(AbiParam::new(types::I64));
-        }
-        printf_sig.returns.push(AbiParam::new(types::I32));
-        let printf = module.declare_function("printf", Linkage::Import, &printf_sig)?;
-        let mut puts_sig = module.make_signature();
-        puts_sig.params.push(AbiParam::new(types::I64));
-        puts_sig.returns.push(AbiParam::new(types::I32));
-        let puts = module.declare_function("puts", Linkage::Import, &puts_sig)?;
-        Ok(Self {
-            printf,
-            puts,
-            format_int: define_text(module, "apus_format_int", b"%ld\n\0")?,
-            text_true: define_text(module, "apus_true", b"true\0")?,
-            text_false: define_text(module, "apus_false", b"false\0")?,
-        })
-    }
-}
-
 fn define_text(module: &mut ObjectModule, name: &str, bytes: &[u8]) -> GResult<DataId> {
     let id = module.declare_data(name, Linkage::Local, false, false)?;
     let mut data = DataDescription::new();
@@ -179,22 +255,21 @@ fn define_text(module: &mut ObjectModule, name: &str, bytes: &[u8]) -> GResult<D
     Ok(id)
 }
 
-#[derive(Clone, Copy)]
-struct Env<'e> {
-    runtime: &'e Runtime,
-    ids: &'e HashMap<String, FuncId>,
-    structs: &'e [TStruct],
+#[derive(Default)]
+struct Symbols {
+    table: Vec<SymbolRef>,
+    funcs: HashMap<String, FuncRef>,
+    data: HashMap<String, GlobalValue>,
 }
 
 fn emit_function(
-    module: &mut ObjectModule,
+    isa: &dyn TargetIsa,
     ctx: &mut Context,
     builder_ctx: &mut FunctionBuilderContext,
-    pool: &mut StringPool,
-    env: Env,
+    structs: &[TStruct],
     func: &TFunc,
-) -> GResult<()> {
-    let target = module.target_config();
+) -> GResult<(Vec<SymbolRef>, Vec<Literal>)> {
+    let target = isa.frontend_config();
     let mut builder = FunctionBuilder::new(&mut ctx.func, builder_ctx);
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -215,14 +290,15 @@ fn emit_function(
         builder.def_var(*var, value);
     }
     let mut emitter = Emitter {
-        module,
-        pool,
-        env,
+        call_conv: isa.default_call_conv(),
+        structs,
         builder,
         vars,
         local_types: func.locals().to_vec(),
         ret: func.ret(),
         sret,
+        symbols: Symbols::default(),
+        literals: Vec::new(),
     };
     let terminated = emitter.stmts(func.body())?;
     if !terminated {
@@ -233,19 +309,26 @@ fn emit_function(
         }
     }
     emitter.builder.seal_all_blocks();
-    emitter.builder.finalize(target);
-    Ok(())
+    let Emitter {
+        builder,
+        symbols,
+        literals,
+        ..
+    } = emitter;
+    builder.finalize(target);
+    Ok((symbols.table, literals))
 }
 
-struct Emitter<'m, 'f> {
-    module: &'m mut ObjectModule,
-    pool: &'m mut StringPool,
-    env: Env<'m>,
+struct Emitter<'a, 'f> {
+    call_conv: cranelift_codegen::isa::CallConv,
+    structs: &'a [TStruct],
     builder: FunctionBuilder<'f>,
     vars: Vec<Variable>,
     local_types: Vec<Ty>,
     ret: Ty,
     sret: Option<Value>,
+    symbols: Symbols,
+    literals: Vec<Literal>,
 }
 
 fn field_offset(index: usize) -> i32 {
@@ -253,10 +336,76 @@ fn field_offset(index: usize) -> i32 {
 }
 
 impl Emitter<'_, '_> {
+    fn import_func(&mut self, name: &str, sig: Signature, colocated: bool) -> FuncRef {
+        if let Some(existing) = self.symbols.funcs.get(name) {
+            return *existing;
+        }
+        let index = u32::try_from(self.symbols.table.len()).unwrap_or(u32::MAX);
+        self.symbols.table.push(SymbolRef::Func(name.to_string()));
+        let signature = self.builder.func.import_signature(sig);
+        let user = self
+            .builder
+            .func
+            .declare_imported_user_function(UserExternalName {
+                namespace: NAMESPACE_FUNC,
+                index,
+            });
+        let func_ref = self.builder.func.import_function(ExtFuncData {
+            name: ExternalName::user(user),
+            signature,
+            colocated,
+            patchable: false,
+        });
+        self.symbols.funcs.insert(name.to_string(), func_ref);
+        func_ref
+    }
+
+    fn import_data(&mut self, name: &str) -> GlobalValue {
+        if let Some(existing) = self.symbols.data.get(name) {
+            return *existing;
+        }
+        let index = u32::try_from(self.symbols.table.len()).unwrap_or(u32::MAX);
+        self.symbols.table.push(SymbolRef::Data(name.to_string()));
+        let user = self
+            .builder
+            .func
+            .declare_imported_user_function(UserExternalName {
+                namespace: NAMESPACE_DATA,
+                index,
+            });
+        let global = self
+            .builder
+            .func
+            .create_global_value(GlobalValueData::Symbol {
+                name: ExternalName::user(user),
+                offset: Imm64::new(0),
+                colocated: true,
+                tls: false,
+            });
+        self.symbols.data.insert(name.to_string(), global);
+        global
+    }
+
+    fn data_address(&mut self, name: &str) -> Value {
+        let global = self.import_data(name);
+        self.builder.ins().symbol_value(types::I64, global)
+    }
+
+    fn string_address(&mut self, text: &str) -> Value {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0);
+        let mut hasher = Fnv1a::new();
+        hasher.write(&bytes);
+        let name = format!("apus_str_{:016x}", hasher.finish());
+        if !self.literals.iter().any(|l| l.name() == name) {
+            self.literals.push(Literal::new(name.clone(), bytes));
+        }
+        self.data_address(&name)
+    }
+
     fn struct_fields(&self, ty: Ty) -> GResult<&[Ty]> {
         match ty {
             Ty::Struct(id) => self
-                .env
                 .structs
                 .get(id.index())
                 .map(TStruct::fields)
@@ -476,16 +625,14 @@ impl Emitter<'_, '_> {
         Ok(())
     }
 
-    fn data_address(&mut self, id: DataId) -> Value {
-        let global = self.module.declare_data_in_func(id, self.builder.func);
-        self.builder.ins().symbol_value(types::I64, global)
-    }
-
     fn print_int(&mut self, value: Value) {
-        let format = self.data_address(self.env.runtime.format_int);
-        let printf = self
-            .module
-            .declare_func_in_func(self.env.runtime.printf, self.builder.func);
+        let format = self.data_address(RUNTIME_FORMAT_INT);
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..(2 + VARIADIC_PADDING) {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I32));
+        let printf = self.import_func("printf", sig, false);
         let zero = self.builder.ins().iconst(types::I64, 0);
         let mut args = vec![format];
         args.extend(std::iter::repeat_n(zero, VARIADIC_PADDING));
@@ -494,16 +641,17 @@ impl Emitter<'_, '_> {
     }
 
     fn print_bool(&mut self, value: Value) {
-        let yes = self.data_address(self.env.runtime.text_true);
-        let no = self.data_address(self.env.runtime.text_false);
+        let yes = self.data_address(RUNTIME_TRUE);
+        let no = self.data_address(RUNTIME_FALSE);
         let text = self.builder.ins().select(value, yes, no);
         self.puts(text);
     }
 
     fn puts(&mut self, text: Value) {
-        let puts = self
-            .module
-            .declare_func_in_func(self.env.runtime.puts, self.builder.func);
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I32));
+        let puts = self.import_func("puts", sig, false);
         self.builder.ins().call(puts, &[text]);
     }
 
@@ -516,10 +664,7 @@ impl Emitter<'_, '_> {
         let value = match expr {
             TExpr::Int(n) => self.builder.ins().iconst(types::I64, *n),
             TExpr::Bool(b) => self.builder.ins().iconst(types::I8, i64::from(*b)),
-            TExpr::Str(text) => {
-                let id = self.pool.intern(self.module, text)?;
-                self.data_address(id)
-            }
+            TExpr::Str(text) => self.string_address(text),
             TExpr::Local(local, _) => self.builder.use_var(self.vars[local.index()]),
             TExpr::Unary { op, expr } => {
                 let operand = self.value(expr)?;
@@ -619,11 +764,9 @@ impl Emitter<'_, '_> {
     }
 
     fn call(&mut self, callee: &str, args: &[TExpr], ret: Ty) -> GResult<Option<Value>> {
-        let id = *self
-            .env
-            .ids
-            .get(callee)
-            .ok_or_else(|| CodegenError::from(format!("unknown function '{callee}'")))?;
+        let param_types: Vec<Ty> = args.iter().map(TExpr::ty).collect();
+        let sig = signature(self.call_conv, &param_types, ret);
+        let func_ref = self.import_func(&symbol(callee), sig, true);
         let result_slot = if ret.is_struct() {
             Some(self.alloc_struct(ret)?)
         } else {
@@ -633,7 +776,6 @@ impl Emitter<'_, '_> {
         for arg in args {
             values.push(self.value(arg)?);
         }
-        let func_ref = self.module.declare_func_in_func(id, self.builder.func);
         let call = self.builder.ins().call(func_ref, &values);
         Ok(result_slot.or_else(|| self.builder.inst_results(call).first().copied()))
     }
@@ -653,19 +795,19 @@ fn comparison(op: BinOp) -> Option<IntCC> {
 
 fn define_entry(
     module: &mut ObjectModule,
-    ctx: &mut Context,
-    builder_ctx: &mut FunctionBuilderContext,
-    ids: &HashMap<String, FuncId>,
+    isa: &Arc<dyn TargetIsa>,
+    funcs: &HashMap<String, FuncId>,
 ) -> GResult<()> {
-    let main_id = *ids
-        .get("main")
+    let main_id = *funcs
+        .get(ENTRY_SYMBOL)
         .ok_or_else(|| CodegenError::from("no 'main' function"))?;
     let mut sig = module.make_signature();
     sig.returns.push(AbiParam::new(types::I32));
     let entry_id = module.declare_function("main", Linkage::Export, &sig)?;
+    let mut ctx = Context::new();
     ctx.func.signature = sig;
-    let target = module.target_config();
-    let mut builder = FunctionBuilder::new(&mut ctx.func, builder_ctx);
+    let mut builder_ctx = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
     let block = builder.create_block();
     builder.switch_to_block(block);
     let callee = module.declare_func_in_func(main_id, builder.func);
@@ -673,8 +815,7 @@ fn define_entry(
     let status = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[status]);
     builder.seal_all_blocks();
-    builder.finalize(target);
-    module.define_function(entry_id, ctx)?;
-    module.clear_context(ctx);
+    builder.finalize(isa.frontend_config());
+    module.define_function(entry_id, &mut ctx)?;
     Ok(())
 }
