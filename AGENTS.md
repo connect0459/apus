@@ -9,7 +9,7 @@ This is a Rust project: **apus**, an experimental compiler for a Swift subset (a
 This project is intended for open-source distribution. All of the following must be written in **English**:
 
 - Commit messages
-- Documentation (including `AGENTS.md`, `README.md`, ADRs, etc.)
+- Documentation (including `AGENTS.md`, `README.md`, etc.)
 - Test names
 - Error messages
 - Variable/function names
@@ -22,7 +22,7 @@ The compiler is a pipeline of layers; each layer depends only on the layers befo
 lexer → items (split and hash) → parser → check → codegen → cache → driver (CLI)
 ```
 
-Respect these layer boundaries: never introduce a dependency that points backwards (e.g., the lexer depending on the parser). See `docs/ARCHITECTURE.md` for the bird's-eye view and `docs/adrs/` for the reasoning behind significant design choices.
+Respect these layer boundaries: never introduce a dependency that points backwards (e.g., the lexer depending on the parser). See `docs/ARCHITECTURE.md` for the bird's-eye view. `docs/todo.md` holds the milestones, the open questions and the record of design decisions; record new decisions there.
 
 ## Coding convention
 
@@ -30,7 +30,7 @@ Respect these layer boundaries: never introduce a dependency that points backwar
 - Use `Result` for error handling; avoid `unwrap()`/`expect()` in production code.
 - Keep struct fields private. Expose data through methods named after the property (`name()`, not `get_name()`) and put behavior on the type that owns the data. Make a field `pub` only when there is no alternative.
 - Enum variant fields are public by language rule; pattern matching is the interface of a sum type such as `Stmt` and `Expr`.
-- Avoid `unsafe` unless justified in an ADR.
+- Avoid `unsafe` unless the reason is recorded under Decisions in `docs/todo.md`.
 - Cache keys must be deterministic across runs and Rust versions; do not use `std::hash::DefaultHasher` for anything persisted.
 
 ## Tooling

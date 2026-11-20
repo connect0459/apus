@@ -66,7 +66,7 @@ tidy(items): remove unused import
 1. Fork the repository and create a branch: `feat/xxx`, `fix/xxx`, `docs/xxx`.
 2. Follow the Red → Green → Refactor cycle.
 3. Run `just verify` and commit any resulting diffs.
-4. If the change is an architectural decision, add an ADR under `docs/adrs/`.
+4. If the change is an architectural decision, record it under Decisions in `docs/todo.md`.
 5. Open a pull request — CI runs fmt, clippy, tests, and the coverage gate.
 
 ## Code style

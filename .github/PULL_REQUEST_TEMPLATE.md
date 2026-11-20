@@ -12,7 +12,7 @@
 ## [Required] Overview
 
 - Describe the problem being solved, its background, and what changes when this PR is merged.
-- Links to `docs/todo.md` entries, ADRs under `docs/adrs/`, or other references are welcome.
+- Links to `docs/todo.md` entries or other references are welcome.
 
 ## Scope of Change
 
