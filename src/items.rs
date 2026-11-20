@@ -13,6 +13,7 @@ pub struct Item {
     name: String,
     tokens: Vec<Spanned>,
     hash: u64,
+    signature_hash: u64,
 }
 
 impl Item {
@@ -31,6 +32,18 @@ impl Item {
     pub fn hash(&self) -> u64 {
         self.hash
     }
+
+    pub fn signature_hash(&self) -> u64 {
+        self.signature_hash
+    }
+}
+
+pub fn signature_digest(items: &[Item]) -> u64 {
+    let mut hasher = Fnv1a::new();
+    for item in items {
+        hasher.write(&item.signature_hash().to_le_bytes());
+    }
+    hasher.finish()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,11 +122,22 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         };
         let slice = tokens[start..end].to_vec();
         let hash = hash_tokens(&slice);
+        let signature_hash = match kind {
+            ItemKind::Struct => hash,
+            ItemKind::Func => {
+                let header_end = slice
+                    .iter()
+                    .position(|t| matches!(t.token(), Token::Punct(p) if p == "{"))
+                    .unwrap_or(slice.len());
+                hash_tokens(&slice[..header_end])
+            }
+        };
         items.push(Item {
             kind,
             name,
             tokens: slice,
             hash,
+            signature_hash,
         });
         i = end;
     }
@@ -217,5 +241,41 @@ mod tests {
     #[test]
     fn a_func_without_a_name_is_an_error() {
         assert!(split_items(&lex("func { }").unwrap()).is_err());
+    }
+
+    fn digest_of(src: &str) -> u64 {
+        signature_digest(&items(src))
+    }
+
+    #[test]
+    fn editing_a_function_body_keeps_the_signature_digest() {
+        assert_eq!(
+            digest_of("func f() -> Int { return 1 }\nstruct P { var x: Int }"),
+            digest_of("func f() -> Int { return 2 }\nstruct P { var x: Int }")
+        );
+    }
+
+    #[test]
+    fn changing_a_function_header_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("func f() -> Int { return 1 }"),
+            digest_of("func f() -> Bool { return true }")
+        );
+    }
+
+    #[test]
+    fn changing_a_struct_body_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("struct P { var x: Int }"),
+            digest_of("struct P { var y: Int }")
+        );
+    }
+
+    #[test]
+    fn adding_a_function_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("func f() { }"),
+            digest_of("func f() { }\nfunc g() { }")
+        );
     }
 }
