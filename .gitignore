@@ -1,0 +1,20 @@
+# rust
+/target/
+**/*.rs.bk
+*.pdb
+coverage/
+*.lcov
+.DS_Store
+.idea/
+*.swp
+*~
+*.tmp
+tmp/
+
+# vscode
+.vscode/
+
+# agents
+.agents/
+.claude/
+
