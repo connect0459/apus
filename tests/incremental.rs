@@ -251,3 +251,75 @@ fn parallel_and_sequential_compilation_produce_identical_caches() {
     assert_eq!(pack(&sequential), pack(&parallel));
     assert_eq!(sequential.run(), parallel.run());
 }
+
+#[test]
+fn the_first_build_checks_every_function() {
+    let project = Project::new();
+    let report = project.build(&program(&values()));
+    assert_eq!(report.checked(), FUNCTIONS + 1);
+}
+
+#[test]
+fn editing_only_a_comment_checks_no_function() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    let report = project.build(&format!("// a note\n{source}"));
+    assert_eq!(report.checked(), 0);
+    assert_eq!(project.run(), "21\n");
+}
+
+#[test]
+fn editing_one_function_body_checks_only_that_function() {
+    let project = Project::new();
+    project.build(&program(&values()));
+    let mut edited = values();
+    edited[2] = 100;
+    let report = project.build(&program(&edited));
+    assert_eq!(report.checked(), 1);
+    assert_eq!(project.run(), "118\n");
+}
+
+#[test]
+fn changing_a_signature_checks_every_function_again() {
+    let project = Project::new();
+    let before = "func g() -> Int { return 1 }\nfunc h() { print(g()) }\nfunc main() { h() }\n";
+    let after = "func g() -> Bool { return true }\nfunc h() { print(g()) }\nfunc main() { h() }\n";
+    project.build(before);
+    let report = project.build(after);
+    assert_eq!(report.checked(), 3);
+    assert_eq!(project.run(), "true\n");
+}
+
+#[test]
+fn a_caller_broken_by_a_signature_change_is_still_reported() {
+    let project = Project::new();
+    let before = "func g() -> Int { return 1 }\nfunc h() -> Int { return g() }\nfunc main() { print(h()) }\n";
+    let after = "func g() -> Bool { return true }\nfunc h() -> Int { return g() }\nfunc main() { print(h()) }\n";
+    project.build(before);
+    assert!(build_with(after, &project.output(), &BuildOptions::default()).is_err());
+}
+
+#[test]
+fn a_corrupt_item_memo_falls_back_to_checking_everything() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    std::fs::write(project.cache_dir().join("items"), b"corrupt").unwrap();
+    let report = project.build(&format!("// a note\n{source}"));
+    assert_eq!(report.checked(), FUNCTIONS + 1);
+    assert_eq!(report.compiled(), 0);
+    assert_eq!(project.run(), "21\n");
+}
+
+#[test]
+fn a_missing_main_is_reported_even_when_every_function_is_unchanged() {
+    let project = Project::new();
+    project.build("func f() { }\nfunc main() { f() }\n");
+    let error = build_with(
+        "func f() { }\n",
+        &project.output(),
+        &BuildOptions::default(),
+    );
+    assert!(error.is_err());
+}

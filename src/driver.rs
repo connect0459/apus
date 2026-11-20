@@ -8,13 +8,14 @@ use crate::check::{CheckError, Signatures, check_func};
 use crate::codegen::{Backend, CodegenError};
 use crate::entry::FuncEntry;
 use crate::hash::{Fnv1a, hash_bytes};
-use crate::items::{SplitError, split_items};
+use crate::items::{ItemKind, SplitError, signature_digest, split_items};
 use crate::key::function_key;
 use crate::lexer::{LexError, lex};
 use crate::link::{LinkError, link};
-use crate::parser::{ParseError, parse_item};
+use crate::memo::ItemMemo;
+use crate::parser::{ParseError, parse_item, parse_signature};
 use crate::stamp::BuildStamp;
-use crate::tir::{TFunc, TStruct};
+use crate::tir::TFunc;
 
 pub use crate::link::Linker;
 
@@ -121,34 +122,97 @@ pub fn build_with(
         });
     }
 
-    let (funcs, layouts) = front_end(source)?;
-    let backend = Backend::new()?;
+    let tokens = lex(source)?;
+    let items = split_items(&tokens)?;
+    let digest = signature_digest(&items);
+    let memo = ItemMemo::load(&cache_dir).filter(|m| m.is_valid_for(compiler_stamp, digest));
     let mut cache = Cache::open(&cache_dir);
-    let mut entries: Vec<Option<FuncEntry>> = Vec::with_capacity(funcs.len());
-    let mut missing = Vec::new();
-    let keys: Vec<u64> = funcs
-        .iter()
-        .map(|f| function_key(f, &layouts, compiler_stamp))
-        .collect();
-    for (index, key) in keys.iter().enumerate() {
-        let hit = cache.get(*key).cloned();
-        if hit.is_none() {
-            missing.push(index);
+
+    let mut slots: Vec<Slot> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.kind() != ItemKind::Func {
+            continue;
         }
-        entries.push(hit);
+        let known = memo.as_ref().and_then(|m| {
+            let key = m.function_key(item.hash())?;
+            let entry = cache.get(key)?.clone();
+            Some((key, entry))
+        });
+        slots.push(Slot {
+            item_index: index,
+            item_hash: item.hash(),
+            known,
+            checked: None,
+        });
     }
-    let to_compile: Vec<&TFunc> = missing.iter().map(|index| &funcs[*index]).collect();
+
+    let dirty: Vec<usize> = (0..slots.len())
+        .filter(|slot| slots[*slot].known.is_none())
+        .collect();
+    let mut layouts = Vec::new();
+    if !dirty.is_empty() {
+        let mut needs_body = vec![false; items.len()];
+        for slot in &dirty {
+            needs_body[slots[*slot].item_index] = true;
+        }
+        let mut decls = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let parse = if item.kind() == ItemKind::Struct || needs_body[index] {
+                parse_item
+            } else {
+                parse_signature
+            };
+            decls.push(parse(item.tokens())?);
+        }
+        let sigs = Signatures::collect(&decls)?;
+        layouts = sigs.layouts();
+        for slot in &dirty {
+            if let Decl::Func(func) = &decls[slots[*slot].item_index] {
+                let typed = check_func(func, &sigs)?;
+                let key = function_key(&typed, &layouts, compiler_stamp);
+                let entry = cache.get(key).cloned();
+                slots[*slot].known = entry.map(|e| (key, e));
+                slots[*slot].checked = Some((key, typed));
+            }
+        }
+    }
+    if !items
+        .iter()
+        .any(|i| i.kind() == ItemKind::Func && i.name() == "main")
+    {
+        return Err(BuildError::new("no 'main' function"));
+    }
+
+    let backend = Backend::new()?;
+    let missing: Vec<usize> = (0..slots.len())
+        .filter(|slot| slots[*slot].known.is_none())
+        .collect();
+    let to_compile: Vec<&TFunc> = missing
+        .iter()
+        .filter_map(|slot| slots[*slot].checked.as_ref().map(|(_, typed)| typed))
+        .collect();
     let threads = options
         .threads
         .unwrap_or_else(|| automatic_threads(to_compile.len()));
     let compiled = backend.compile_many(&to_compile, &layouts, threads)?;
-    for (index, entry) in missing.iter().zip(compiled) {
-        cache.put(keys[*index], entry.clone());
-        entries[*index] = Some(entry);
+    for (slot, entry) in missing.iter().zip(compiled) {
+        if let Some((key, _)) = &slots[*slot].checked {
+            let key = *key;
+            cache.put(key, entry.clone());
+            slots[*slot].known = Some((key, entry));
+        }
     }
-    let entries: Vec<FuncEntry> = entries.into_iter().flatten().collect();
+    let memo_pairs: Vec<(u64, u64)> = slots
+        .iter()
+        .filter_map(|s| s.known.as_ref().map(|(key, _)| (s.item_hash, *key)))
+        .collect();
+    let entries: Vec<FuncEntry> = slots
+        .into_iter()
+        .filter_map(|s| s.known.map(|(_, entry)| entry))
+        .collect();
     let object = backend.assemble(&entries)?;
     let _ = cache.save();
+    let _ = ItemMemo::new(compiler_stamp, digest, memo_pairs).save(&cache_dir);
 
     let object_hash = hash_bytes(&object);
     let link_needed = !previous
@@ -164,29 +228,18 @@ pub fn build_with(
     }
     Ok(BuildReport {
         skipped: false,
+        checked: dirty.len(),
         compiled: missing.len(),
         reused: entries.len() - missing.len(),
         linked: link_needed,
     })
 }
 
-fn front_end(source: &str) -> Result<(Vec<TFunc>, Vec<TStruct>), BuildError> {
-    let tokens = lex(source)?;
-    let mut decls = Vec::new();
-    for item in split_items(&tokens)? {
-        decls.push(parse_item(item.tokens())?);
-    }
-    let sigs = Signatures::collect(&decls)?;
-    let mut funcs = Vec::new();
-    for decl in &decls {
-        if let Decl::Func(func) = decl {
-            funcs.push(check_func(func, &sigs)?);
-        }
-    }
-    if !funcs.iter().any(|f| f.name() == "main") {
-        return Err(BuildError::new("no 'main' function"));
-    }
-    Ok((funcs, sigs.layouts()))
+struct Slot {
+    item_index: usize,
+    item_hash: u64,
+    known: Option<(u64, FuncEntry)>,
+    checked: Option<(u64, TFunc)>,
 }
 
 const FUNCTIONS_PER_THREAD: usize = 16;
@@ -265,6 +318,7 @@ impl BuildOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BuildReport {
     skipped: bool,
+    checked: usize,
     compiled: usize,
     reused: usize,
     linked: bool,
@@ -273,6 +327,10 @@ pub struct BuildReport {
 impl BuildReport {
     pub fn was_skipped(&self) -> bool {
         self.skipped
+    }
+
+    pub fn checked(&self) -> usize {
+        self.checked
     }
 
     pub fn compiled(&self) -> usize {
