@@ -137,8 +137,12 @@ pub fn build_with(
         }
         entries.push(hit);
     }
-    for index in &missing {
-        let entry = backend.compile_function(&funcs[*index], &layouts)?;
+    let to_compile: Vec<&TFunc> = missing.iter().map(|index| &funcs[*index]).collect();
+    let threads = options
+        .threads
+        .unwrap_or_else(|| automatic_threads(to_compile.len()));
+    let compiled = backend.compile_many(&to_compile, &layouts, threads)?;
+    for (index, entry) in missing.iter().zip(compiled) {
         cache.put(keys[*index], entry.clone());
         entries[*index] = Some(entry);
     }
@@ -185,6 +189,13 @@ fn front_end(source: &str) -> Result<(Vec<TFunc>, Vec<TStruct>), BuildError> {
     Ok((funcs, sigs.layouts()))
 }
 
+const FUNCTIONS_PER_THREAD: usize = 16;
+
+fn automatic_threads(functions: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    cores.min(functions / FUNCTIONS_PER_THREAD).max(1)
+}
+
 fn default_cache_dir(output: &Path) -> PathBuf {
     let parent = output
         .parent()
@@ -215,6 +226,7 @@ pub struct BuildOptions {
     cache_dir: Option<PathBuf>,
     linker: Linker,
     compiler_stamp: Option<u64>,
+    threads: Option<usize>,
 }
 
 impl Default for BuildOptions {
@@ -223,6 +235,7 @@ impl Default for BuildOptions {
             cache_dir: None,
             linker: Linker::Ld,
             compiler_stamp: None,
+            threads: None,
         }
     }
 }
@@ -240,6 +253,11 @@ impl BuildOptions {
 
     pub fn with_compiler_stamp(mut self, stamp: u64) -> Self {
         self.compiler_stamp = Some(stamp);
+        self
+    }
+
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = Some(threads);
         self
     }
 }

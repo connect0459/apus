@@ -94,6 +94,42 @@ impl Backend {
         self.compile_with(&mut ctx, &mut builder_ctx, func, structs)
     }
 
+    pub fn compile_many(
+        &self,
+        funcs: &[&TFunc],
+        structs: &[TStruct],
+        threads: usize,
+    ) -> GResult<Vec<FuncEntry>> {
+        let threads = threads.clamp(1, funcs.len().max(1));
+        if threads == 1 {
+            return self.compile_chunk(funcs, structs);
+        }
+        let chunk_size = funcs.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = funcs
+                .chunks(chunk_size)
+                .map(|chunk| scope.spawn(move || self.compile_chunk(chunk, structs)))
+                .collect();
+            let mut entries = Vec::with_capacity(funcs.len());
+            for handle in handles {
+                let chunk = handle
+                    .join()
+                    .map_err(|_| CodegenError::from("a compilation thread panicked"))??;
+                entries.extend(chunk);
+            }
+            Ok(entries)
+        })
+    }
+
+    fn compile_chunk(&self, funcs: &[&TFunc], structs: &[TStruct]) -> GResult<Vec<FuncEntry>> {
+        let mut ctx = Context::new();
+        let mut builder_ctx = FunctionBuilderContext::new();
+        funcs
+            .iter()
+            .map(|func| self.compile_with(&mut ctx, &mut builder_ctx, func, structs))
+            .collect()
+    }
+
     fn compile_with(
         &self,
         ctx: &mut Context,

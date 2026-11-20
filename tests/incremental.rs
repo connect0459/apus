@@ -236,3 +236,18 @@ fn a_stale_sdk_location_is_refreshed() {
     project.build_with(&program(&values()), &options);
     assert_eq!(project.run(), "21\n");
 }
+
+#[test]
+fn parallel_and_sequential_compilation_produce_identical_caches() {
+    let many: Vec<i64> = (0..120).collect();
+    let source = program(&many);
+    let sequential = Project::new();
+    let parallel = Project::new();
+    let one = sequential.build_with(&source, &BuildOptions::default().with_threads(1));
+    let four = parallel.build_with(&source, &BuildOptions::default().with_threads(4));
+    assert_eq!(one.compiled(), four.compiled());
+    let pack =
+        |project: &Project| std::fs::read(project.cache_dir().join("functions.pack")).unwrap();
+    assert_eq!(pack(&sequential), pack(&parallel));
+    assert_eq!(sequential.run(), parallel.run());
+}
