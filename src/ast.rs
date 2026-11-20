@@ -4,6 +4,7 @@ pub type TypeName = String;
 pub enum Decl {
     Func(FuncDecl),
     Struct(StructDecl),
+    Enum(EnumDecl),
 }
 
 impl Decl {
@@ -11,6 +12,7 @@ impl Decl {
         match self {
             Decl::Func(f) => f.name(),
             Decl::Struct(s) => s.name(),
+            Decl::Enum(e) => e.name(),
         }
     }
 }
@@ -113,6 +115,31 @@ impl StructDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    line: u32,
+    name: String,
+    cases: Vec<String>,
+}
+
+impl EnumDecl {
+    pub fn new(line: u32, name: String, cases: Vec<String>) -> Self {
+        Self { line, name, cases }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn cases(&self) -> &[String] {
+        &self.cases
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     name: String,
     mutable: bool,
@@ -191,7 +218,62 @@ pub enum StmtKind {
         iter: Expr,
         body: Vec<Stmt>,
     },
+    Switch {
+        subject: Expr,
+        cases: Vec<SwitchCase>,
+    },
     Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchCase {
+    line: u32,
+    label: CaseLabel,
+    body: Vec<Stmt>,
+}
+
+impl SwitchCase {
+    pub fn new(line: u32, label: CaseLabel, body: Vec<Stmt>) -> Self {
+        Self { line, label, body }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn label(&self) -> &CaseLabel {
+        &self.label
+    }
+
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CaseLabel {
+    Patterns(Vec<Pattern>),
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    type_name: Option<TypeName>,
+    case: String,
+}
+
+impl Pattern {
+    pub fn new(type_name: Option<TypeName>, case: String) -> Self {
+        Self { type_name, case }
+    }
+
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
+    }
+
+    pub fn case(&self) -> &str {
+        &self.case
+    }
 }
 
 #[derive(Debug, Clone)]

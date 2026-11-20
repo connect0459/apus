@@ -19,8 +19,9 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 12] = [
-    "func", "struct", "var", "let", "if", "else", "while", "for", "in", "return", "true", "false",
+const KEYWORDS: [&str; 16] = [
+    "func", "struct", "enum", "case", "switch", "default", "var", "let", "if", "else", "while",
+    "for", "in", "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -185,8 +186,10 @@ impl Parser<'_> {
             self.func_decl(line).map(Decl::Func)
         } else if self.eat_keyword("struct") {
             self.struct_decl(line).map(Decl::Struct)
+        } else if self.eat_keyword("enum") {
+            self.enum_decl(line).map(Decl::Enum)
         } else {
-            self.fail("expected 'func' or 'struct'")
+            self.fail("expected 'func', 'struct' or 'enum'")
         }
     }
 
@@ -258,6 +261,76 @@ impl Parser<'_> {
         Ok(StructDecl::new(line, name, fields))
     }
 
+    fn enum_decl(&mut self, line: u32) -> PResult<EnumDecl> {
+        let name = self.name()?;
+        self.expect_punct("{")?;
+        let mut cases = Vec::new();
+        loop {
+            while self.eat_punct(";") {}
+            if self.eat_punct("}") {
+                break;
+            }
+            self.expect_keyword("case")?;
+            cases.push(self.name()?);
+            while self.eat_punct(",") {
+                cases.push(self.name()?);
+            }
+            self.end_of_statement()?;
+        }
+        Ok(EnumDecl::new(line, name, cases))
+    }
+
+    fn switch_kind(&mut self) -> PResult<StmtKind> {
+        let subject = self.expr()?;
+        self.expect_punct("{")?;
+        let mut cases = Vec::new();
+        loop {
+            while self.eat_punct(";") {}
+            if self.eat_punct("}") {
+                return Ok(StmtKind::Switch { subject, cases });
+            }
+            cases.push(self.switch_case()?);
+        }
+    }
+
+    fn switch_case(&mut self) -> PResult<SwitchCase> {
+        let line = self.line();
+        let label = if self.eat_keyword("default") {
+            CaseLabel::Default
+        } else if self.eat_keyword("case") {
+            let mut patterns = vec![self.pattern()?];
+            while self.eat_punct(",") {
+                patterns.push(self.pattern()?);
+            }
+            CaseLabel::Patterns(patterns)
+        } else {
+            return self.fail("expected 'case' or 'default' in a switch body");
+        };
+        self.expect_punct(":")?;
+        let mut body = Vec::new();
+        loop {
+            while self.eat_punct(";") {}
+            if self.is_punct("}") || self.is_keyword("case") || self.is_keyword("default") {
+                return Ok(SwitchCase::new(line, label, body));
+            }
+            if self.peek().is_none() {
+                return self.fail("unterminated switch, expected '}'");
+            }
+            body.push(self.stmt()?);
+            self.end_of_statement()?;
+        }
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let type_name = if self.is_punct(".") {
+            None
+        } else {
+            Some(self.name()?)
+        };
+        self.expect_punct(".")?;
+        Ok(Pattern::new(type_name, self.name()?))
+    }
+
     fn block(&mut self) -> PResult<Vec<Stmt>> {
         self.expect_punct("{")?;
         let mut stmts = Vec::new();
@@ -293,6 +366,8 @@ impl Parser<'_> {
             self.let_kind()?
         } else if self.eat_keyword("if") {
             self.if_kind()?
+        } else if self.eat_keyword("switch") {
+            self.switch_kind()?
         } else if self.eat_keyword("while") {
             let cond = self.expr()?;
             let body = self.block()?;
@@ -975,5 +1050,55 @@ mod tests {
             decl,
             parse_item(&lex("struct P { var x: Int }").unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn an_enum_lists_its_cases_across_case_lines() {
+        let decl = try_parse("enum Color {\n  case red, green\n  case blue\n}").unwrap();
+        assert_eq!(
+            decl,
+            Decl::Enum(EnumDecl::new(
+                1,
+                "Color".to_string(),
+                vec!["red".into(), "green".into(), "blue".into()]
+            ))
+        );
+    }
+
+    #[test]
+    fn an_enum_body_accepts_only_cases() {
+        assert!(try_parse("enum Color { var x: Int }").is_err());
+    }
+
+    #[test]
+    fn a_switch_has_case_labels_a_default_and_bodies() {
+        let stmts = body("switch c {\ncase .red, Color.green:\nprint(1)\ndefault:\nprint(2)\n}");
+        let StmtKind::Switch { cases, .. } = stmts[0].kind() else {
+            panic!("expected a switch");
+        };
+        assert_eq!(cases.len(), 2);
+        assert_eq!(
+            *cases[0].label(),
+            CaseLabel::Patterns(vec![
+                Pattern::new(None, "red".into()),
+                Pattern::new(Some("Color".into()), "green".into()),
+            ])
+        );
+        assert_eq!(cases[0].body().len(), 1);
+        assert_eq!(*cases[1].label(), CaseLabel::Default);
+    }
+
+    #[test]
+    fn a_switch_case_may_have_an_empty_body() {
+        let stmts = body("switch c {\ncase .red:\ndefault:\n}");
+        let StmtKind::Switch { cases, .. } = stmts[0].kind() else {
+            panic!("expected a switch");
+        };
+        assert!(cases[0].body().is_empty());
+    }
+
+    #[test]
+    fn a_statement_directly_in_a_switch_body_is_an_error() {
+        assert!(try_parse("func f() { switch c { print(1) } }").is_err());
     }
 }

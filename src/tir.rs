@@ -146,6 +146,10 @@ pub enum TExpr {
         index: usize,
         ty: Ty,
     },
+    EnumCase {
+        ty: Ty,
+        index: usize,
+    },
 }
 
 impl TExpr {
@@ -161,7 +165,9 @@ impl TExpr {
                 _ => Ty::Bool,
             },
             TExpr::Call { ret, .. } => *ret,
-            TExpr::StructInit { ty, .. } | TExpr::Field { ty, .. } => *ty,
+            TExpr::StructInit { ty, .. } | TExpr::Field { ty, .. } | TExpr::EnumCase { ty, .. } => {
+                *ty
+            }
         }
     }
 }

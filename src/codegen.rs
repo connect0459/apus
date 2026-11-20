@@ -254,7 +254,7 @@ fn entry_reloc(
 
 fn clif_type(ty: Ty) -> Option<Type> {
     match ty {
-        Ty::Int | Ty::Str | Ty::Struct(_) => Some(types::I64),
+        Ty::Int | Ty::Str | Ty::Struct(_) | Ty::Enum(_) => Some(types::I64),
         Ty::Bool => Some(types::I8),
         Ty::Void => None,
     }
@@ -699,6 +699,10 @@ impl Emitter<'_, '_> {
     fn expr(&mut self, expr: &TExpr) -> GResult<Option<Value>> {
         let value = match expr {
             TExpr::Int(n) => self.builder.ins().iconst(types::I64, *n),
+            TExpr::EnumCase { index, .. } => self
+                .builder
+                .ins()
+                .iconst(types::I64, i64::try_from(*index)?),
             TExpr::Bool(b) => self.builder.ins().iconst(types::I8, i64::from(*b)),
             TExpr::Str(text) => self.string_address(text),
             TExpr::Local(local, _) => self.builder.use_var(self.vars[local.index()]),

@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
-use crate::ast::{Arg, BinOp, Decl, Expr, ExprKind, FuncDecl, Stmt, StmtKind, StructDecl, UnaryOp};
+use crate::ast::{
+    Arg, BinOp, CaseLabel, Decl, EnumDecl, Expr, ExprKind, FuncDecl, Stmt, StmtKind, StructDecl,
+    SwitchCase, UnaryOp,
+};
 use crate::tir::{LocalId, TExpr, TFunc, TStmt, TStruct};
-use crate::types::{StructId, Ty};
+use crate::types::{EnumId, StructId, Ty};
 
 const PRINT: &str = "print";
 
@@ -105,10 +108,32 @@ impl StructSig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EnumSig {
+    name: String,
+    cases: Vec<String>,
+}
+
+impl EnumSig {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn cases(&self) -> &[String] {
+        &self.cases
+    }
+
+    fn case_index(&self, name: &str) -> Option<usize> {
+        self.cases.iter().position(|c| c == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Signatures {
     funcs: HashMap<String, FuncSig>,
     structs: Vec<StructSig>,
     struct_ids: HashMap<String, StructId>,
+    enums: Vec<EnumSig>,
+    enum_ids: HashMap<String, EnumId>,
 }
 
 impl Signatures {
@@ -117,12 +142,19 @@ impl Signatures {
             funcs: HashMap::new(),
             structs: Vec::new(),
             struct_ids: HashMap::new(),
+            enums: Vec::new(),
+            enum_ids: HashMap::new(),
         };
+        for decl in decls {
+            if let Decl::Enum(decl) = decl {
+                sigs.register_enum(decl)?;
+            }
+        }
         let struct_decls: Vec<&StructDecl> = decls
             .iter()
             .filter_map(|d| match d {
                 Decl::Struct(s) => Some(s),
-                Decl::Func(_) => None,
+                Decl::Func(_) | Decl::Enum(_) => None,
             })
             .collect();
         for decl in &struct_decls {
@@ -143,7 +175,38 @@ impl Signatures {
         Ok(sigs)
     }
 
+    fn register_enum(&mut self, decl: &EnumDecl) -> CResult<()> {
+        let id = EnumId::new(self.enums.len());
+        if self.enum_ids.insert(decl.name().to_string(), id).is_some() {
+            return Err(CheckError::at(
+                decl.line(),
+                format!("duplicate type '{}'", decl.name()),
+            ));
+        }
+        let mut cases: Vec<String> = Vec::new();
+        for case in decl.cases() {
+            if cases.contains(case) {
+                return Err(CheckError::at(
+                    decl.line(),
+                    format!("duplicate case '{case}' in '{}'", decl.name()),
+                ));
+            }
+            cases.push(case.clone());
+        }
+        self.enums.push(EnumSig {
+            name: decl.name().to_string(),
+            cases,
+        });
+        Ok(())
+    }
+
     fn register_struct_name(&mut self, decl: &StructDecl) -> CResult<()> {
+        if self.enum_ids.contains_key(decl.name()) {
+            return Err(CheckError::at(
+                decl.line(),
+                format!("duplicate type '{}'", decl.name()),
+            ));
+        }
         let id = StructId::new(self.struct_ids.len());
         if self
             .struct_ids
@@ -161,7 +224,9 @@ impl Signatures {
     fn struct_fields(&self, decl: &StructDecl) -> CResult<Vec<FieldSig>> {
         let mut fields: Vec<FieldSig> = Vec::new();
         for field in decl.fields() {
-            let Some(ty) = Ty::from_builtin_name(field.ty()) else {
+            let Some(ty) = Ty::from_builtin_name(field.ty())
+                .or_else(|| self.enum_ids.get(field.ty()).map(|id| Ty::Enum(*id)))
+            else {
                 let reason = if self.struct_ids.contains_key(field.ty()) {
                     "a struct field cannot have a struct type yet"
                 } else {
@@ -194,7 +259,7 @@ impl Signatures {
                 "'print' is a reserved function name",
             ));
         }
-        if self.struct_ids.contains_key(func.name()) {
+        if self.struct_ids.contains_key(func.name()) || self.enum_ids.contains_key(func.name()) {
             return Err(CheckError::at(
                 func.line(),
                 format!("'{}' is already the name of a type", func.name()),
@@ -231,11 +296,16 @@ impl Signatures {
     pub fn resolve_type(&self, name: &str, line: u32) -> CResult<Ty> {
         Ty::from_builtin_name(name)
             .or_else(|| self.struct_ids.get(name).map(|id| Ty::Struct(*id)))
+            .or_else(|| self.enum_ids.get(name).map(|id| Ty::Enum(*id)))
             .ok_or_else(|| CheckError::at(line, format!("unknown type '{name}'")))
     }
 
     pub fn func(&self, name: &str) -> Option<&FuncSig> {
         self.funcs.get(name)
+    }
+
+    pub fn enum_sig(&self, id: EnumId) -> Option<&EnumSig> {
+        self.enums.get(id.index())
     }
 
     pub fn struct_sig(&self, id: StructId) -> Option<&StructSig> {
@@ -251,6 +321,9 @@ impl Signatures {
             Ty::Struct(id) => self
                 .struct_sig(id)
                 .map_or_else(String::new, |s| s.name.clone()),
+            Ty::Enum(id) => self
+                .enum_sig(id)
+                .map_or_else(String::new, |e| e.name.clone()),
         }
     }
 
@@ -305,6 +378,9 @@ fn always_returns(stmts: &[Stmt]) -> bool {
             else_body: Some(else_body),
             ..
         }) => always_returns(then_body) && always_returns(else_body),
+        Some(StmtKind::Switch { cases, .. }) => {
+            !cases.is_empty() && cases.iter().all(|case| always_returns(case.body()))
+        }
         _ => false,
     }
 }
@@ -365,12 +441,141 @@ impl FnCx<'_> {
 
     fn block(&mut self, stmts: &[Stmt]) -> CResult<Vec<TStmt>> {
         self.scopes.push(HashMap::new());
-        let checked = stmts
-            .iter()
-            .map(|s| self.stmt(s))
-            .collect::<CResult<Vec<_>>>();
+        let mut checked = Vec::with_capacity(stmts.len());
+        let mut result = Ok(());
+        for stmt in stmts {
+            result = self.lower_stmt(stmt, &mut checked);
+            if result.is_err() {
+                break;
+            }
+        }
         self.scopes.pop();
-        checked
+        result.map(|()| checked)
+    }
+
+    fn lower_stmt(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
+        match stmt.kind() {
+            StmtKind::Switch { subject, cases } => {
+                self.switch_stmt(stmt.line(), subject, cases, out)
+            }
+            _ => {
+                out.push(self.stmt(stmt)?);
+                Ok(())
+            }
+        }
+    }
+
+    fn switch_stmt(
+        &mut self,
+        line: u32,
+        subject: &Expr,
+        cases: &[SwitchCase],
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let subject_value = self.value(subject)?;
+        let Ty::Enum(id) = subject_value.ty() else {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "switch is supported only on enums, not {}",
+                    self.sigs.type_name(subject_value.ty())
+                ),
+            ));
+        };
+        let sigs = self.sigs;
+        let sig = sigs
+            .enum_sig(id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
+        if cases.is_empty() {
+            return Err(CheckError::at(line, "a switch needs at least one case"));
+        }
+        let subject_ty = subject_value.ty();
+        let temporary = LocalId::new(self.locals.len());
+        self.locals.push(subject_ty);
+        out.push(TStmt::Let {
+            local: temporary,
+            init: subject_value,
+        });
+
+        let mut covered = vec![false; sig.cases().len()];
+        let mut default_body: Option<Vec<TStmt>> = None;
+        let mut branches: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
+        for (position, case) in cases.iter().enumerate() {
+            let body = self.block(case.body())?;
+            match case.label() {
+                CaseLabel::Default => {
+                    if position + 1 != cases.len() {
+                        return Err(CheckError::at(
+                            case.line(),
+                            "'default' must be the last case of a switch",
+                        ));
+                    }
+                    default_body = Some(body);
+                }
+                CaseLabel::Patterns(patterns) => {
+                    let mut condition: Option<TExpr> = None;
+                    for pattern in patterns {
+                        if pattern.type_name().is_some_and(|n| n != sig.name()) {
+                            return Err(CheckError::at(
+                                case.line(),
+                                format!("expected a case of '{}'", sig.name()),
+                            ));
+                        }
+                        let index = sig.case_index(pattern.case()).ok_or_else(|| {
+                            CheckError::at(
+                                case.line(),
+                                format!("'{}' has no case '{}'", sig.name(), pattern.case()),
+                            )
+                        })?;
+                        covered[index] = true;
+                        let test = TExpr::Binary {
+                            op: BinOp::Eq,
+                            lhs: Box::new(TExpr::Local(temporary, subject_ty)),
+                            rhs: Box::new(TExpr::EnumCase {
+                                ty: subject_ty,
+                                index,
+                            }),
+                        };
+                        condition = Some(match condition {
+                            None => test,
+                            Some(previous) => TExpr::Binary {
+                                op: BinOp::Or,
+                                lhs: Box::new(previous),
+                                rhs: Box::new(test),
+                            },
+                        });
+                    }
+                    let Some(condition) = condition else {
+                        return Err(CheckError::at(case.line(), "a case needs a pattern"));
+                    };
+                    branches.push((condition, body));
+                }
+            }
+        }
+
+        let missing = covered.iter().position(|c| !c);
+        if let (None, Some(missing)) = (&default_body, missing) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "switch must be exhaustive: missing case '{}'",
+                    sig.cases()[missing]
+                ),
+            ));
+        }
+        let mut tail = default_body;
+        while let Some((condition, body)) = branches.pop() {
+            tail = Some(match tail {
+                None => body,
+                Some(else_body) => vec![TStmt::If {
+                    cond: condition,
+                    then_body: body,
+                    else_body,
+                }],
+            });
+        }
+        out.extend(tail.unwrap_or_default());
+        Ok(())
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> CResult<TStmt> {
@@ -423,6 +628,10 @@ impl FnCx<'_> {
             }
             StmtKind::For { var, iter, body } => self.for_stmt(line, var, iter, body),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
+            StmtKind::Switch { .. } => Err(CheckError::at(
+                line,
+                "internal error: a switch must be lowered into a block",
+            )),
         }
     }
 
@@ -687,6 +896,9 @@ impl FnCx<'_> {
                 Err(CheckError::at(line, "print does not produce a value"))
             }
             ExprKind::Call { callee, args } => self.call(line, callee, args),
+            ExprKind::Member { base, name } if self.names_enum(base) => {
+                self.enum_case(line, base, name)
+            }
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 let (index, field) = self.member_of(line, base.ty(), name)?;
@@ -702,6 +914,38 @@ impl FnCx<'_> {
                 "a range can only be used in a for loop",
             )),
         }
+    }
+
+    fn names_enum(&self, base: &Expr) -> bool {
+        match base.kind() {
+            ExprKind::Ident(name) => {
+                self.lookup(name, base.line()).is_err() && self.sigs.enum_ids.contains_key(name)
+            }
+            _ => false,
+        }
+    }
+
+    fn enum_case(&self, line: u32, base: &Expr, name: &str) -> CResult<TExpr> {
+        let ExprKind::Ident(type_name) = base.kind() else {
+            return Err(CheckError::at(line, "internal error: not an enum name"));
+        };
+        let id = self
+            .sigs
+            .enum_ids
+            .get(type_name)
+            .copied()
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
+        let sig = self
+            .sigs
+            .enum_sig(id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
+        let index = sig
+            .case_index(name)
+            .ok_or_else(|| CheckError::at(line, format!("'{type_name}' has no case '{name}'")))?;
+        Ok(TExpr::EnumCase {
+            ty: Ty::Enum(id),
+            index,
+        })
     }
 
     fn operands(&self, line: u32, op: BinOp, lhs: Ty, rhs: Ty) -> CResult<()> {
@@ -720,7 +964,7 @@ impl FnCx<'_> {
             }
             BinOp::Eq | BinOp::Ne => {
                 self.expect(line, lhs, rhs)?;
-                if matches!(lhs, Ty::Int | Ty::Bool) {
+                if matches!(lhs, Ty::Int | Ty::Bool | Ty::Enum(_)) {
                     Ok(())
                 } else {
                     Err(CheckError::at(
@@ -1111,5 +1355,133 @@ mod tests {
     #[test]
     fn an_expression_whose_value_is_unused_is_rejected() {
         assert!(check_main("1 + 2").is_err());
+    }
+
+    const COLOR: &str = "enum Color { case red, green, blue }\n";
+
+    fn with_color(body: &str) -> String {
+        format!("{COLOR}func main() {{\n{body}\n}}")
+    }
+
+    #[test]
+    fn an_enum_case_has_the_type_of_its_enum() {
+        let funcs = check_all(&with_color("let c = Color.green\nlet d: Color = c")).unwrap();
+        let [Ty::Enum(first), Ty::Enum(second)] = funcs[0].locals() else {
+            panic!("expected two enum locals");
+        };
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn an_unknown_enum_case_is_rejected_with_its_line() {
+        let (line, message) = rejected_at(&with_color("let c = Color.pink"));
+        assert_eq!(line, 3);
+        assert!(message.contains("no case 'pink'"), "{message}");
+    }
+
+    #[test]
+    fn enum_values_of_one_enum_can_be_compared() {
+        assert!(check_all(&with_color("print(Color.red == Color.blue)")).is_ok());
+    }
+
+    #[test]
+    fn enum_values_of_different_enums_cannot_be_compared() {
+        let source = format!(
+            "enum Size {{ case big }}\n{}",
+            with_color("print(Color.red == Size.big)")
+        );
+        assert!(check_all(&source).is_err());
+    }
+
+    #[test]
+    fn an_enum_value_cannot_be_printed() {
+        assert!(check_all(&with_color("print(Color.red)")).is_err());
+    }
+
+    #[test]
+    fn a_local_variable_shadows_an_enum_of_the_same_name() {
+        let source = "struct P { var red: Int }\nenum P2 { case a }\nfunc main() { let P2 = P(red: 1)\nprint(P2.red) }";
+        assert!(check_all(source).is_ok());
+    }
+
+    #[test]
+    fn a_switch_covering_every_case_needs_no_default() {
+        let body =
+            "let c = Color.red\nswitch c {\ncase .red: print(1)\ncase .green, .blue: print(2)\n}";
+        assert!(check_all(&with_color(body)).is_ok());
+    }
+
+    #[test]
+    fn a_switch_missing_a_case_is_rejected_and_names_it() {
+        let body = "let c = Color.red\nswitch c {\ncase .red: print(1)\ncase .green: print(2)\n}";
+        let (line, message) = rejected_at(&with_color(body));
+        assert_eq!(line, 4);
+        assert!(message.contains("missing case 'blue'"), "{message}");
+    }
+
+    #[test]
+    fn a_default_makes_a_partial_switch_exhaustive() {
+        let body = "let c = Color.red\nswitch c {\ncase .red: print(1)\ndefault: print(2)\n}";
+        assert!(check_all(&with_color(body)).is_ok());
+    }
+
+    #[test]
+    fn a_default_before_the_last_case_is_rejected() {
+        let body = "let c = Color.red\nswitch c {\ndefault: print(2)\ncase .red: print(1)\n}";
+        assert!(check_all(&with_color(body)).is_err());
+    }
+
+    #[test]
+    fn a_pattern_of_another_enum_or_an_unknown_case_is_rejected() {
+        let other = "let c = Color.red\nswitch c {\ncase Size.big: print(1)\ndefault: print(2)\n}";
+        assert!(check_all(&format!("enum Size {{ case big }}\n{}", with_color(other))).is_err());
+        let unknown = "let c = Color.red\nswitch c {\ncase .pink: print(1)\ndefault: print(2)\n}";
+        assert!(check_all(&with_color(unknown)).is_err());
+    }
+
+    #[test]
+    fn switching_on_a_value_that_is_not_an_enum_is_rejected() {
+        assert!(check_all(&with_color("switch 1 {\ndefault: print(2)\n}")).is_err());
+    }
+
+    #[test]
+    fn a_switch_without_cases_is_rejected() {
+        assert!(check_all(&with_color("switch Color.red {\n}")).is_err());
+    }
+
+    #[test]
+    fn a_function_returning_from_every_case_of_a_switch_needs_no_final_return() {
+        let source = format!(
+            "{COLOR}func number(_ c: Color) -> Int {{\nswitch c {{\ncase .red: return 1\ncase .green: return 2\ncase .blue: return 3\n}}\n}}"
+        );
+        assert!(check_all(&source).is_ok());
+    }
+
+    #[test]
+    fn a_function_whose_switch_leaves_a_case_without_return_is_rejected() {
+        let source = format!(
+            "{COLOR}func number(_ c: Color) -> Int {{\nswitch c {{\ncase .red: return 1\ndefault: print(0)\n}}\n}}"
+        );
+        assert!(check_all(&source).is_err());
+    }
+
+    #[test]
+    fn a_struct_may_have_an_enum_field() {
+        let source = format!(
+            "{COLOR}struct Pixel {{ var color: Color }}\nfunc main() {{ let p = Pixel(color: Color.blue)\nprint(p.color == Color.blue) }}"
+        );
+        assert!(check_all(&source).is_ok());
+    }
+
+    #[test]
+    fn an_enum_cannot_share_a_name_with_another_type_or_a_function() {
+        assert!(check_all("enum A { case x }\nstruct A { var y: Int }").is_err());
+        assert!(check_all("enum A { case x }\nfunc A() { }").is_err());
+        assert!(check_all("enum A { case x }\nenum A { case y }").is_err());
+    }
+
+    #[test]
+    fn an_enum_cannot_repeat_a_case() {
+        assert!(check_all("enum A { case x, x }").is_err());
     }
 }

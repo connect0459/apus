@@ -49,6 +49,7 @@ impl Encoder<'_> {
             Ty::Bool => self.tag(2),
             Ty::Str => self.tag(3),
             Ty::Void => self.tag(4),
+            Ty::Enum(_) => self.tag(6),
             Ty::Struct(id) => {
                 self.tag(5);
                 let fields = self
@@ -206,6 +207,11 @@ impl Encoder<'_> {
                 self.usize(*index);
                 self.ty(*ty);
             }
+            TExpr::EnumCase { ty, index } => {
+                self.tag(39);
+                self.ty(*ty);
+                self.usize(*index);
+            }
         }
     }
 }
@@ -251,7 +257,7 @@ mod tests {
             .iter()
             .filter_map(|d| match d {
                 Decl::Func(f) => Some(f),
-                Decl::Struct(_) => None,
+                Decl::Struct(_) | Decl::Enum(_) => None,
             })
             .map(|f| {
                 let checked = check_func(f, &sigs).unwrap();
@@ -353,4 +359,24 @@ mod tests {
     }
 
     const GOLDEN_KEY: u64 = 17498113945502841606;
+
+    const SWITCH: &str =
+        "func pick(_ c: Color) -> Int {\nswitch c {\ncase .red: return 1\ndefault: return 2\n}\n}";
+
+    #[test]
+    fn renaming_an_enum_does_not_change_the_key_of_a_function_using_it() {
+        let a = format!("enum Color {{ case red, green }}\n{SWITCH}");
+        let b = format!(
+            "enum Hue {{ case red, green }}\n{}",
+            SWITCH.replace("Color", "Hue")
+        );
+        assert_eq!(key_of(&a, "pick"), key_of(&b, "pick"));
+    }
+
+    #[test]
+    fn selecting_a_different_enum_case_changes_the_key() {
+        let a = format!("enum Color {{ case red, green }}\n{SWITCH}");
+        let b = a.replace("case .red", "case .green");
+        assert_ne!(key_of(&a, "pick"), key_of(&b, "pick"));
+    }
 }

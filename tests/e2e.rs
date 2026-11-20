@@ -304,3 +304,62 @@ fn struct_fields_use_overflow_checked_arithmetic() {
         "{POINT}func main() {{\n  var p = P(x: 9223372036854775807, y: 0)\n  p.x += 1\n  print(p.x)\n}}"
     ));
 }
+
+const COLOR: &str = "enum Color { case red, green, blue }\n";
+
+fn with_color(body: &str) -> String {
+    format!("{COLOR}{body}")
+}
+
+#[test]
+fn a_switch_runs_the_body_of_the_matching_case() {
+    let source = with_color(
+        "func name(_ c: Color) -> Int {\nswitch c {\ncase .red: return 1\ncase .green: return 2\ncase .blue: return 3\n}\n}\n\
+         func main() { print(name(Color.red))\nprint(name(Color.green))\nprint(name(Color.blue)) }",
+    );
+    assert_eq!(run(&source), "1\n2\n3\n");
+}
+
+#[test]
+fn a_case_with_several_patterns_and_a_default_both_match() {
+    let source = with_color(
+        "func warm(_ c: Color) -> Bool {\nswitch c {\ncase .red, .green: return true\ndefault: return false\n}\n}\n\
+         func main() { print(warm(Color.green))\nprint(warm(Color.blue)) }",
+    );
+    assert_eq!(run(&source), "true\nfalse\n");
+}
+
+#[test]
+fn a_switch_evaluates_its_subject_only_once() {
+    let source = with_color(
+        "func next() -> Color { print(9)\nreturn Color.green }\n\
+         func main() {\nswitch next() {\ncase .red: print(1)\ncase .green: print(2)\ncase .blue: print(3)\n}\n}",
+    );
+    assert_eq!(run(&source), "9\n2\n");
+}
+
+#[test]
+fn enum_values_are_stored_in_variables_and_compared() {
+    let source = with_color(
+        "func main() {\nvar c = Color.red\nprint(c == Color.red)\nc = Color.blue\nprint(c == Color.red)\nprint(c != Color.red)\n}",
+    );
+    assert_eq!(run(&source), "true\nfalse\ntrue\n");
+}
+
+#[test]
+fn an_enum_can_be_a_struct_field_and_a_parameter() {
+    let source = with_color(
+        "struct Pixel { var color: Color }\n\
+         func isBlue(_ p: Pixel) -> Bool { return p.color == Color.blue }\n\
+         func main() { var p = Pixel(color: Color.green)\nprint(isBlue(p))\np.color = Color.blue\nprint(isBlue(p)) }",
+    );
+    assert_eq!(run(&source), "false\ntrue\n");
+}
+
+#[test]
+fn a_non_exhaustive_switch_fails_the_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = with_color("func main() {\nswitch Color.red {\ncase .red: print(1)\n}\n}");
+    let err = build(&source, &dir.path().join("prog")).unwrap_err();
+    assert!(err.message().contains("exhaustive"), "{}", err.message());
+}
