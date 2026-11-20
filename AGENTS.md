@@ -22,13 +22,7 @@ The compiler is a pipeline of layers; each layer depends only on the layers befo
 lexer → items (split and hash) → parser → check → codegen → cache → driver (CLI)
 ```
 
-- `src/lexer.rs` — source text to tokens; comments and whitespace are dropped.
-- `src/items.rs` — splits tokens into top-level items and hashes each one.
-- `bench/` — generators and scripts for build-speed measurements.
-- `docs/todo.md` — milestones (M0–M4) and open decisions.
-- `docs/adrs/` — Architecture Decision Records for significant design choices.
-
-Respect these layer boundaries: never introduce a dependency that points backwards (e.g., the lexer depending on the parser).
+Respect these layer boundaries: never introduce a dependency that points backwards (e.g., the lexer depending on the parser). See `docs/ARCHITECTURE.md` for the bird's-eye view and `docs/adrs/` for the reasoning behind significant design choices.
 
 ## Coding convention
 
