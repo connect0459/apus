@@ -20,6 +20,10 @@
   - [x] Parallel compilation of the functions that missed the cache
   - [x] Skip parsing and checking of unchanged items, keyed by a signature digest and an item memo
 - [ ] M4: enum, generics (monomorphization), simple class
+  - [x] Enum without payloads: `enum`, `Enum.case`, `==`/`!=`, enum struct fields, exhaustive `switch`
+  - [ ] Enum with payloads (tagged union, `case .circle(let r)`)
+  - [ ] Generics (monomorphization); needs a design note on instance cache keys first
+  - [ ] Simple class; needs a decision on memory management first
 
 ## Open decisions
 
@@ -38,7 +42,7 @@
 - Entry point is `func main()` instead of top-level statements.
 - Linking cost with the system linker on macOS is unmeasured.
 - Coverage gate stays at 80% line / 90% function; branch coverage is not gated.
-- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`.
+- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, and a `case` may repeat a pattern without a warning.
 
 ## Decisions
 
@@ -73,3 +77,13 @@
 **Decision.** `signature_digest` hashes the header tokens of every function and the whole token stream of every struct, in source order. `ItemMemo` (the `items` file under `.apus-cache/`) maps an item hash to the function key of its typed IR, and is written only after a successful build. When the memo's compiler stamp and digest match, a function whose item hash is known and whose entry is in the cache is neither parsed nor checked. If any function is dirty, the other functions are parsed with `parse_signature`, which stops at the function header, so `Signatures` is built without reading their bodies; only dirty functions are fully parsed and checked.
 
 **Consequences.** A comment edit checks nothing, and a body edit checks only that function. Any header or struct change, adding or removing a function, and reordering invalidate every memoized item, so those builds check everything as before. A body that was valid under an unchanged digest cannot become invalid, so skipped items need no re-check. The remaining front-end cost is lexing, splitting and hashing the file, plus a header parse per clean function when something is dirty.
+
+### A switch on an enum lowers to an if chain in the checker (2026-11-20)
+
+**Problem.** `switch` over a payload-less enum needs code generation, a cache key encoding and an exhaustiveness rule.
+
+**Options.** Add `TStmt::Switch` and emit a Cranelift jump table (a new typed IR node in `key` and `codegen`); lower the switch in the checker to a temporary local plus a chain of `TStmt::If` on the existing `==` for integers.
+
+**Decision.** An enum value is a 64-bit integer holding the case index, `TExpr::EnumCase` is its only new typed IR node, and the checker lowers `switch` to `let tmp = subject` followed by nested `If` statements. When the switch has no `default`, the last case becomes the final `else`, which is safe because exhaustiveness is checked first. A `default` must be the last case.
+
+**Consequences.** `key` encodes an enum type as one tag, so renaming an enum or adding cases it never selects does not change a function's key; adding or reordering cases still invalidates through the signature digest. A switch costs a linear chain of comparisons, which is acceptable for a non-optimizing backend and will matter only for enums with many cases. The subject is evaluated once. Payload enums will need a new representation (tag plus slots) and a pattern-binding construct, so this lowering will be revisited then.

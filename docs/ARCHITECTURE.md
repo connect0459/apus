@@ -4,7 +4,7 @@
 
 apus compiles a Swift subset (a dialect, not Swift) to a native macOS arm64 executable. Its goal is a fast edit-and-rebuild loop: after editing one function, only that function is recompiled.
 
-The unit of incremental work is the top-level **item** (a `func` or a `struct`). Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
+The unit of incremental work is the top-level **item** (a `func`, a `struct` or an `enum`). Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
 
 ```text
 source → lexer → items → parser → check → codegen → link → driver
@@ -50,6 +50,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 - A cache key depends only on a function's typed IR and the layouts of the structs it uses. Editing a callee's body therefore never invalidates its callers; changing a callee's signature does, because the caller's typed IR changes.
 - Compilation of a function is deterministic and independent of other functions, so parallel and sequential builds produce identical entries.
 - Cache files are untrusted input: a corrupt or truncated file is ignored, never trusted partially.
+- An enum without payloads is a 64-bit integer holding the case index. `switch` has no typed IR node of its own: `check` lowers it to a temporary local and a chain of `if` statements.
 - Integer arithmetic traps on overflow and on division by zero, as Swift does.
 - A struct is a value. It lives in memory as one 8-byte slot per field, and an expression of struct type evaluates to the address of its storage. A struct is copied at `let` and assignment. A parameter is passed as a pointer and is immutable, so the callee never changes the caller's value. A result is written to memory supplied by the caller.
 
