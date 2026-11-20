@@ -53,7 +53,19 @@ const ASSIGN_OPS: [(&str, Option<BinOp>); 6] = [
 ];
 
 pub fn parse_item(tokens: &[Spanned]) -> PResult<Decl> {
-    let mut parser = Parser { tokens, pos: 0 };
+    parse_with(tokens, false)
+}
+
+pub fn parse_signature(tokens: &[Spanned]) -> PResult<Decl> {
+    parse_with(tokens, true)
+}
+
+fn parse_with(tokens: &[Spanned], header_only: bool) -> PResult<Decl> {
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        header_only,
+    };
     let decl = parser.decl()?;
     match parser.tokens.get(parser.pos) {
         Some(t) => Err(ParseError {
@@ -67,6 +79,7 @@ pub fn parse_item(tokens: &[Spanned]) -> PResult<Decl> {
 struct Parser<'a> {
     tokens: &'a [Spanned],
     pos: usize,
+    header_only: bool,
 }
 
 impl Parser<'_> {
@@ -193,7 +206,12 @@ impl Parser<'_> {
         } else {
             None
         };
-        let body = self.block()?;
+        let body = if self.header_only {
+            self.pos = self.tokens.len();
+            Vec::new()
+        } else {
+            self.block()?
+        };
         Ok(FuncDecl::new(line, name, params, ret, body))
     }
 
@@ -932,6 +950,30 @@ mod tests {
         assert_ne!(
             Expr::new(1, ExprKind::Int(7)),
             Expr::new(1, ExprKind::Int(8))
+        );
+    }
+
+    #[test]
+    fn a_signature_parse_ignores_the_body() {
+        let decl =
+            parse_signature(&lex("func f(a: Int) -> Bool { this is not code }").unwrap()).unwrap();
+        match decl {
+            Decl::Func(f) => {
+                assert_eq!(f.name(), "f");
+                assert_eq!(f.params().len(), 1);
+                assert_eq!(f.ret(), Some("Bool"));
+                assert!(f.body().is_empty());
+            }
+            other => panic!("expected a func, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_signature_parse_of_a_struct_keeps_its_fields() {
+        let decl = parse_signature(&lex("struct P { var x: Int }").unwrap()).unwrap();
+        assert_eq!(
+            decl,
+            parse_item(&lex("struct P { var x: Int }").unwrap()).unwrap()
         );
     }
 }
