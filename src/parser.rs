@@ -167,16 +167,17 @@ impl Parser<'_> {
     }
 
     fn decl(&mut self) -> PResult<Decl> {
+        let line = self.line();
         if self.eat_keyword("func") {
-            self.func_decl().map(Decl::Func)
+            self.func_decl(line).map(Decl::Func)
         } else if self.eat_keyword("struct") {
-            self.struct_decl().map(Decl::Struct)
+            self.struct_decl(line).map(Decl::Struct)
         } else {
             self.fail("expected 'func' or 'struct'")
         }
     }
 
-    fn func_decl(&mut self) -> PResult<FuncDecl> {
+    fn func_decl(&mut self, line: u32) -> PResult<FuncDecl> {
         let name = self.name()?;
         self.expect_punct("(")?;
         let mut params = Vec::new();
@@ -193,7 +194,7 @@ impl Parser<'_> {
             None
         };
         let body = self.block()?;
-        Ok(FuncDecl::new(name, params, ret, body))
+        Ok(FuncDecl::new(line, name, params, ret, body))
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -214,7 +215,7 @@ impl Parser<'_> {
         Ok(Param::new(label, name, ty))
     }
 
-    fn struct_decl(&mut self) -> PResult<StructDecl> {
+    fn struct_decl(&mut self, line: u32) -> PResult<StructDecl> {
         let name = self.name()?;
         self.expect_punct("{")?;
         let mut fields = Vec::new();
@@ -236,7 +237,7 @@ impl Parser<'_> {
             fields.push(Field::new(field_name, mutable, ty));
             self.end_of_statement()?;
         }
-        Ok(StructDecl::new(name, fields))
+        Ok(StructDecl::new(line, name, fields))
     }
 
     fn block(&mut self) -> PResult<Vec<Stmt>> {
@@ -269,33 +270,31 @@ impl Parser<'_> {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
-        if self.is_keyword("var") || self.is_keyword("let") {
-            self.let_stmt()
+        let line = self.line();
+        let kind = if self.is_keyword("var") || self.is_keyword("let") {
+            self.let_kind()?
         } else if self.eat_keyword("if") {
-            self.if_stmt()
+            self.if_kind()?
         } else if self.eat_keyword("while") {
             let cond = self.expr()?;
             let body = self.block()?;
-            Ok(Stmt::While { cond, body })
+            StmtKind::While { cond, body }
         } else if self.eat_keyword("for") {
             let var = self.name()?;
             self.expect_keyword("in")?;
             let iter = self.expr()?;
             let body = self.block()?;
-            Ok(Stmt::For { var, iter, body })
+            StmtKind::For { var, iter, body }
         } else if self.eat_keyword("return") {
             let has_value = self.on_same_line() && !self.is_punct("}") && !self.is_punct(";");
-            Ok(Stmt::Return(if has_value {
-                Some(self.expr()?)
-            } else {
-                None
-            }))
+            StmtKind::Return(if has_value { Some(self.expr()?) } else { None })
         } else {
-            self.expr_or_assign()
-        }
+            self.expr_or_assign_kind()?
+        };
+        Ok(Stmt::new(line, kind))
     }
 
-    fn let_stmt(&mut self) -> PResult<Stmt> {
+    fn let_kind(&mut self) -> PResult<StmtKind> {
         let mutable = self.is_keyword("var");
         self.pos += 1;
         let name = self.name()?;
@@ -309,7 +308,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        Ok(Stmt::Let {
+        Ok(StmtKind::Let {
             name,
             mutable,
             ty,
@@ -317,39 +316,40 @@ impl Parser<'_> {
         })
     }
 
-    fn if_stmt(&mut self) -> PResult<Stmt> {
+    fn if_kind(&mut self) -> PResult<StmtKind> {
         let cond = self.expr()?;
         let then_body = self.block()?;
         let else_body = if self.eat_keyword("else") {
+            let line = self.line();
             if self.eat_keyword("if") {
-                Some(vec![self.if_stmt()?])
+                Some(vec![Stmt::new(line, self.if_kind()?)])
             } else {
                 Some(self.block()?)
             }
         } else {
             None
         };
-        Ok(Stmt::If {
+        Ok(StmtKind::If {
             cond,
             then_body,
             else_body,
         })
     }
 
-    fn expr_or_assign(&mut self) -> PResult<Stmt> {
+    fn expr_or_assign_kind(&mut self) -> PResult<StmtKind> {
         let target = self.expr()?;
         let op = ASSIGN_OPS
             .iter()
             .find(|(p, _)| self.on_same_line() && self.is_punct(p));
         let Some((_, op)) = op else {
-            return Ok(Stmt::Expr(target));
+            return Ok(StmtKind::Expr(target));
         };
-        if !matches!(target, Expr::Ident(_) | Expr::Member { .. }) {
+        if !matches!(target.kind(), ExprKind::Ident(_) | ExprKind::Member { .. }) {
             return self.fail("the left side of an assignment must be a variable or a member");
         }
         self.pos += 1;
         let value = self.expr()?;
-        Ok(Stmt::Assign {
+        Ok(StmtKind::Assign {
             target,
             op: *op,
             value,
@@ -371,11 +371,15 @@ impl Parser<'_> {
         while let Some(op) = self.binary_op_at(level) {
             self.pos += 1;
             let rhs = self.binary(level + 1)?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            let line = lhs.line();
+            lhs = Expr::new(
+                line,
+                ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+            );
         }
         Ok(lhs)
     }
@@ -403,14 +407,19 @@ impl Parser<'_> {
         };
         self.pos += 1;
         let hi = self.binary(LEVEL_RANGE + 1)?;
-        Ok(Expr::Range {
-            lo: Box::new(lo),
-            hi: Box::new(hi),
-            inclusive,
-        })
+        let line = lo.line();
+        Ok(Expr::new(
+            line,
+            ExprKind::Range {
+                lo: Box::new(lo),
+                hi: Box::new(hi),
+                inclusive,
+            },
+        ))
     }
 
     fn unary(&mut self) -> PResult<Expr> {
+        let line = self.line();
         let op = if self.is_punct("-") {
             Some(UnaryOp::Neg)
         } else if self.is_punct("!") {
@@ -421,10 +430,14 @@ impl Parser<'_> {
         match op {
             Some(op) => {
                 self.pos += 1;
-                Ok(Expr::Unary {
-                    op,
-                    expr: Box::new(self.unary()?),
-                })
+                let operand = self.unary()?;
+                Ok(Expr::new(
+                    line,
+                    ExprKind::Unary {
+                        op,
+                        expr: Box::new(operand),
+                    },
+                ))
             }
             None => self.postfix(),
         }
@@ -433,20 +446,27 @@ impl Parser<'_> {
     fn postfix(&mut self) -> PResult<Expr> {
         let mut expr = self.primary()?;
         while self.on_same_line() {
+            let line = expr.line();
             if self.eat_punct(".") {
                 let name = self.name()?;
-                expr = Expr::Member {
-                    base: Box::new(expr),
-                    name,
-                };
+                expr = Expr::new(
+                    line,
+                    ExprKind::Member {
+                        base: Box::new(expr),
+                        name,
+                    },
+                );
             } else if self.is_punct("(") {
-                let Expr::Ident(callee) = expr else {
+                let ExprKind::Ident(callee) = expr.kind().clone() else {
                     return self.fail("only a named function can be called");
                 };
-                expr = Expr::Call {
-                    callee,
-                    args: self.args()?,
-                };
+                expr = Expr::new(
+                    line,
+                    ExprKind::Call {
+                        callee,
+                        args: self.args()?,
+                    },
+                );
             } else {
                 break;
             }
@@ -477,12 +497,13 @@ impl Parser<'_> {
     }
 
     fn primary(&mut self) -> PResult<Expr> {
-        let expr = match self.peek() {
-            Some(Token::Int(n)) => Expr::Int(*n),
-            Some(Token::Str(s)) => Expr::Str(s.clone()),
-            Some(Token::Ident(s)) if s == "true" => Expr::Bool(true),
-            Some(Token::Ident(s)) if s == "false" => Expr::Bool(false),
-            Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => Expr::Ident(s.clone()),
+        let line = self.line();
+        let kind = match self.peek() {
+            Some(Token::Int(n)) => ExprKind::Int(*n),
+            Some(Token::Str(s)) => ExprKind::Str(s.clone()),
+            Some(Token::Ident(s)) if s == "true" => ExprKind::Bool(true),
+            Some(Token::Ident(s)) if s == "false" => ExprKind::Bool(false),
+            Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => ExprKind::Ident(s.clone()),
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;
                 let inner = self.expr()?;
@@ -492,7 +513,7 @@ impl Parser<'_> {
             _ => return self.fail("expected an expression"),
         };
         self.pos += 1;
-        Ok(expr)
+        Ok(Expr::new(line, kind))
     }
 }
 
@@ -517,26 +538,69 @@ mod tests {
     }
 
     fn expr(src: &str) -> Expr {
-        match body(&format!("let x = {src}")).remove(0) {
-            Stmt::Let { init: Some(e), .. } => e,
+        match body(&format!("let x = {src}")).remove(0).kind() {
+            StmtKind::Let { init: Some(e), .. } => e.clone(),
             other => panic!("expected a let with initializer, got {other:?}"),
         }
     }
 
+    fn ex(kind: ExprKind) -> Expr {
+        Expr::new(0, kind)
+    }
+
+    fn st(kind: StmtKind) -> Stmt {
+        Stmt::new(0, kind)
+    }
+
     fn int(n: i64) -> Expr {
-        Expr::Int(n)
+        ex(ExprKind::Int(n))
     }
 
     fn id(s: &str) -> Expr {
-        Expr::Ident(s.to_string())
+        ex(ExprKind::Ident(s.to_string()))
     }
 
     fn bin(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
-        Expr::Binary {
+        ex(ExprKind::Binary {
             op,
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
-        }
+        })
+    }
+
+    fn unary(op: UnaryOp, e: Expr) -> Expr {
+        ex(ExprKind::Unary {
+            op,
+            expr: Box::new(e),
+        })
+    }
+
+    fn member(base: Expr, name: &str) -> Expr {
+        ex(ExprKind::Member {
+            base: Box::new(base),
+            name: name.to_string(),
+        })
+    }
+
+    fn range(lo: Expr, hi: Expr, inclusive: bool) -> Expr {
+        ex(ExprKind::Range {
+            lo: Box::new(lo),
+            hi: Box::new(hi),
+            inclusive,
+        })
+    }
+
+    fn declare(name: &str, mutable: bool, ty: Option<&str>, init: Option<Expr>) -> Stmt {
+        st(StmtKind::Let {
+            name: name.to_string(),
+            mutable,
+            ty: ty.map(str::to_string),
+            init,
+        })
+    }
+
+    fn assign(target: Expr, op: Option<BinOp>, value: Expr) -> Stmt {
+        st(StmtKind::Assign { target, op, value })
     }
 
     fn param(label: Option<&str>, name: &str, ty: &str) -> Param {
@@ -573,6 +637,19 @@ mod tests {
     }
 
     #[test]
+    fn a_function_remembers_the_line_it_starts_on() {
+        assert_eq!(func("\n\nfunc f() { }").line(), 3);
+    }
+
+    #[test]
+    fn a_struct_remembers_the_line_it_starts_on() {
+        let Decl::Struct(s) = try_parse("\nstruct P { }").unwrap() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(s.line(), 2);
+    }
+
+    #[test]
     fn a_return_type_is_optional() {
         assert_eq!(func("func f() { }").ret(), None);
         assert_eq!(func("func f() -> Int { return 1 }").ret(), Some("Int"));
@@ -603,24 +680,9 @@ mod tests {
         assert_eq!(
             body("var a = 1\nlet b: Int = 2\nvar c: Int"),
             vec![
-                Stmt::Let {
-                    name: "a".into(),
-                    mutable: true,
-                    ty: None,
-                    init: Some(int(1))
-                },
-                Stmt::Let {
-                    name: "b".into(),
-                    mutable: false,
-                    ty: Some("Int".into()),
-                    init: Some(int(2)),
-                },
-                Stmt::Let {
-                    name: "c".into(),
-                    mutable: true,
-                    ty: Some("Int".into()),
-                    init: None
-                },
+                declare("a", true, None, Some(int(1))),
+                declare("b", false, Some("Int"), Some(int(2))),
+                declare("c", true, Some("Int"), None),
             ]
         );
     }
@@ -667,71 +729,45 @@ mod tests {
             expr("-a * !b"),
             bin(
                 BinOp::Mul,
-                Expr::Unary {
-                    op: UnaryOp::Neg,
-                    expr: Box::new(id("a"))
-                },
-                Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr: Box::new(id("b"))
-                },
+                unary(UnaryOp::Neg, id("a")),
+                unary(UnaryOp::Not, id("b")),
             )
         );
     }
 
     #[test]
     fn literals_cover_integers_booleans_and_strings() {
-        assert_eq!(expr("true"), Expr::Bool(true));
-        assert_eq!(expr("false"), Expr::Bool(false));
-        assert_eq!(expr("\"hi\""), Expr::Str("hi".to_string()));
+        assert_eq!(expr("true"), ex(ExprKind::Bool(true)));
+        assert_eq!(expr("false"), ex(ExprKind::Bool(false)));
+        assert_eq!(expr("\"hi\""), ex(ExprKind::Str("hi".to_string())));
     }
 
     #[test]
     fn calls_carry_optional_argument_labels() {
         assert_eq!(
             expr("P(x: 1, 2)"),
-            Expr::Call {
+            ex(ExprKind::Call {
                 callee: "P".to_string(),
                 args: vec![
                     Arg::new(Some("x".to_string()), int(1)),
                     Arg::new(None, int(2))
                 ],
-            }
+            })
         );
     }
 
     #[test]
     fn member_access_chains_to_the_left() {
-        assert_eq!(
-            expr("a.b.c"),
-            Expr::Member {
-                base: Box::new(Expr::Member {
-                    base: Box::new(id("a")),
-                    name: "b".to_string()
-                }),
-                name: "c".to_string(),
-            }
-        );
+        assert_eq!(expr("a.b.c"), member(member(id("a"), "b"), "c"));
     }
 
     #[test]
     fn ranges_are_half_open_or_closed_and_bind_looser_than_addition() {
         assert_eq!(
             expr("0..<n + 1"),
-            Expr::Range {
-                lo: Box::new(int(0)),
-                hi: Box::new(bin(BinOp::Add, id("n"), int(1))),
-                inclusive: false,
-            }
+            range(int(0), bin(BinOp::Add, id("n"), int(1)), false)
         );
-        assert_eq!(
-            expr("1...3"),
-            Expr::Range {
-                lo: Box::new(int(1)),
-                hi: Box::new(int(3)),
-                inclusive: true
-            }
-        );
+        assert_eq!(expr("1...3"), range(int(1), int(3), true));
     }
 
     #[test]
@@ -739,24 +775,9 @@ mod tests {
         assert_eq!(
             body("s = 1\ns += 2\np.x *= 3"),
             vec![
-                Stmt::Assign {
-                    target: id("s"),
-                    op: None,
-                    value: int(1)
-                },
-                Stmt::Assign {
-                    target: id("s"),
-                    op: Some(BinOp::Add),
-                    value: int(2)
-                },
-                Stmt::Assign {
-                    target: Expr::Member {
-                        base: Box::new(id("p")),
-                        name: "x".to_string()
-                    },
-                    op: Some(BinOp::Mul),
-                    value: int(3),
-                },
+                assign(id("s"), None, int(1)),
+                assign(id("s"), Some(BinOp::Add), int(2)),
+                assign(member(id("p"), "x"), Some(BinOp::Mul), int(3)),
             ]
         );
     }
@@ -769,35 +790,31 @@ mod tests {
     #[test]
     fn if_chains_nest_else_if_inside_the_else_branch() {
         let stmts = body("if a { return 1 } else if b { return 2 } else { return 3 }");
-        let Stmt::If {
+        let StmtKind::If {
             else_body: Some(outer_else),
             ..
-        } = &stmts[0]
+        } = stmts[0].kind()
         else {
             panic!("expected an if with else");
         };
-        let Stmt::If {
+        let StmtKind::If {
             else_body: Some(inner_else),
             ..
-        } = &outer_else[0]
+        } = outer_else[0].kind()
         else {
             panic!("expected a nested if with else");
         };
-        assert_eq!(inner_else, &vec![Stmt::Return(Some(int(3)))]);
+        assert_eq!(inner_else, &vec![st(StmtKind::Return(Some(int(3))))]);
     }
 
     #[test]
     fn while_loops_take_a_condition_and_a_body() {
         assert_eq!(
             body("while a < 3 { a += 1 }"),
-            vec![Stmt::While {
+            vec![st(StmtKind::While {
                 cond: bin(BinOp::Lt, id("a"), int(3)),
-                body: vec![Stmt::Assign {
-                    target: id("a"),
-                    op: Some(BinOp::Add),
-                    value: int(1)
-                }],
-            }]
+                body: vec![assign(id("a"), Some(BinOp::Add), int(1))],
+            })]
         );
     }
 
@@ -805,26 +822,22 @@ mod tests {
     fn for_loops_iterate_a_variable_over_a_range() {
         assert_eq!(
             body("for k in 0..<3 { }"),
-            vec![Stmt::For {
+            vec![st(StmtKind::For {
                 var: "k".to_string(),
-                iter: Expr::Range {
-                    lo: Box::new(int(0)),
-                    hi: Box::new(int(3)),
-                    inclusive: false
-                },
+                iter: range(int(0), int(3), false),
                 body: vec![],
-            }]
+            })]
         );
     }
 
     #[test]
     fn return_takes_a_value_only_when_one_follows_on_the_same_line() {
-        assert_eq!(body("return"), vec![Stmt::Return(None)]);
+        assert_eq!(body("return"), vec![st(StmtKind::Return(None))]);
         assert_eq!(
             body("return\n1"),
-            vec![Stmt::Return(None), Stmt::Expr(int(1))]
+            vec![st(StmtKind::Return(None)), st(StmtKind::Expr(int(1)))]
         );
-        assert_eq!(body("return 1"), vec![Stmt::Return(Some(int(1)))]);
+        assert_eq!(body("return 1"), vec![st(StmtKind::Return(Some(int(1))))]);
     }
 
     #[test]
@@ -842,16 +855,8 @@ mod tests {
         assert_eq!(
             body("let a = 1\n-2"),
             vec![
-                Stmt::Let {
-                    name: "a".into(),
-                    mutable: false,
-                    ty: None,
-                    init: Some(int(1))
-                },
-                Stmt::Expr(Expr::Unary {
-                    op: UnaryOp::Neg,
-                    expr: Box::new(int(2))
-                }),
+                declare("a", false, None, Some(int(1))),
+                st(StmtKind::Expr(unary(UnaryOp::Neg, int(2)))),
             ]
         );
     }
@@ -883,5 +888,50 @@ mod tests {
     #[test]
     fn a_block_without_its_closing_brace_is_an_error() {
         assert!(try_parse("func f() { let a = 1").is_err());
+    }
+
+    #[test]
+    fn statements_remember_the_line_they_start_on() {
+        let lines: Vec<u32> = body("a = 1\n\nb = 2").iter().map(Stmt::line).collect();
+        assert_eq!(lines, vec![2, 4]);
+    }
+
+    #[test]
+    fn expressions_remember_the_line_they_start_on() {
+        let stmts = body("a = 1\nb = a + 2");
+        let StmtKind::Assign { value, .. } = stmts[1].kind() else {
+            panic!("expected an assignment");
+        };
+        let ExprKind::Binary { lhs, rhs, .. } = value.kind() else {
+            panic!("expected a binary expression");
+        };
+        assert_eq!((value.line(), lhs.line(), rhs.line()), (3, 3, 3));
+    }
+
+    #[test]
+    fn an_operand_may_continue_on_the_next_line_after_its_operator() {
+        let stmts = body("let a = 1 +\n  2");
+        let StmtKind::Let {
+            init: Some(value), ..
+        } = stmts[0].kind()
+        else {
+            panic!("expected a declaration");
+        };
+        let ExprKind::Binary { lhs, rhs, .. } = value.kind() else {
+            panic!("expected a binary expression");
+        };
+        assert_eq!((lhs.line(), rhs.line()), (2, 3));
+    }
+
+    #[test]
+    fn nodes_with_the_same_shape_are_equal_whatever_their_lines() {
+        assert_eq!(
+            Expr::new(1, ExprKind::Int(7)),
+            Expr::new(9, ExprKind::Int(7))
+        );
+        assert_ne!(
+            Expr::new(1, ExprKind::Int(7)),
+            Expr::new(1, ExprKind::Int(8))
+        );
     }
 }

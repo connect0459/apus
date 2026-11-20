@@ -17,6 +17,7 @@ impl Decl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncDecl {
+    line: u32,
     name: String,
     params: Vec<Param>,
     ret: Option<TypeName>,
@@ -24,13 +25,24 @@ pub struct FuncDecl {
 }
 
 impl FuncDecl {
-    pub fn new(name: String, params: Vec<Param>, ret: Option<TypeName>, body: Vec<Stmt>) -> Self {
+    pub fn new(
+        line: u32,
+        name: String,
+        params: Vec<Param>,
+        ret: Option<TypeName>,
+        body: Vec<Stmt>,
+    ) -> Self {
         Self {
+            line,
             name,
             params,
             ret,
             body,
         }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
     }
 
     pub fn name(&self) -> &str {
@@ -77,13 +89,18 @@ impl Param {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
+    line: u32,
     name: String,
     fields: Vec<Field>,
 }
 
 impl StructDecl {
-    pub fn new(name: String, fields: Vec<Field>) -> Self {
-        Self { name, fields }
+    pub fn new(line: u32, name: String, fields: Vec<Field>) -> Self {
+        Self { line, name, fields }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
     }
 
     pub fn name(&self) -> &str {
@@ -120,8 +137,34 @@ impl Field {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    line: u32,
+    kind: StmtKind,
+}
+
+impl Stmt {
+    pub fn new(line: u32, kind: StmtKind) -> Self {
+        Self { line, kind }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn kind(&self) -> &StmtKind {
+        &self.kind
+    }
+}
+
+impl PartialEq for Stmt {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub enum StmtKind {
     Let {
         name: String,
         mutable: bool,
@@ -151,8 +194,34 @@ pub enum Stmt {
     Expr(Expr),
 }
 
+#[derive(Debug, Clone)]
+pub struct Expr {
+    line: u32,
+    kind: ExprKind,
+}
+
+impl Expr {
+    pub fn new(line: u32, kind: ExprKind) -> Self {
+        Self { line, kind }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn kind(&self) -> &ExprKind {
+        &self.kind
+    }
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub enum ExprKind {
     Int(i64),
     Bool(bool),
     Str(String),
