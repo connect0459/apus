@@ -10,3 +10,6 @@ cranelift-module = "0.137.3"
 cranelift-native = "0.137.3"
 cranelift-object = "0.137.3"
 target-lexicon = "0.13.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"

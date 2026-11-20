@@ -1,9 +1,11 @@
 pub mod ast;
 pub mod check;
 pub mod codegen;
+pub mod driver;
 pub mod hash;
 pub mod items;
 pub mod lexer;
+pub mod link;
 pub mod parser;
 pub mod tir;
 pub mod types;
