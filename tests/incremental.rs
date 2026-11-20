@@ -1,0 +1,238 @@
+use apus::cache::Cache;
+use apus::driver::{BuildOptions, BuildReport, Linker, build_with};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+struct Project {
+    dir: tempfile::TempDir,
+}
+
+impl Project {
+    fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    fn output(&self) -> PathBuf {
+        self.dir.path().join("prog")
+    }
+
+    fn cache_dir(&self) -> PathBuf {
+        self.dir.path().join(".apus-cache")
+    }
+
+    fn build(&self, source: &str) -> BuildReport {
+        build_with(source, &self.output(), &BuildOptions::default()).unwrap()
+    }
+
+    fn build_with(&self, source: &str, options: &BuildOptions) -> BuildReport {
+        build_with(source, &self.output(), options).unwrap()
+    }
+
+    fn run(&self) -> String {
+        let output = Command::new(self.output()).output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+}
+
+fn program(values: &[i64]) -> String {
+    let mut source = String::new();
+    for (index, value) in values.iter().enumerate() {
+        source.push_str(&format!("func f{index}() -> Int {{ return {value} }}\n"));
+    }
+    let sum: Vec<String> = (0..values.len()).map(|i| format!("f{i}()")).collect();
+    source.push_str(&format!("func main() {{ print({}) }}\n", sum.join(" + ")));
+    source
+}
+
+const FUNCTIONS: usize = 6;
+
+fn values() -> Vec<i64> {
+    (1..=FUNCTIONS as i64).collect()
+}
+
+#[test]
+fn the_first_build_compiles_every_function_and_links() {
+    let project = Project::new();
+    let report = project.build(&program(&values()));
+    assert!(!report.was_skipped());
+    assert_eq!(report.compiled(), FUNCTIONS + 1);
+    assert_eq!(report.reused(), 0);
+    assert!(report.linked());
+    assert_eq!(project.run(), "21\n");
+}
+
+#[test]
+fn rebuilding_unchanged_source_does_nothing() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    let report = project.build(&source);
+    assert!(report.was_skipped());
+    assert_eq!(report.compiled(), 0);
+    assert!(!report.linked());
+    assert_eq!(project.run(), "21\n");
+}
+
+#[test]
+fn editing_only_a_comment_reuses_everything_and_skips_linking() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    let report = project.build(&format!("// a note\n{source}"));
+    assert!(!report.was_skipped());
+    assert_eq!(report.compiled(), 0);
+    assert_eq!(report.reused(), FUNCTIONS + 1);
+    assert!(!report.linked());
+}
+
+#[test]
+fn editing_one_function_recompiles_only_that_function() {
+    let project = Project::new();
+    project.build(&program(&values()));
+    let mut edited = values();
+    edited[2] = 100;
+    let report = project.build(&program(&edited));
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(report.reused(), FUNCTIONS);
+    assert!(report.linked());
+    assert_eq!(project.run(), "118\n");
+}
+
+#[test]
+fn adding_an_unrelated_function_compiles_only_that_function() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    let report = project.build(&format!("{source}func extra() {{ }}\n"));
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(report.reused(), FUNCTIONS + 1);
+}
+
+#[test]
+fn changing_a_callees_result_type_recompiles_the_callee_and_its_caller() {
+    let project = Project::new();
+    let before = "func g() -> Int { return 1 }\nfunc h() { print(g()) }\nfunc other() { }\nfunc main() { h() }\n";
+    let after = "func g() -> Bool { return true }\nfunc h() { print(g()) }\nfunc other() { }\nfunc main() { h() }\n";
+    project.build(before);
+    let report = project.build(after);
+    assert_eq!(report.compiled(), 2);
+    assert_eq!(report.reused(), 2);
+    assert_eq!(project.run(), "true\n");
+}
+
+#[test]
+fn changing_a_struct_recompiles_only_the_functions_using_it() {
+    let project = Project::new();
+    let before = "struct A { var x: Int }\nstruct B { var y: Int }\n\
+        func useA() -> Int { let a = A(x: 1)\nreturn a.x }\n\
+        func useB() -> Int { let b = B(y: 2)\nreturn b.y }\n\
+        func main() { print(useA() + useB()) }\n";
+    let after = before
+        .replace(
+            "struct A { var x: Int }",
+            "struct A { var z: Bool; var x: Int }",
+        )
+        .replace("A(x: 1)", "A(z: true, x: 1)");
+    project.build(before);
+    let report = project.build(&after);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "3\n");
+}
+
+#[test]
+fn a_deleted_program_is_relinked_without_recompiling() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    std::fs::remove_file(project.output()).unwrap();
+    let report = project.build(&source);
+    assert_eq!(report.compiled(), 0);
+    assert_eq!(report.reused(), FUNCTIONS + 1);
+    assert!(report.linked());
+    assert_eq!(project.run(), "21\n");
+}
+
+#[test]
+fn a_different_compiler_stamp_invalidates_the_cache() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build_with(&source, &BuildOptions::default().with_compiler_stamp(1));
+    let report = project.build_with(&source, &BuildOptions::default().with_compiler_stamp(2));
+    assert_eq!(report.compiled(), FUNCTIONS + 1);
+    assert!(report.linked());
+}
+
+#[test]
+fn a_corrupt_cache_is_rebuilt_instead_of_failing() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    std::fs::write(project.cache_dir().join("functions.pack"), b"corrupt").unwrap();
+    std::fs::write(project.cache_dir().join("stamp"), b"corrupt").unwrap();
+    let report = project.build(&source);
+    assert_eq!(report.compiled(), FUNCTIONS + 1);
+    assert_eq!(project.run(), "21\n");
+}
+
+#[test]
+fn the_cache_keeps_only_the_functions_of_the_latest_build() {
+    let project = Project::new();
+    let mut current = values();
+    project.build(&program(&current));
+    for round in 0..4 {
+        current[round] += 50;
+        project.build(&program(&current));
+    }
+    assert_eq!(Cache::open(&project.cache_dir()).len(), FUNCTIONS + 1);
+}
+
+#[test]
+fn a_failed_build_leaves_the_previous_program_and_cache_usable() {
+    let project = Project::new();
+    let source = program(&values());
+    project.build(&source);
+    let broken = source.replace("return 1 }", "return true }");
+    assert!(build_with(&broken, &project.output(), &BuildOptions::default()).is_err());
+    assert_eq!(project.run(), "21\n");
+    let report = project.build(&source);
+    assert!(report.was_skipped());
+}
+
+#[test]
+fn the_cache_directory_can_be_placed_elsewhere() {
+    let project = Project::new();
+    let elsewhere = project.dir.path().join("elsewhere");
+    let options = BuildOptions::default().with_cache_dir(elsewhere.clone());
+    project.build_with(&program(&values()), &options);
+    assert!(elsewhere.join("functions.pack").exists());
+    assert!(!project.cache_dir().exists());
+}
+
+fn run_at(path: &Path) -> String {
+    String::from_utf8(Command::new(path).output().unwrap().stdout).unwrap()
+}
+
+#[test]
+fn both_linkers_produce_a_working_program() {
+    for linker in [Linker::Ld, Linker::Cc] {
+        let project = Project::new();
+        project.build_with(
+            &program(&values()),
+            &BuildOptions::default().with_linker(linker),
+        );
+        assert_eq!(run_at(&project.output()), "21\n", "{linker:?}");
+    }
+}
+
+#[test]
+fn a_stale_sdk_location_is_refreshed() {
+    let project = Project::new();
+    std::fs::create_dir_all(project.cache_dir()).unwrap();
+    std::fs::write(project.cache_dir().join("sdk"), "/no/such/sdk\n0.0\n").unwrap();
+    let options = BuildOptions::default().with_linker(Linker::Ld);
+    project.build_with(&program(&values()), &options);
+    assert_eq!(project.run(), "21\n");
+}

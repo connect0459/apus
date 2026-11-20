@@ -33,7 +33,13 @@ fn main() {
     let object = compile(&funcs, &sigs.layouts()).unwrap();
     let generated = t.elapsed();
     let t = Instant::now();
-    link(&object, std::path::Path::new(&output)).unwrap();
+    link(
+        &object,
+        std::path::Path::new(&output),
+        apus::link::Linker::Cc,
+        std::path::Path::new(&format!("{output}.cache")),
+    )
+    .unwrap();
     let linked = t.elapsed();
     println!(
         "front(lex+split+parse)={front:?} check={checked:?} codegen={generated:?} link={linked:?} object={}KiB",

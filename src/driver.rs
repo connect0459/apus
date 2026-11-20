@@ -1,12 +1,22 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use std::time::UNIX_EPOCH;
 
 use crate::ast::Decl;
+use crate::cache::Cache;
 use crate::check::{CheckError, Signatures, check_func};
-use crate::codegen::{CodegenError, compile};
+use crate::codegen::{Backend, CodegenError};
+use crate::entry::FuncEntry;
+use crate::hash::{Fnv1a, hash_bytes};
 use crate::items::{SplitError, split_items};
+use crate::key::function_key;
 use crate::lexer::{LexError, lex};
 use crate::link::{LinkError, link};
 use crate::parser::{ParseError, parse_item};
+use crate::stamp::BuildStamp;
+use crate::tir::{TFunc, TStruct};
+
+pub use crate::link::Linker;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BuildError {
@@ -83,7 +93,80 @@ impl From<LinkError> for BuildError {
     }
 }
 
-pub fn build(source: &str, output: &Path) -> Result<(), BuildError> {
+pub fn build(source: &str, output: &Path) -> Result<BuildReport, BuildError> {
+    build_with(source, output, &BuildOptions::default())
+}
+
+pub fn build_with(
+    source: &str,
+    output: &Path,
+    options: &BuildOptions,
+) -> Result<BuildReport, BuildError> {
+    let cache_dir = options
+        .cache_dir
+        .clone()
+        .unwrap_or_else(|| default_cache_dir(output));
+    let compiler_stamp = options
+        .compiler_stamp
+        .unwrap_or_else(default_compiler_stamp);
+    let source_hash = hash_bytes(source.as_bytes());
+    let previous = BuildStamp::load(&cache_dir).filter(|s| s.compiler_stamp() == compiler_stamp);
+    if previous
+        .as_ref()
+        .is_some_and(|p| p.source_hash() == source_hash && p.output_is_intact(output))
+    {
+        return Ok(BuildReport {
+            skipped: true,
+            ..BuildReport::default()
+        });
+    }
+
+    let (funcs, layouts) = front_end(source)?;
+    let backend = Backend::new()?;
+    let mut cache = Cache::open(&cache_dir);
+    let mut entries: Vec<Option<FuncEntry>> = Vec::with_capacity(funcs.len());
+    let mut missing = Vec::new();
+    let keys: Vec<u64> = funcs
+        .iter()
+        .map(|f| function_key(f, &layouts, compiler_stamp))
+        .collect();
+    for (index, key) in keys.iter().enumerate() {
+        let hit = cache.get(*key).cloned();
+        if hit.is_none() {
+            missing.push(index);
+        }
+        entries.push(hit);
+    }
+    for index in &missing {
+        let entry = backend.compile_function(&funcs[*index], &layouts)?;
+        cache.put(keys[*index], entry.clone());
+        entries[*index] = Some(entry);
+    }
+    let entries: Vec<FuncEntry> = entries.into_iter().flatten().collect();
+    let object = backend.assemble(&entries)?;
+    let _ = cache.save();
+
+    let object_hash = hash_bytes(&object);
+    let link_needed = !previous
+        .as_ref()
+        .is_some_and(|p| p.object_hash() == object_hash && p.output_is_intact(output));
+    if link_needed {
+        link(&object, output, options.linker, &cache_dir)?;
+        if let Some(stamp) = BuildStamp::new(source_hash, compiler_stamp, object_hash, output) {
+            let _ = stamp.save(&cache_dir);
+        }
+    } else if let Some(previous) = previous {
+        let _ = previous.with_source_hash(source_hash).save(&cache_dir);
+    }
+    Ok(BuildReport {
+        skipped: false,
+        compiled: missing.len(),
+        reused: entries.len() - missing.len(),
+        linked: link_needed,
+    })
+}
+
+fn front_end(source: &str) -> Result<(Vec<TFunc>, Vec<TStruct>), BuildError> {
     let tokens = lex(source)?;
     let mut decls = Vec::new();
     for item in split_items(&tokens)? {
@@ -99,6 +182,90 @@ pub fn build(source: &str, output: &Path) -> Result<(), BuildError> {
     if !funcs.iter().any(|f| f.name() == "main") {
         return Err(BuildError::new("no 'main' function"));
     }
-    link(&compile(&funcs, &sigs.layouts())?, output)?;
-    Ok(())
+    Ok((funcs, sigs.layouts()))
+}
+
+fn default_cache_dir(output: &Path) -> PathBuf {
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    parent.join(".apus-cache")
+}
+
+fn default_compiler_stamp() -> u64 {
+    let mut hasher = Fnv1a::new();
+    hasher.write(env!("CARGO_PKG_VERSION").as_bytes());
+    if let Some(metadata) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::metadata(exe).ok())
+    {
+        hasher.write(&metadata.len().to_le_bytes());
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+        hasher.write(&modified.map_or(0, |d| d.as_nanos()).to_le_bytes());
+    }
+    hasher.finish()
+}
+
+#[derive(Debug, Clone)]
+pub struct BuildOptions {
+    cache_dir: Option<PathBuf>,
+    linker: Linker,
+    compiler_stamp: Option<u64>,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            cache_dir: None,
+            linker: Linker::Ld,
+            compiler_stamp: None,
+        }
+    }
+}
+
+impl BuildOptions {
+    pub fn with_cache_dir(mut self, dir: PathBuf) -> Self {
+        self.cache_dir = Some(dir);
+        self
+    }
+
+    pub fn with_linker(mut self, linker: Linker) -> Self {
+        self.linker = linker;
+        self
+    }
+
+    pub fn with_compiler_stamp(mut self, stamp: u64) -> Self {
+        self.compiler_stamp = Some(stamp);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuildReport {
+    skipped: bool,
+    compiled: usize,
+    reused: usize,
+    linked: bool,
+}
+
+impl BuildReport {
+    pub fn was_skipped(&self) -> bool {
+        self.skipped
+    }
+
+    pub fn compiled(&self) -> usize {
+        self.compiled
+    }
+
+    pub fn reused(&self) -> usize {
+        self.reused
+    }
+
+    pub fn linked(&self) -> bool {
+        self.linked
+    }
 }

@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         }
     };
     match build(&source, &parsed.output) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
             match error.line() {
                 Some(line) => {
