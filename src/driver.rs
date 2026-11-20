@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use std::time::UNIX_EPOCH;
 
-use crate::ast::Decl;
+use crate::ast::{Decl, FuncDecl};
 use crate::cache::Cache;
 use crate::check::{CheckError, Signatures, check_func};
 use crate::codegen::{Backend, CodegenError};
@@ -13,6 +15,7 @@ use crate::key::function_key;
 use crate::lexer::{LexError, lex};
 use crate::link::{LinkError, link};
 use crate::memo::ItemMemo;
+use crate::mono::Instantiator;
 use crate::parser::{ParseError, parse_item, parse_signature};
 use crate::stamp::BuildStamp;
 use crate::tir::TFunc;
@@ -126,38 +129,50 @@ pub fn build_with(
     let items = split_items(&tokens)?;
     let digest = signature_digest(&items);
     let memo = ItemMemo::load(&cache_dir).filter(|m| m.is_valid_for(compiler_stamp, digest));
+    let memo_valid = memo.is_some();
     let mut cache = Cache::open(&cache_dir);
 
     let mut slots: Vec<Slot> = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        if item.kind() != ItemKind::Func {
+        if item.kind() != ItemKind::Func || item.is_generic() {
             continue;
         }
         let known = memo.as_ref().and_then(|m| {
-            let key = m.function_key(item.hash())?;
-            let entry = cache.get(key)?.clone();
-            Some((key, entry))
+            m.function_keys(item.hash())?
+                .iter()
+                .map(|key| Some((*key, cache.get(*key)?.clone())))
+                .collect::<Option<Vec<_>>>()
         });
         slots.push(Slot {
             item_index: index,
             item_hash: item.hash(),
             known,
-            checked: None,
+            unit: None,
         });
+    }
+    if !items
+        .iter()
+        .any(|i| i.kind() == ItemKind::Func && !i.is_generic() && i.name() == "main")
+    {
+        return Err(BuildError::new("no 'main' function"));
     }
 
     let dirty: Vec<usize> = (0..slots.len())
         .filter(|slot| slots[*slot].known.is_none())
         .collect();
     let mut layouts = Vec::new();
+    let mut instance_units: Vec<Unit> = Vec::new();
     if !dirty.is_empty() {
         let mut needs_body = vec![false; items.len()];
+        for (index, item) in items.iter().enumerate() {
+            needs_body[index] = item.kind() != ItemKind::Func || item.is_generic();
+        }
         for slot in &dirty {
             needs_body[slots[*slot].item_index] = true;
         }
         let mut decls = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
-            let parse = if item.kind() == ItemKind::Struct || needs_body[index] {
+            let parse = if needs_body[index] {
                 parse_item
             } else {
                 parse_signature
@@ -165,51 +180,111 @@ pub fn build_with(
             decls.push(parse(item.tokens())?);
         }
         let sigs = Signatures::collect(&decls)?;
-        layouts = sigs.layouts();
+        let mut generic_decls: HashMap<&str, &FuncDecl> = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if let (true, Decl::Func(func)) = (item.is_generic(), &decls[index]) {
+                generic_decls.insert(func.name(), func);
+            }
+        }
+        let mut generic_checked: HashMap<String, Rc<TFunc>> = HashMap::new();
+        if !memo_valid {
+            for func in generic_decls.values() {
+                generic_checked.insert(func.name().to_string(), Rc::new(check_func(func, &sigs)?));
+            }
+        }
+        let mut provider = |name: &str| -> Result<Rc<TFunc>, String> {
+            if let Some(found) = generic_checked.get(name) {
+                return Ok(Rc::clone(found));
+            }
+            let func = generic_decls
+                .get(name)
+                .ok_or_else(|| format!("cannot find generic function '{name}'"))?;
+            let typed = Rc::new(check_func(func, &sigs).map_err(|e| e.message().to_string())?);
+            generic_checked.insert(name.to_string(), Rc::clone(&typed));
+            Ok(typed)
+        };
+        let mut instantiator = Instantiator::new(&sigs, &mut provider);
+        let mut resolved: Vec<(usize, TFunc, Vec<usize>)> = Vec::new();
         for slot in &dirty {
-            if let Decl::Func(func) = &decls[slots[*slot].item_index] {
-                let typed = check_func(func, &sigs)?;
-                let key = function_key(&typed, &layouts, compiler_stamp);
-                let entry = cache.get(key).cloned();
-                slots[*slot].known = entry.map(|e| (key, e));
-                slots[*slot].checked = Some((key, typed));
+            let Decl::Func(func) = &decls[slots[*slot].item_index] else {
+                continue;
+            };
+            let typed = check_func(func, &sigs)?;
+            let (typed, direct) = instantiator.resolve(&typed).map_err(BuildError::new)?;
+            resolved.push((*slot, typed, direct));
+        }
+        layouts = sigs.layouts();
+        let instance_keys: Vec<u64> = instantiator
+            .instances()
+            .iter()
+            .map(|f| function_key(f, &layouts, compiler_stamp))
+            .collect();
+        for (slot, typed, direct) in resolved {
+            let key = function_key(&typed, &layouts, compiler_stamp);
+            let mut instances: Vec<usize> = instantiator.closure(&direct);
+            instances.sort_unstable();
+            slots[slot].unit = Some((
+                Unit { key, func: typed },
+                instances.iter().map(|id| instance_keys[*id]).collect(),
+            ));
+            for id in instances {
+                if !instance_units.iter().any(|u| u.key == instance_keys[id]) {
+                    instance_units.push(Unit {
+                        key: instance_keys[id],
+                        func: instantiator.instances()[id].clone(),
+                    });
+                }
             }
         }
     }
-    if !items
-        .iter()
-        .any(|i| i.kind() == ItemKind::Func && i.name() == "main")
-    {
-        return Err(BuildError::new("no 'main' function"));
-    }
 
     let backend = Backend::new()?;
-    let missing: Vec<usize> = (0..slots.len())
-        .filter(|slot| slots[*slot].known.is_none())
-        .collect();
-    let to_compile: Vec<&TFunc> = missing
+    let mut compiled_entries: HashMap<u64, FuncEntry> = HashMap::new();
+    let mut missing: Vec<&Unit> = Vec::new();
+    let own_units = slots
         .iter()
-        .filter_map(|slot| slots[*slot].checked.as_ref().map(|(_, typed)| typed))
-        .collect();
+        .filter_map(|s| s.unit.as_ref().map(|(unit, _)| unit));
+    for unit in own_units.chain(instance_units.iter()) {
+        if compiled_entries.contains_key(&unit.key) || missing.iter().any(|m| m.key == unit.key) {
+            continue;
+        }
+        match cache.get(unit.key) {
+            Some(entry) => {
+                compiled_entries.insert(unit.key, entry.clone());
+            }
+            None => missing.push(unit),
+        }
+    }
+    let to_compile: Vec<&TFunc> = missing.iter().map(|u| &u.func).collect();
     let threads = options
         .threads
         .unwrap_or_else(|| automatic_threads(to_compile.len()));
     let compiled = backend.compile_many(&to_compile, &layouts, threads)?;
-    for (slot, entry) in missing.iter().zip(compiled) {
-        if let Some((key, _)) = &slots[*slot].checked {
-            let key = *key;
-            cache.put(key, entry.clone());
-            slots[*slot].known = Some((key, entry));
+    let compiled_count = missing.len();
+    for (unit, entry) in missing.iter().zip(compiled) {
+        cache.put(unit.key, entry.clone());
+        compiled_entries.insert(unit.key, entry);
+    }
+
+    let mut entries: Vec<FuncEntry> = Vec::new();
+    let mut emitted: HashSet<u64> = HashSet::new();
+    let mut memo_pairs: Vec<(u64, Vec<u64>)> = Vec::new();
+    for slot in slots {
+        let keyed: Vec<(u64, FuncEntry)> = match (slot.known, slot.unit) {
+            (Some(known), _) => known,
+            (None, Some((unit, instance_keys))) => std::iter::once(unit.key)
+                .chain(instance_keys)
+                .filter_map(|key| compiled_entries.get(&key).map(|e| (key, e.clone())))
+                .collect(),
+            (None, None) => Vec::new(),
+        };
+        memo_pairs.push((slot.item_hash, keyed.iter().map(|(key, _)| *key).collect()));
+        for (key, entry) in keyed {
+            if emitted.insert(key) {
+                entries.push(entry);
+            }
         }
     }
-    let memo_pairs: Vec<(u64, u64)> = slots
-        .iter()
-        .filter_map(|s| s.known.as_ref().map(|(key, _)| (s.item_hash, *key)))
-        .collect();
-    let entries: Vec<FuncEntry> = slots
-        .into_iter()
-        .filter_map(|s| s.known.map(|(_, entry)| entry))
-        .collect();
     let object = backend.assemble(&entries)?;
     let _ = cache.save();
     let _ = ItemMemo::new(compiler_stamp, digest, memo_pairs).save(&cache_dir);
@@ -229,17 +304,22 @@ pub fn build_with(
     Ok(BuildReport {
         skipped: false,
         checked: dirty.len(),
-        compiled: missing.len(),
-        reused: entries.len() - missing.len(),
+        compiled: compiled_count,
+        reused: entries.len().saturating_sub(compiled_count),
         linked: link_needed,
     })
+}
+
+struct Unit {
+    key: u64,
+    func: TFunc,
 }
 
 struct Slot {
     item_index: usize,
     item_hash: u64,
-    known: Option<(u64, FuncEntry)>,
-    checked: Option<(u64, TFunc)>,
+    known: Option<Vec<(u64, FuncEntry)>>,
+    unit: Option<(Unit, Vec<u64>)>,
 }
 
 const FUNCTIONS_PER_THREAD: usize = 16;

@@ -323,3 +323,69 @@ fn a_missing_main_is_reported_even_when_every_function_is_unchanged() {
     );
     assert!(error.is_err());
 }
+
+const GENERIC_PROGRAM: &str = "func id<T>(_ x: T) -> T { return x }\n\
+    func a() -> Int { return id(1) }\n\
+    func b() -> Int { return 2 }\n\
+    func main() { print(a() + b() + id(10)) }\n";
+
+#[test]
+fn a_generic_instance_is_compiled_once_and_shared_by_its_callers() {
+    let project = Project::new();
+    let report = project.build(GENERIC_PROGRAM);
+    assert_eq!(report.compiled(), 4);
+    assert_eq!(project.run(), "13\n");
+}
+
+#[test]
+fn editing_a_comment_reuses_the_generic_instances_without_checking() {
+    let project = Project::new();
+    project.build(GENERIC_PROGRAM);
+    let report = project.build(&format!("// note\n{GENERIC_PROGRAM}"));
+    assert_eq!(report.checked(), 0);
+    assert_eq!(report.compiled(), 0);
+    assert_eq!(report.reused(), 4);
+}
+
+#[test]
+fn editing_an_unrelated_function_keeps_the_instances_of_unchanged_callers() {
+    let project = Project::new();
+    project.build(GENERIC_PROGRAM);
+    let report = project.build(&GENERIC_PROGRAM.replace("return 2", "return 3"));
+    assert_eq!(report.checked(), 1);
+    assert_eq!(report.compiled(), 1);
+    assert!(report.linked());
+    assert_eq!(project.run(), "14\n");
+}
+
+#[test]
+fn editing_a_generic_body_rechecks_everything_but_recompiles_only_what_changed() {
+    let project = Project::new();
+    project.build(GENERIC_PROGRAM);
+    let edited = GENERIC_PROGRAM.replace("{ return x }", "{ let y = x\nreturn y }");
+    let report = project.build(&edited);
+    assert_eq!(report.checked(), 3);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "13\n");
+}
+
+#[test]
+fn a_new_use_of_a_generic_function_adds_only_the_new_instance() {
+    let project = Project::new();
+    project.build(GENERIC_PROGRAM);
+    let edited = GENERIC_PROGRAM.replace(
+        "print(a() + b() + id(10))",
+        "print(a() + b() + id(10))\nprint(id(true))",
+    );
+    let report = project.build(&edited);
+    assert_eq!(report.compiled(), 2);
+    assert_eq!(project.run(), "13\ntrue\n");
+}
+
+#[test]
+fn generic_instances_are_dropped_from_the_cache_when_no_longer_used() {
+    let project = Project::new();
+    project.build(GENERIC_PROGRAM);
+    project.build("func main() { print(1) }\n");
+    assert_eq!(Cache::open(&project.cache_dir()).len(), 1);
+}

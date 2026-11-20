@@ -134,6 +134,7 @@ pub enum TExpr {
     },
     Call {
         callee: String,
+        type_args: Vec<Ty>,
         args: Vec<TExpr>,
         ret: Ty,
     },
@@ -169,5 +170,143 @@ impl TExpr {
                 *ty
             }
         }
+    }
+}
+
+type TyMap<'a, E> = &'a mut dyn FnMut(Ty) -> Result<Ty, E>;
+type CallMap<'a, E> = &'a mut dyn FnMut(String, Vec<Ty>) -> Result<(String, Vec<Ty>), E>;
+
+struct Rewriter<'a, E> {
+    ty: TyMap<'a, E>,
+    call: CallMap<'a, E>,
+}
+
+impl TFunc {
+    pub fn rewrite<E>(
+        &self,
+        name: String,
+        ty: TyMap<'_, E>,
+        call: CallMap<'_, E>,
+    ) -> Result<TFunc, E> {
+        let mut rewriter = Rewriter { ty, call };
+        let ret = (rewriter.ty)(self.ret)?;
+        let locals = self
+            .locals
+            .iter()
+            .map(|t| (rewriter.ty)(*t))
+            .collect::<Result<Vec<_>, E>>()?;
+        let body = rewriter.stmts(&self.body)?;
+        Ok(TFunc::new(name, self.param_count, ret, locals, body))
+    }
+}
+
+impl<E> Rewriter<'_, E> {
+    fn stmts(&mut self, stmts: &[TStmt]) -> Result<Vec<TStmt>, E> {
+        stmts.iter().map(|s| self.stmt(s)).collect()
+    }
+
+    fn stmt(&mut self, stmt: &TStmt) -> Result<TStmt, E> {
+        Ok(match stmt {
+            TStmt::Let { local, init } => TStmt::Let {
+                local: *local,
+                init: self.expr(init)?,
+            },
+            TStmt::Assign { local, value } => TStmt::Assign {
+                local: *local,
+                value: self.expr(value)?,
+            },
+            TStmt::AssignField {
+                local,
+                index,
+                value,
+            } => TStmt::AssignField {
+                local: *local,
+                index: *index,
+                value: self.expr(value)?,
+            },
+            TStmt::Return(value) => TStmt::Return(match value {
+                Some(v) => Some(self.expr(v)?),
+                None => None,
+            }),
+            TStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => TStmt::If {
+                cond: self.expr(cond)?,
+                then_body: self.stmts(then_body)?,
+                else_body: self.stmts(else_body)?,
+            },
+            TStmt::While { cond, body } => TStmt::While {
+                cond: self.expr(cond)?,
+                body: self.stmts(body)?,
+            },
+            TStmt::ForRange {
+                local,
+                lo,
+                hi,
+                inclusive,
+                body,
+            } => TStmt::ForRange {
+                local: *local,
+                lo: self.expr(lo)?,
+                hi: self.expr(hi)?,
+                inclusive: *inclusive,
+                body: self.stmts(body)?,
+            },
+            TStmt::Print(expr) => TStmt::Print(self.expr(expr)?),
+            TStmt::Eval(expr) => TStmt::Eval(self.expr(expr)?),
+        })
+    }
+
+    fn exprs(&mut self, exprs: &[TExpr]) -> Result<Vec<TExpr>, E> {
+        exprs.iter().map(|e| self.expr(e)).collect()
+    }
+
+    fn expr(&mut self, expr: &TExpr) -> Result<TExpr, E> {
+        Ok(match expr {
+            TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) => expr.clone(),
+            TExpr::Local(local, ty) => TExpr::Local(*local, (self.ty)(*ty)?),
+            TExpr::Unary { op, expr } => TExpr::Unary {
+                op: *op,
+                expr: Box::new(self.expr(expr)?),
+            },
+            TExpr::Binary { op, lhs, rhs } => TExpr::Binary {
+                op: *op,
+                lhs: Box::new(self.expr(lhs)?),
+                rhs: Box::new(self.expr(rhs)?),
+            },
+            TExpr::Call {
+                callee,
+                type_args,
+                args,
+                ret,
+            } => {
+                let type_args = type_args
+                    .iter()
+                    .map(|t| (self.ty)(*t))
+                    .collect::<Result<Vec<_>, E>>()?;
+                let (callee, type_args) = (self.call)(callee.clone(), type_args)?;
+                TExpr::Call {
+                    callee,
+                    type_args,
+                    args: self.exprs(args)?,
+                    ret: (self.ty)(*ret)?,
+                }
+            }
+            TExpr::StructInit { ty, args } => TExpr::StructInit {
+                ty: (self.ty)(*ty)?,
+                args: self.exprs(args)?,
+            },
+            TExpr::Field { base, index, ty } => TExpr::Field {
+                base: Box::new(self.expr(base)?),
+                index: *index,
+                ty: (self.ty)(*ty)?,
+            },
+            TExpr::EnumCase { ty, index } => TExpr::EnumCase {
+                ty: (self.ty)(*ty)?,
+                index: *index,
+            },
+        })
     }
 }

@@ -1,451 +1,14 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    Arg, BinOp, CaseLabel, Decl, EnumDecl, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind,
-    StructDecl, SwitchCase, UnaryOp,
+    Arg, BinOp, CaseLabel, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind, SwitchCase, TypeRef,
+    UnaryOp,
 };
-use crate::tir::{LocalId, TExpr, TFunc, TStmt, TStruct};
-use crate::types::{EnumId, StructId, Ty};
+use crate::sigs::{CResult, EnumSig, FieldSig, PRINT, scope_of};
+use crate::tir::{LocalId, TExpr, TFunc, TStmt};
+use crate::types::Ty;
 
-const PRINT: &str = "print";
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CheckError {
-    line: u32,
-    message: String,
-}
-
-impl CheckError {
-    fn at(line: u32, message: impl Into<String>) -> Self {
-        Self {
-            line,
-            message: message.into(),
-        }
-    }
-
-    pub fn line(&self) -> u32 {
-        self.line
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-type CResult<T> = Result<T, CheckError>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParamSig {
-    label: Option<String>,
-    ty: Ty,
-}
-
-impl ParamSig {
-    pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
-    }
-
-    pub fn ty(&self) -> Ty {
-        self.ty
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FuncSig {
-    params: Vec<ParamSig>,
-    ret: Ty,
-}
-
-impl FuncSig {
-    pub fn params(&self) -> &[ParamSig] {
-        &self.params
-    }
-
-    pub fn ret(&self) -> Ty {
-        self.ret
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldSig {
-    name: String,
-    ty: Ty,
-    mutable: bool,
-}
-
-impl FieldSig {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn ty(&self) -> Ty {
-        self.ty
-    }
-
-    pub fn is_mutable(&self) -> bool {
-        self.mutable
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StructSig {
-    name: String,
-    fields: Vec<FieldSig>,
-}
-
-impl StructSig {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn fields(&self) -> &[FieldSig] {
-        &self.fields
-    }
-
-    fn field(&self, name: &str) -> Option<(usize, &FieldSig)> {
-        self.fields.iter().enumerate().find(|(_, f)| f.name == name)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CaseSig {
-    name: String,
-    payload: Vec<Ty>,
-}
-
-impl CaseSig {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn payload(&self) -> &[Ty] {
-        &self.payload
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct EnumSig {
-    name: String,
-    cases: Vec<CaseSig>,
-    has_payload: bool,
-    layout: Option<StructId>,
-}
-
-impl EnumSig {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn cases(&self) -> &[CaseSig] {
-        &self.cases
-    }
-
-    fn case_index(&self, name: &str) -> Option<usize> {
-        self.cases.iter().position(|c| c.name == name)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Signatures {
-    funcs: HashMap<String, FuncSig>,
-    structs: Vec<StructSig>,
-    struct_ids: HashMap<String, StructId>,
-    enums: Vec<EnumSig>,
-    enum_ids: HashMap<String, EnumId>,
-}
-
-impl Signatures {
-    pub fn collect(decls: &[Decl]) -> CResult<Self> {
-        let mut sigs = Self {
-            funcs: HashMap::new(),
-            structs: Vec::new(),
-            struct_ids: HashMap::new(),
-            enums: Vec::new(),
-            enum_ids: HashMap::new(),
-        };
-        let enum_decls: Vec<&EnumDecl> = decls
-            .iter()
-            .filter_map(|d| match d {
-                Decl::Enum(e) => Some(e),
-                _ => None,
-            })
-            .collect();
-        for decl in &enum_decls {
-            sigs.register_enum_name(decl)?;
-        }
-        let struct_decls: Vec<&StructDecl> = decls
-            .iter()
-            .filter_map(|d| match d {
-                Decl::Struct(s) => Some(s),
-                Decl::Func(_) | Decl::Enum(_) => None,
-            })
-            .collect();
-        for decl in &struct_decls {
-            sigs.register_struct_name(decl)?;
-        }
-        for (index, decl) in enum_decls.iter().enumerate() {
-            sigs.register_enum_cases(EnumId::new(index), decl)?;
-        }
-        for decl in &struct_decls {
-            let fields = sigs.struct_fields(decl)?;
-            sigs.structs.push(StructSig {
-                name: decl.name().to_string(),
-                fields,
-            });
-        }
-        for index in 0..enum_decls.len() {
-            sigs.register_enum_layout(EnumId::new(index));
-        }
-        for decl in decls {
-            if let Decl::Func(func) = decl {
-                sigs.register_func(func)?;
-            }
-        }
-        Ok(sigs)
-    }
-
-    fn register_enum_name(&mut self, decl: &EnumDecl) -> CResult<()> {
-        let id = EnumId::new(self.enums.len());
-        if self.enum_ids.insert(decl.name().to_string(), id).is_some() {
-            return Err(CheckError::at(
-                decl.line(),
-                format!("duplicate type '{}'", decl.name()),
-            ));
-        }
-        self.enums.push(EnumSig {
-            name: decl.name().to_string(),
-            cases: Vec::new(),
-            has_payload: decl.has_payload(),
-            layout: None,
-        });
-        Ok(())
-    }
-
-    fn register_enum_cases(&mut self, id: EnumId, decl: &EnumDecl) -> CResult<()> {
-        let mut cases: Vec<CaseSig> = Vec::new();
-        for case in decl.cases() {
-            if cases.iter().any(|c| c.name == case.name()) {
-                return Err(CheckError::at(
-                    decl.line(),
-                    format!("duplicate case '{}' in '{}'", case.name(), decl.name()),
-                ));
-            }
-            let payload = case
-                .payload()
-                .iter()
-                .map(|name| self.payload_type(decl, name))
-                .collect::<CResult<Vec<_>>>()?;
-            cases.push(CaseSig {
-                name: case.name().to_string(),
-                payload,
-            });
-        }
-        self.enums[id.index()].cases = cases;
-        Ok(())
-    }
-
-    fn payload_type(&self, decl: &EnumDecl, name: &str) -> CResult<Ty> {
-        if let Some(ty) = Ty::from_builtin_name(name) {
-            return Ok(ty);
-        }
-        match self.enum_ids.get(name).map(|id| &self.enums[id.index()]) {
-            Some(sig) if !sig.has_payload => self.resolve_type(name, decl.line()),
-            Some(_) => Err(CheckError::at(
-                decl.line(),
-                format!("a payload cannot have the type '{name}' yet: it carries values"),
-            )),
-            None if self.struct_ids.contains_key(name) => Err(CheckError::at(
-                decl.line(),
-                format!(
-                    "a payload cannot have a struct type yet: '{name}' in '{}'",
-                    decl.name()
-                ),
-            )),
-            None => Err(CheckError::at(
-                decl.line(),
-                format!("unknown payload type: '{name}' in '{}'", decl.name()),
-            )),
-        }
-    }
-
-    fn register_enum_layout(&mut self, id: EnumId) {
-        let sig = &self.enums[id.index()];
-        if !sig.has_payload {
-            return;
-        }
-        let widest = sig.cases.iter().map(|c| c.payload.len()).max().unwrap_or(0);
-        let mut fields = vec![FieldSig {
-            name: "tag".to_string(),
-            ty: Ty::Int,
-            mutable: false,
-        }];
-        for slot in 0..widest {
-            fields.push(FieldSig {
-                name: format!("payload{slot}"),
-                ty: Ty::Int,
-                mutable: false,
-            });
-        }
-        let layout = StructId::new(self.structs.len());
-        let name = sig.name.clone();
-        self.structs.push(StructSig { name, fields });
-        self.enums[id.index()].layout = Some(layout);
-    }
-
-    pub fn enum_ty(&self, id: EnumId) -> Ty {
-        match self.enums[id.index()].layout {
-            Some(layout) => Ty::Struct(layout),
-            None => Ty::Enum(id),
-        }
-    }
-
-    pub fn enum_of(&self, ty: Ty) -> Option<&EnumSig> {
-        match ty {
-            Ty::Enum(id) => self.enum_sig(id),
-            Ty::Struct(layout) => self.enums.iter().find(|e| e.layout == Some(layout)),
-            _ => None,
-        }
-    }
-
-    fn register_struct_name(&mut self, decl: &StructDecl) -> CResult<()> {
-        if self.enum_ids.contains_key(decl.name()) {
-            return Err(CheckError::at(
-                decl.line(),
-                format!("duplicate type '{}'", decl.name()),
-            ));
-        }
-        let id = StructId::new(self.struct_ids.len());
-        if self
-            .struct_ids
-            .insert(decl.name().to_string(), id)
-            .is_some()
-        {
-            return Err(CheckError::at(
-                decl.line(),
-                format!("duplicate type '{}'", decl.name()),
-            ));
-        }
-        Ok(())
-    }
-
-    fn struct_fields(&self, decl: &StructDecl) -> CResult<Vec<FieldSig>> {
-        let mut fields: Vec<FieldSig> = Vec::new();
-        for field in decl.fields() {
-            let payload_free_enum = self
-                .enum_ids
-                .get(field.ty())
-                .filter(|id| !self.enums[id.index()].has_payload)
-                .map(|id| Ty::Enum(*id));
-            let Some(ty) = Ty::from_builtin_name(field.ty()).or(payload_free_enum) else {
-                let reason = if self.struct_ids.contains_key(field.ty())
-                    || self.enum_ids.contains_key(field.ty())
-                {
-                    "a struct field cannot have a struct type yet"
-                } else {
-                    "unknown field type"
-                };
-                return Err(CheckError::at(
-                    decl.line(),
-                    format!("{reason}: '{}' in '{}'", field.ty(), decl.name()),
-                ));
-            };
-            if fields.iter().any(|f| f.name == field.name()) {
-                return Err(CheckError::at(
-                    decl.line(),
-                    format!("duplicate field '{}' in '{}'", field.name(), decl.name()),
-                ));
-            }
-            fields.push(FieldSig {
-                name: field.name().to_string(),
-                ty,
-                mutable: field.is_mutable(),
-            });
-        }
-        Ok(fields)
-    }
-
-    fn register_func(&mut self, func: &FuncDecl) -> CResult<()> {
-        if func.name() == PRINT {
-            return Err(CheckError::at(
-                func.line(),
-                "'print' is a reserved function name",
-            ));
-        }
-        if self.struct_ids.contains_key(func.name()) || self.enum_ids.contains_key(func.name()) {
-            return Err(CheckError::at(
-                func.line(),
-                format!("'{}' is already the name of a type", func.name()),
-            ));
-        }
-        let sig = self.signature_of(func)?;
-        if self.funcs.insert(func.name().to_string(), sig).is_some() {
-            return Err(CheckError::at(
-                func.line(),
-                format!("duplicate function '{}'", func.name()),
-            ));
-        }
-        Ok(())
-    }
-
-    fn signature_of(&self, func: &FuncDecl) -> CResult<FuncSig> {
-        let params = func
-            .params()
-            .iter()
-            .map(|p| {
-                Ok(ParamSig {
-                    label: p.label().map(str::to_string),
-                    ty: self.resolve_type(p.ty(), func.line())?,
-                })
-            })
-            .collect::<CResult<Vec<_>>>()?;
-        let ret = match func.ret() {
-            Some(name) => self.resolve_type(name, func.line())?,
-            None => Ty::Void,
-        };
-        Ok(FuncSig { params, ret })
-    }
-
-    pub fn resolve_type(&self, name: &str, line: u32) -> CResult<Ty> {
-        Ty::from_builtin_name(name)
-            .or_else(|| self.struct_ids.get(name).map(|id| Ty::Struct(*id)))
-            .or_else(|| self.enum_ids.get(name).map(|id| self.enum_ty(*id)))
-            .ok_or_else(|| CheckError::at(line, format!("unknown type '{name}'")))
-    }
-
-    pub fn func(&self, name: &str) -> Option<&FuncSig> {
-        self.funcs.get(name)
-    }
-
-    pub fn enum_sig(&self, id: EnumId) -> Option<&EnumSig> {
-        self.enums.get(id.index())
-    }
-
-    pub fn struct_sig(&self, id: StructId) -> Option<&StructSig> {
-        self.structs.get(id.index())
-    }
-
-    pub fn type_name(&self, ty: Ty) -> String {
-        match ty {
-            Ty::Int => "Int".to_string(),
-            Ty::Bool => "Bool".to_string(),
-            Ty::Str => "String".to_string(),
-            Ty::Void => "Void".to_string(),
-            Ty::Struct(id) => self
-                .struct_sig(id)
-                .map_or_else(String::new, |s| s.name.clone()),
-            Ty::Enum(id) => self
-                .enum_sig(id)
-                .map_or_else(String::new, |e| e.name.clone()),
-        }
-    }
-
-    pub fn layouts(&self) -> Vec<TStruct> {
-        self.structs
-            .iter()
-            .map(|s| TStruct::new(s.name.clone(), s.fields.iter().map(|f| f.ty).collect()))
-            .collect()
-    }
-}
+pub use crate::sigs::{CheckError, Signatures};
 
 pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     let sig = sigs.func(func.name()).ok_or_else(|| {
@@ -456,15 +19,17 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     })?;
     let mut cx = FnCx {
         sigs,
-        ret: sig.ret,
+        scope: scope_of(sig.generics()),
+        expected: None,
+        ret: sig.ret(),
         locals: Vec::new(),
         scopes: vec![HashMap::new()],
     };
     for (param, param_sig) in func.params().iter().zip(sig.params()) {
-        cx.declare(func.line(), param.name(), param_sig.ty, false)?;
+        cx.declare(func.line(), param.name(), param_sig.ty(), false)?;
     }
     let body = cx.block(func.body())?;
-    if sig.ret != Ty::Void && !always_returns(func.body()) {
+    if sig.ret() != Ty::Void && !always_returns(func.body()) {
         return Err(CheckError::at(
             func.line(),
             format!(
@@ -476,7 +41,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     Ok(TFunc::new(
         func.name().to_string(),
         func.params().len(),
-        sig.ret,
+        sig.ret(),
         cx.locals,
         body,
     ))
@@ -506,12 +71,18 @@ struct Binding {
 
 struct FnCx<'a> {
     sigs: &'a Signatures,
+    scope: Vec<(String, Ty)>,
+    expected: Option<Ty>,
     ret: Ty,
     locals: Vec<Ty>,
     scopes: Vec<HashMap<String, Binding>>,
 }
 
 impl FnCx<'_> {
+    fn name_of(&self, ty: Ty) -> String {
+        self.sigs.display(ty, &self.scope)
+    }
+
     fn expect(&self, line: u32, expected: Ty, found: Ty) -> CResult<()> {
         if expected == found {
             Ok(())
@@ -520,8 +91,8 @@ impl FnCx<'_> {
                 line,
                 format!(
                     "expected {}, but found {}",
-                    self.sigs.type_name(expected),
-                    self.sigs.type_name(found)
+                    self.name_of(expected),
+                    self.name_of(found)
                 ),
             ))
         }
@@ -627,7 +198,7 @@ impl FnCx<'_> {
                     let outcome = self.case_patterns(
                         case,
                         patterns,
-                        (sig, temporary, subject_ty),
+                        (&sig, temporary, subject_ty),
                         &mut covered,
                         &mut condition,
                         &mut prelude,
@@ -680,10 +251,10 @@ impl FnCx<'_> {
     ) -> CResult<()> {
         let (sig, temporary, subject_ty) = subject;
         for pattern in patterns {
-            if pattern.type_name().is_some_and(|n| n != sig.name()) {
+            if pattern.type_name().is_some_and(|n| n != sig.base_name()) {
                 return Err(CheckError::at(
                     case.line(),
-                    format!("expected a case of '{}'", sig.name()),
+                    format!("expected a case of '{}'", sig.base_name()),
                 ));
             }
             let index = sig.case_index(pattern.case()).ok_or_else(|| {
@@ -709,7 +280,7 @@ impl FnCx<'_> {
                     prelude,
                 )?;
             }
-            let tag = if sig.has_payload {
+            let tag = if sig.has_payload() {
                 TExpr::Field {
                     base: Box::new(TExpr::Local(temporary, subject_ty)),
                     index: 0,
@@ -736,7 +307,7 @@ impl FnCx<'_> {
     }
 
     fn case_tag(&self, sig: &EnumSig, ty: Ty, index: usize) -> TExpr {
-        if sig.has_payload {
+        if sig.has_payload() {
             TExpr::Int(index as i64)
         } else {
             TExpr::EnumCase { ty, index }
@@ -796,9 +367,16 @@ impl FnCx<'_> {
                         "a variable must be initialized where it is declared",
                     ));
                 };
+                let annotated = match ty {
+                    Some(annotation) => {
+                        Some(self.sigs.resolve_type(annotation, &self.scope, line)?)
+                    }
+                    None => None,
+                };
+                self.expected = annotated;
                 let value = self.value(init)?;
-                if let Some(annotation) = ty {
-                    self.expect(line, self.sigs.resolve_type(annotation, line)?, value.ty())?;
+                if let Some(annotated) = annotated {
+                    self.expect(line, annotated, value.ty())?;
                 }
                 let local = self.declare(line, name, value.ty(), *mutable)?;
                 Ok(TStmt::Let { local, init: value })
@@ -900,13 +478,13 @@ impl FnCx<'_> {
             ));
         }
         let (index, field) = self.member_of(line, binding.ty, name)?;
-        if !field.mutable {
+        if !field.is_mutable() {
             return Err(CheckError::at(
                 line,
                 format!("cannot assign to '{name}': it is a constant"),
             ));
         }
-        let field_ty = field.ty;
+        let field_ty = field.ty();
         let rhs = self.value(value)?;
         let current = TExpr::Field {
             base: Box::new(TExpr::Local(binding.local, binding.ty)),
@@ -946,17 +524,17 @@ impl FnCx<'_> {
         }
     }
 
-    fn member_of(&self, line: u32, ty: Ty, name: &str) -> CResult<(usize, &FieldSig)> {
+    fn member_of(&self, line: u32, ty: Ty, name: &str) -> CResult<(usize, FieldSig)> {
         let Ty::Struct(id) = ty else {
             return Err(CheckError::at(
                 line,
-                format!("a value of type {} has no members", self.sigs.type_name(ty)),
+                format!("a value of type {} has no members", self.name_of(ty)),
             ));
         };
         if self.sigs.enum_of(ty).is_some() {
             return Err(CheckError::at(
                 line,
-                format!("a value of type {} has no members", self.sigs.type_name(ty)),
+                format!("a value of type {} has no members", self.name_of(ty)),
             ));
         }
         let sig = self
@@ -964,6 +542,7 @@ impl FnCx<'_> {
             .struct_sig(id)
             .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
         sig.field(name)
+            .map(|(index, field)| (index, field.clone()))
             .ok_or_else(|| CheckError::at(line, format!("'{}' has no member '{name}'", sig.name())))
     }
 
@@ -976,6 +555,7 @@ impl FnCx<'_> {
                 "this function does not return a value",
             )),
             (Some(expr), ret) => {
+                self.expected = Some(ret);
                 let value = self.value(expr)?;
                 self.expect(line, ret, value.ty())?;
                 Ok(TStmt::Return(Some(value)))
@@ -1013,7 +593,7 @@ impl FnCx<'_> {
         if callee == PRINT {
             return self.print(expr.line(), args);
         }
-        Ok(TStmt::Eval(self.call(expr.line(), callee, args)?))
+        Ok(TStmt::Eval(self.call(expr.line(), callee, args, None)?))
     }
 
     fn print(&mut self, line: u32, args: &[Arg]) -> CResult<TStmt> {
@@ -1033,10 +613,7 @@ impl FnCx<'_> {
         if !matches!(value.ty(), Ty::Int | Ty::Bool | Ty::Str) {
             return Err(CheckError::at(
                 line,
-                format!(
-                    "cannot print a value of type {}",
-                    self.sigs.type_name(value.ty())
-                ),
+                format!("cannot print a value of type {}", self.name_of(value.ty())),
             ));
         }
         Ok(TStmt::Print(value))
@@ -1067,6 +644,7 @@ impl FnCx<'_> {
 
     fn expr(&mut self, expr: &Expr) -> CResult<TExpr> {
         let line = expr.line();
+        let expected = self.expected.take();
         match expr.kind() {
             ExprKind::Int(n) => Ok(TExpr::Int(*n)),
             ExprKind::Bool(b) => Ok(TExpr::Bool(*b)),
@@ -1104,12 +682,21 @@ impl FnCx<'_> {
             ExprKind::Call { callee, .. } if callee == PRINT => {
                 Err(CheckError::at(line, "print does not produce a value"))
             }
-            ExprKind::Call { callee, args } => self.call(line, callee, args),
-            ExprKind::Member { base, name } if self.names_enum(base) => {
-                self.enum_case(line, base, name)
+            ExprKind::Call { callee, args } => self.call(line, callee, args, expected),
+            ExprKind::GenericCall {
+                callee,
+                type_args,
+                args,
+            } => self.generic_call(line, callee, type_args, args),
+            ExprKind::GenericName { name, .. } => Err(CheckError::at(
+                line,
+                format!("'{name}' with type arguments is not a value"),
+            )),
+            ExprKind::Member { base, name } if self.enum_target(base).is_some() => {
+                self.enum_case(line, base, name, expected)
             }
-            ExprKind::MemberCall { base, name, args } if self.names_enum(base) => {
-                self.enum_construct(line, base, name, args)
+            ExprKind::MemberCall { base, name, args } if self.enum_target(base).is_some() => {
+                self.enum_construct(line, base, name, args, expected)
             }
             ExprKind::MemberCall { .. } => Err(CheckError::at(
                 line,
@@ -1118,7 +705,7 @@ impl FnCx<'_> {
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 let (index, field) = self.member_of(line, base.ty(), name)?;
-                let ty = field.ty;
+                let ty = field.ty();
                 Ok(TExpr::Field {
                     base: Box::new(base),
                     index,
@@ -1132,36 +719,122 @@ impl FnCx<'_> {
         }
     }
 
-    fn names_enum(&self, base: &Expr) -> bool {
+    fn enum_target<'e>(&self, base: &'e Expr) -> Option<(usize, Option<&'e [TypeRef]>)> {
         match base.kind() {
-            ExprKind::Ident(name) => {
-                self.lookup(name, base.line()).is_err() && self.sigs.enum_ids.contains_key(name)
+            ExprKind::Ident(name) if self.lookup(name, base.line()).is_err() => {
+                self.sigs.enum_def(name).map(|def| (def, None))
             }
-            _ => false,
+            ExprKind::GenericName { name, type_args } => self
+                .sigs
+                .enum_def(name)
+                .map(|def| (def, Some(type_args.as_slice()))),
+            _ => None,
         }
     }
 
-    fn enum_named<'s>(
-        sigs: &'s Signatures,
+    fn explicit_args(
+        &self,
+        line: u32,
+        name: &str,
+        expected: usize,
+        given: &[TypeRef],
+    ) -> CResult<Vec<Ty>> {
+        if given.len() != expected {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{name}' expects {expected} type argument(s), but {} were given",
+                    given.len()
+                ),
+            ));
+        }
+        given
+            .iter()
+            .map(|tr| self.sigs.resolve_type(tr, &self.scope, line))
+            .collect()
+    }
+
+    fn infer(
+        &self,
+        line: u32,
+        owner: &str,
+        generics: &[String],
+        patterns: &[Ty],
+        values: &[TExpr],
+        context: Option<(Ty, Ty)>,
+    ) -> CResult<Vec<Ty>> {
+        let mut bound = vec![None; generics.len()];
+        if let Some((result, expected)) = context {
+            let mut attempt = bound.clone();
+            if self.sigs.unify(result, expected, &mut attempt) {
+                bound = attempt;
+            }
+        }
+        let callee_scope = scope_of(generics);
+        for (pattern, value) in patterns.iter().zip(values) {
+            if !self.sigs.unify(*pattern, value.ty(), &mut bound) {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "expected {}, but found {}",
+                        self.sigs.display(*pattern, &callee_scope),
+                        self.name_of(value.ty())
+                    ),
+                ));
+            }
+        }
+        bound
+            .into_iter()
+            .zip(generics)
+            .map(|(ty, name)| {
+                ty.ok_or_else(|| {
+                    CheckError::at(
+                        line,
+                        format!("cannot infer the type parameter '{name}' of '{owner}'"),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn enum_case(
+        &self,
         line: u32,
         base: &Expr,
-    ) -> CResult<(EnumId, &'s EnumSig)> {
-        let ExprKind::Ident(type_name) = base.kind() else {
+        name: &str,
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let Some((def, explicit)) = self.enum_target(base) else {
             return Err(CheckError::at(line, "internal error: not an enum name"));
         };
-        let id = sigs
-            .enum_ids
-            .get(type_name)
-            .copied()
-            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
+        let sigs = self.sigs;
+        let generics = sigs.enum_generics(def);
+        let base_name = match base.kind() {
+            ExprKind::Ident(n) | ExprKind::GenericName { name: n, .. } => n.clone(),
+            _ => String::new(),
+        };
+        let args = match (generics.is_empty(), explicit) {
+            (true, None) => Vec::new(),
+            (_, Some(given)) => self.explicit_args(line, &base_name, generics.len(), given)?,
+            (false, None) => {
+                let identity: Vec<Ty> = (0..generics.len()).map(Ty::Param).collect();
+                let pattern = sigs.instantiate_enum(def, identity, &scope_of(generics), line)?;
+                let context = expected.map(|e| (sigs.enum_ty(pattern), e));
+                self.infer(line, &base_name, generics, &[], &[], context)
+                    .map_err(|_| {
+                        CheckError::at(
+                            line,
+                            format!(
+                                "cannot infer the type parameters of '{base_name}'; write '{base_name}<...>.{name}'"
+                            ),
+                        )
+                    })?
+            }
+        };
+        let id = sigs.instantiate_enum(def, args, &self.scope, line)?;
         let sig = sigs
             .enum_sig(id)
             .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
-        Ok((id, sig))
-    }
-
-    fn enum_case(&self, line: u32, base: &Expr, name: &str) -> CResult<TExpr> {
-        let (id, sig) = Self::enum_named(self.sigs, line, base)?;
         let index = sig.case_index(name).ok_or_else(|| {
             CheckError::at(line, format!("'{}' has no case '{name}'", sig.name()))
         })?;
@@ -1174,8 +847,8 @@ impl FnCx<'_> {
                 ),
             ));
         }
-        let ty = self.sigs.enum_ty(id);
-        if sig.has_payload {
+        let ty = sigs.enum_ty(id);
+        if sig.has_payload() {
             Ok(TExpr::StructInit {
                 ty,
                 args: vec![TExpr::Int(index as i64)],
@@ -1191,36 +864,66 @@ impl FnCx<'_> {
         base: &Expr,
         name: &str,
         args: &[Arg],
+        expected: Option<Ty>,
     ) -> CResult<TExpr> {
+        let Some((def, explicit)) = self.enum_target(base) else {
+            return Err(CheckError::at(line, "internal error: not an enum name"));
+        };
         let sigs = self.sigs;
-        let (id, sig) = Self::enum_named(sigs, line, base)?;
-        let index = sig.case_index(name).ok_or_else(|| {
-            CheckError::at(line, format!("'{}' has no case '{name}'", sig.name()))
-        })?;
-        let payload = sig.cases()[index].payload();
+        let generics = sigs.enum_generics(def);
+        let base_name = match base.kind() {
+            ExprKind::Ident(n) | ExprKind::GenericName { name: n, .. } => n.clone(),
+            _ => String::new(),
+        };
+        let inferring = !generics.is_empty() && explicit.is_none();
+        let pattern_id = if inferring {
+            let identity: Vec<Ty> = (0..generics.len()).map(Ty::Param).collect();
+            sigs.instantiate_enum(def, identity, &scope_of(generics), line)?
+        } else {
+            let given = explicit.unwrap_or(&[]);
+            let type_args = self.explicit_args(line, &base_name, generics.len(), given)?;
+            sigs.instantiate_enum(def, type_args, &self.scope, line)?
+        };
+        let pattern_sig = sigs
+            .enum_sig(pattern_id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?;
+        let index = pattern_sig
+            .case_index(name)
+            .ok_or_else(|| CheckError::at(line, format!("'{base_name}' has no case '{name}'")))?;
+        let payload = pattern_sig.cases()[index].payload().to_vec();
         if args.len() != payload.len() {
             return Err(CheckError::at(
                 line,
                 format!(
                     "'{}.{name}' takes {} value(s), but {} were given",
-                    sig.name(),
+                    pattern_sig.name(),
                     payload.len(),
                     args.len()
                 ),
             ));
         }
-        let mut values = vec![TExpr::Int(index as i64)];
-        for (arg, expected) in args.iter().zip(payload) {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
             if arg.label().is_some() {
                 return Err(CheckError::at(line, "a payload value cannot be labeled"));
             }
-            let value = self.value(arg.value())?;
-            self.expect(line, *expected, value.ty())?;
-            values.push(value);
+            values.push(self.value(arg.value())?);
         }
+        let id = if inferring {
+            let context = expected.map(|e| (sigs.enum_ty(pattern_id), e));
+            let type_args = self.infer(line, &base_name, generics, &payload, &values, context)?;
+            sigs.instantiate_enum(def, type_args, &self.scope, line)?
+        } else {
+            for (value, expected) in values.iter().zip(&payload) {
+                self.expect(line, *expected, value.ty())?;
+            }
+            pattern_id
+        };
+        let mut slots = vec![TExpr::Int(index as i64)];
+        slots.extend(values);
         Ok(TExpr::StructInit {
             ty: sigs.enum_ty(id),
-            args: values,
+            args: slots,
         })
     }
 
@@ -1245,10 +948,7 @@ impl FnCx<'_> {
                 } else {
                     Err(CheckError::at(
                         line,
-                        format!(
-                            "equality is not supported for {} yet",
-                            self.sigs.type_name(lhs)
-                        ),
+                        format!("equality is not supported for {} yet", self.name_of(lhs)),
                     ))
                 }
             }
@@ -1259,10 +959,16 @@ impl FnCx<'_> {
         }
     }
 
-    fn call(&mut self, line: u32, callee: &str, args: &[Arg]) -> CResult<TExpr> {
+    fn call(
+        &mut self,
+        line: u32,
+        callee: &str,
+        args: &[Arg],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
         let sigs = self.sigs;
-        if let Some(id) = sigs.struct_ids.get(callee) {
-            return self.struct_init(line, *id, args);
+        if let Some(def) = sigs.struct_def(callee) {
+            return self.struct_init(line, def, None, args, expected);
         }
         let sig = sigs
             .func(callee)
@@ -1277,6 +983,7 @@ impl FnCx<'_> {
                 ),
             ));
         }
+        let generic = !sig.generics().is_empty();
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(sig.params()) {
             if arg.label() != param.label() {
@@ -1290,20 +997,69 @@ impl FnCx<'_> {
                 ));
             }
             let value = self.value(arg.value())?;
-            self.expect(line, param.ty(), value.ty())?;
+            if !generic {
+                self.expect(line, param.ty(), value.ty())?;
+            }
             checked.push(value);
         }
+        if !generic {
+            return Ok(TExpr::Call {
+                callee: callee.to_string(),
+                type_args: Vec::new(),
+                args: checked,
+                ret: sig.ret(),
+            });
+        }
+        let patterns: Vec<Ty> = sig.params().iter().map(|p| p.ty()).collect();
+        let context = expected.map(|e| (sig.ret(), e));
+        let type_args = self.infer(line, callee, sig.generics(), &patterns, &checked, context)?;
+        let ret = sigs.subst(sig.ret(), &type_args, &self.scope, line)?;
         Ok(TExpr::Call {
             callee: callee.to_string(),
+            type_args,
             args: checked,
-            ret: sig.ret(),
+            ret,
         })
     }
 
-    fn struct_init(&mut self, line: u32, id: StructId, args: &[Arg]) -> CResult<TExpr> {
+    fn generic_call(
+        &mut self,
+        line: u32,
+        callee: &str,
+        type_args: &[TypeRef],
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        match self.sigs.struct_def(callee) {
+            Some(def) => self.struct_init(line, def, Some(type_args), args, None),
+            None => Err(CheckError::at(
+                line,
+                format!("'{callee}' does not take explicit type arguments"),
+            )),
+        }
+    }
+
+    fn struct_init(
+        &mut self,
+        line: u32,
+        def: usize,
+        explicit: Option<&[TypeRef]>,
+        args: &[Arg],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
         let sigs = self.sigs;
+        let generics = sigs.struct_generics(def);
+        let base_name = sigs.struct_sig_of_def(def).unwrap_or_default();
+        let inferring = !generics.is_empty() && explicit.is_none();
+        let pattern_id = if inferring {
+            let identity: Vec<Ty> = (0..generics.len()).map(Ty::Param).collect();
+            sigs.instantiate_struct(def, identity, &scope_of(generics), line)?
+        } else {
+            let type_args =
+                self.explicit_args(line, &base_name, generics.len(), explicit.unwrap_or(&[]))?;
+            sigs.instantiate_struct(def, type_args, &self.scope, line)?
+        };
         let sig = sigs
-            .struct_sig(id)
+            .struct_sig(pattern_id)
             .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
         if args.len() != sig.fields().len() {
             return Err(CheckError::at(
@@ -1316,7 +1072,7 @@ impl FnCx<'_> {
                 ),
             ));
         }
-        let mut checked = Vec::with_capacity(args.len());
+        let mut values = Vec::with_capacity(args.len());
         for (arg, field) in args.iter().zip(sig.fields()) {
             if arg.label() != Some(field.name()) {
                 return Err(CheckError::at(
@@ -1328,12 +1084,22 @@ impl FnCx<'_> {
                 ));
             }
             let value = self.value(arg.value())?;
-            self.expect(line, field.ty(), value.ty())?;
-            checked.push(value);
+            if !inferring {
+                self.expect(line, field.ty(), value.ty())?;
+            }
+            values.push(value);
         }
+        let id = if inferring {
+            let patterns: Vec<Ty> = sig.fields().iter().map(FieldSig::ty).collect();
+            let context = expected.map(|e| (Ty::Struct(pattern_id), e));
+            let type_args = self.infer(line, &base_name, generics, &patterns, &values, context)?;
+            sigs.instantiate_struct(def, type_args, &self.scope, line)?
+        } else {
+            pattern_id
+        };
         Ok(TExpr::StructInit {
             ty: Ty::Struct(id),
-            args: checked,
+            args: values,
         })
     }
 }
@@ -1341,6 +1107,7 @@ impl FnCx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Decl;
     use crate::items::split_items;
     use crate::lexer::lex;
     use crate::parser::parse_item;
@@ -1864,6 +1631,127 @@ mod tests {
     fn a_payload_enum_can_be_a_parameter_a_result_and_an_annotation() {
         let source = format!(
             "{SHAPE}func make() -> Shape {{ return Shape.circle(1) }}\nfunc use(_ s: Shape) {{ let t: Shape = s }}\nfunc main() {{ use(make()) }}"
+        );
+        assert!(check_all(&source).is_ok());
+    }
+
+    const BOX: &str = "struct Box<T> { var value: T }\n";
+    const MAYBE: &str = "enum Maybe<T> { case some(T), none }\n";
+
+    #[test]
+    fn a_value_of_a_type_parameter_can_only_be_passed_around() {
+        let source = "func keep<T>(_ a: T) -> T { let b = a\nreturn b }\nfunc main() { }";
+        assert!(check_all(source).is_ok());
+    }
+
+    #[test]
+    fn a_type_parameter_supports_no_operators_printing_or_literals() {
+        for body in ["return a == b", "print(a)\nreturn true", "return a < b"] {
+            let source = format!("func f<T>(_ a: T, _ b: T) -> Bool {{ {body} }}");
+            assert!(check_all(&source).is_err(), "{body}");
+        }
+        assert!(check_all("func f<T>(_ a: T) -> Int { return a }").is_err());
+        assert!(check_all("func f<T>(_ a: T) -> T { return 1 }").is_err());
+    }
+
+    #[test]
+    fn an_uncalled_generic_function_is_still_checked() {
+        let (line, _) = rejected_at("func f<T>(_ a: T) -> Int {\nreturn a\n}\nfunc main() { }");
+        assert_eq!(line, 2);
+    }
+
+    #[test]
+    fn calling_a_generic_function_infers_its_type_arguments_from_the_arguments() {
+        let source =
+            "func id<T>(_ x: T) -> T { return x }\nfunc main() { let a = id(1)\nlet b = id(true) }";
+        let funcs = check_all(source).unwrap();
+        assert_eq!(funcs[1].locals(), [Ty::Int, Ty::Bool]);
+    }
+
+    #[test]
+    fn conflicting_arguments_for_one_type_parameter_are_rejected() {
+        let source = "func same<T>(_ a: T, _ b: T) { }\nfunc main() { same(1, true) }";
+        assert!(check_all(source).is_err());
+    }
+
+    #[test]
+    fn a_type_parameter_that_no_argument_determines_is_reported() {
+        let source = "func make<T>(_ n: Int) -> Int { return n }\nfunc main() { let a = make(1) }";
+        let (_, message) = rejected_at(source);
+        assert!(
+            message.contains("cannot infer the type parameter 'T'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_generic_function_does_not_take_explicit_type_arguments() {
+        let source = "func id<T>(_ x: T) -> T { return x }\nfunc main() { let a = id<Int>(1) }";
+        assert!(check_all(source).is_err());
+    }
+
+    #[test]
+    fn a_generic_struct_infers_its_arguments_from_the_member_values() {
+        let source = format!("{BOX}func main() {{ let b = Box(value: 1)\nlet c: Box<Int> = b }}");
+        assert!(check_all(&source).is_ok());
+    }
+
+    #[test]
+    fn type_argument_counts_and_targets_are_checked() {
+        let too_many = format!("{BOX}func f(_ b: Box<Int, Int>) {{ }}");
+        assert!(check_all(&too_many).is_err());
+        let missing = format!("{BOX}func f(_ b: Box) {{ }}");
+        assert!(check_all(&missing).is_err());
+        assert!(check_all("func f(_ x: Int<Int>) { }").is_err());
+        assert!(check_all("func f(_ x: Missing<Int>) { }").is_err());
+    }
+
+    #[test]
+    fn a_generic_struct_cannot_hold_a_struct_through_its_type_argument() {
+        let source = format!("{BOX}struct P {{ var x: Int }}\nfunc f(_ b: Box<P>) {{ }}");
+        let (_, message) = rejected_at(&source);
+        assert!(message.contains("struct type"), "{message}");
+    }
+
+    #[test]
+    fn a_generic_struct_cannot_contain_itself() {
+        assert!(
+            check_all("struct Node<T> { var next: Node<T> }\nfunc f(_ n: Node<Int>) { }").is_err()
+        );
+    }
+
+    #[test]
+    fn a_generic_enum_case_without_values_needs_a_type_from_its_context() {
+        let bare = format!("{MAYBE}func main() {{ let m = Maybe.none }}");
+        let (_, message) = rejected_at(&bare);
+        assert!(message.contains("cannot infer"), "{message}");
+        let annotated = format!("{MAYBE}func main() {{ let m: Maybe<Int> = Maybe.none }}");
+        assert!(check_all(&annotated).is_ok());
+        let returned = format!("{MAYBE}func f() -> Maybe<Int> {{ return Maybe.none }}");
+        assert!(check_all(&returned).is_ok());
+        let explicit = format!("{MAYBE}func main() {{ let m = Maybe<Int>.none }}");
+        assert!(check_all(&explicit).is_ok());
+    }
+
+    #[test]
+    fn a_generic_enum_infers_its_argument_from_the_payload() {
+        let source =
+            format!("{MAYBE}func main() {{ let m = Maybe.some(1)\nlet n: Maybe<Int> = m }}");
+        assert!(check_all(&source).is_ok());
+        let wrong = format!("{MAYBE}func main() {{ let m: Maybe<Bool> = Maybe.some(1) }}");
+        assert!(check_all(&wrong).is_err());
+    }
+
+    #[test]
+    fn instances_of_a_generic_type_with_different_arguments_are_different_types() {
+        let source = format!("{BOX}func main() {{ let a: Box<Int> = Box(value: true) }}");
+        assert!(check_all(&source).is_err());
+    }
+
+    #[test]
+    fn a_switch_inside_a_generic_function_binds_values_of_the_type_parameter() {
+        let source = format!(
+            "{MAYBE}func get<T>(_ m: Maybe<T>, _ d: T) -> T {{\nswitch m {{\ncase .some(let v): return v\ncase .none: return d\n}}\n}}"
         );
         assert!(check_all(&source).is_ok());
     }

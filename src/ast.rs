@@ -1,4 +1,53 @@
-pub type TypeName = String;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeRef {
+    name: String,
+    args: Vec<TypeRef>,
+}
+
+impl TypeRef {
+    pub fn new(name: String, args: Vec<TypeRef>) -> Self {
+        Self { name, args }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn args(&self) -> &[TypeRef] {
+        &self.args
+    }
+}
+
+impl From<&str> for TypeRef {
+    fn from(name: &str) -> Self {
+        Self::new(name.to_string(), Vec::new())
+    }
+}
+
+impl From<String> for TypeRef {
+    fn from(name: String) -> Self {
+        Self::new(name, Vec::new())
+    }
+}
+
+impl std::fmt::Display for TypeRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)?;
+        if !self.args.is_empty() {
+            f.write_str("<")?;
+            for (index, arg) in self.args.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(",")?;
+                }
+                write!(f, "{arg}")?;
+            }
+            f.write_str(">")?;
+        }
+        Ok(())
+    }
+}
+
+pub type TypeName = TypeRef;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
@@ -21,6 +70,7 @@ impl Decl {
 pub struct FuncDecl {
     line: u32,
     name: String,
+    generics: Vec<String>,
     params: Vec<Param>,
     ret: Option<TypeName>,
     body: Vec<Stmt>,
@@ -37,10 +87,20 @@ impl FuncDecl {
         Self {
             line,
             name,
+            generics: Vec::new(),
             params,
             ret,
             body,
         }
+    }
+
+    pub fn with_generics(mut self, generics: Vec<String>) -> Self {
+        self.generics = generics;
+        self
+    }
+
+    pub fn generics(&self) -> &[String] {
+        &self.generics
     }
 
     pub fn line(&self) -> u32 {
@@ -55,8 +115,8 @@ impl FuncDecl {
         &self.params
     }
 
-    pub fn ret(&self) -> Option<&str> {
-        self.ret.as_deref()
+    pub fn ret(&self) -> Option<&TypeRef> {
+        self.ret.as_ref()
     }
 
     pub fn body(&self) -> &[Stmt] {
@@ -72,8 +132,12 @@ pub struct Param {
 }
 
 impl Param {
-    pub fn new(label: Option<String>, name: String, ty: TypeName) -> Self {
-        Self { label, name, ty }
+    pub fn new(label: Option<String>, name: String, ty: impl Into<TypeRef>) -> Self {
+        Self {
+            label,
+            name,
+            ty: ty.into(),
+        }
     }
 
     pub fn label(&self) -> Option<&str> {
@@ -84,7 +148,7 @@ impl Param {
         &self.name
     }
 
-    pub fn ty(&self) -> &str {
+    pub fn ty(&self) -> &TypeRef {
         &self.ty
     }
 }
@@ -93,12 +157,27 @@ impl Param {
 pub struct StructDecl {
     line: u32,
     name: String,
+    generics: Vec<String>,
     fields: Vec<Field>,
 }
 
 impl StructDecl {
     pub fn new(line: u32, name: String, fields: Vec<Field>) -> Self {
-        Self { line, name, fields }
+        Self {
+            line,
+            name,
+            generics: Vec::new(),
+            fields,
+        }
+    }
+
+    pub fn with_generics(mut self, generics: Vec<String>) -> Self {
+        self.generics = generics;
+        self
+    }
+
+    pub fn generics(&self) -> &[String] {
+        &self.generics
     }
 
     pub fn line(&self) -> u32 {
@@ -117,11 +196,11 @@ impl StructDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumCaseDecl {
     name: String,
-    payload: Vec<TypeName>,
+    payload: Vec<TypeRef>,
 }
 
 impl EnumCaseDecl {
-    pub fn new(name: String, payload: Vec<TypeName>) -> Self {
+    pub fn new(name: String, payload: Vec<TypeRef>) -> Self {
         Self { name, payload }
     }
 
@@ -129,7 +208,7 @@ impl EnumCaseDecl {
         &self.name
     }
 
-    pub fn payload(&self) -> &[TypeName] {
+    pub fn payload(&self) -> &[TypeRef] {
         &self.payload
     }
 }
@@ -138,12 +217,27 @@ impl EnumCaseDecl {
 pub struct EnumDecl {
     line: u32,
     name: String,
+    generics: Vec<String>,
     cases: Vec<EnumCaseDecl>,
 }
 
 impl EnumDecl {
     pub fn new(line: u32, name: String, cases: Vec<EnumCaseDecl>) -> Self {
-        Self { line, name, cases }
+        Self {
+            line,
+            name,
+            generics: Vec::new(),
+            cases,
+        }
+    }
+
+    pub fn with_generics(mut self, generics: Vec<String>) -> Self {
+        self.generics = generics;
+        self
+    }
+
+    pub fn generics(&self) -> &[String] {
+        &self.generics
     }
 
     pub fn has_payload(&self) -> bool {
@@ -171,8 +265,12 @@ pub struct Field {
 }
 
 impl Field {
-    pub fn new(name: String, mutable: bool, ty: TypeName) -> Self {
-        Self { name, mutable, ty }
+    pub fn new(name: String, mutable: bool, ty: impl Into<TypeRef>) -> Self {
+        Self {
+            name,
+            mutable,
+            ty: ty.into(),
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -183,7 +281,7 @@ impl Field {
         self.mutable
     }
 
-    pub fn ty(&self) -> &str {
+    pub fn ty(&self) -> &TypeRef {
         &self.ty
     }
 }
@@ -282,14 +380,14 @@ pub enum CaseLabel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pattern {
-    type_name: Option<TypeName>,
+    type_name: Option<String>,
     case: String,
     bindings: Option<Vec<Option<String>>>,
 }
 
 impl Pattern {
     pub fn new(
-        type_name: Option<TypeName>,
+        type_name: Option<String>,
         case: String,
         bindings: Option<Vec<Option<String>>>,
     ) -> Self {
@@ -370,6 +468,15 @@ pub enum ExprKind {
     MemberCall {
         base: Box<Expr>,
         name: String,
+        args: Vec<Arg>,
+    },
+    GenericName {
+        name: String,
+        type_args: Vec<TypeRef>,
+    },
+    GenericCall {
+        callee: String,
+        type_args: Vec<TypeRef>,
         args: Vec<Arg>,
     },
 }

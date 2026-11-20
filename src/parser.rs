@@ -180,6 +180,42 @@ impl Parser<'_> {
         }
     }
 
+    fn type_ref(&mut self) -> PResult<TypeRef> {
+        let name = self.name()?;
+        let args = if self.is_punct("<") {
+            self.type_args()?
+        } else {
+            Vec::new()
+        };
+        Ok(TypeRef::new(name, args))
+    }
+
+    fn type_args(&mut self) -> PResult<Vec<TypeRef>> {
+        self.expect_punct("<")?;
+        let mut args = vec![self.type_ref()?];
+        while self.eat_punct(",") {
+            args.push(self.type_ref()?);
+        }
+        self.expect_punct(">")?;
+        Ok(args)
+    }
+
+    fn generic_params(&mut self) -> PResult<Vec<String>> {
+        if !self.eat_punct("<") {
+            return Ok(Vec::new());
+        }
+        let mut names = vec![self.name()?];
+        while self.eat_punct(",") {
+            let name = self.name()?;
+            if names.contains(&name) {
+                return self.fail("duplicate generic parameter");
+            }
+            names.push(name);
+        }
+        self.expect_punct(">")?;
+        Ok(names)
+    }
+
     fn decl(&mut self) -> PResult<Decl> {
         let line = self.line();
         if self.eat_keyword("func") {
@@ -195,6 +231,7 @@ impl Parser<'_> {
 
     fn func_decl(&mut self, line: u32) -> PResult<FuncDecl> {
         let name = self.name()?;
+        let generics = self.generic_params()?;
         self.expect_punct("(")?;
         let mut params = Vec::new();
         while !self.is_punct(")") {
@@ -205,7 +242,7 @@ impl Parser<'_> {
         }
         self.expect_punct(")")?;
         let ret = if self.eat_punct("->") {
-            Some(self.name()?)
+            Some(self.type_ref()?)
         } else {
             None
         };
@@ -215,7 +252,7 @@ impl Parser<'_> {
         } else {
             self.block()?
         };
-        Ok(FuncDecl::new(line, name, params, ret, body))
+        Ok(FuncDecl::new(line, name, params, ret, body).with_generics(generics))
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -232,12 +269,13 @@ impl Parser<'_> {
             (None, false) => return self.fail("expected a parameter name after '_'"),
         };
         self.expect_punct(":")?;
-        let ty = self.name()?;
+        let ty = self.type_ref()?;
         Ok(Param::new(label, name, ty))
     }
 
     fn struct_decl(&mut self, line: u32) -> PResult<StructDecl> {
         let name = self.name()?;
+        let generics = self.generic_params()?;
         self.expect_punct("{")?;
         let mut fields = Vec::new();
         loop {
@@ -254,15 +292,16 @@ impl Parser<'_> {
             };
             let field_name = self.name()?;
             self.expect_punct(":")?;
-            let ty = self.name()?;
+            let ty = self.type_ref()?;
             fields.push(Field::new(field_name, mutable, ty));
             self.end_of_statement()?;
         }
-        Ok(StructDecl::new(line, name, fields))
+        Ok(StructDecl::new(line, name, fields).with_generics(generics))
     }
 
     fn enum_decl(&mut self, line: u32) -> PResult<EnumDecl> {
         let name = self.name()?;
+        let generics = self.generic_params()?;
         self.expect_punct("{")?;
         let mut cases = Vec::new();
         loop {
@@ -277,7 +316,7 @@ impl Parser<'_> {
             }
             self.end_of_statement()?;
         }
-        Ok(EnumDecl::new(line, name, cases))
+        Ok(EnumDecl::new(line, name, cases).with_generics(generics))
     }
 
     fn enum_case_decl(&mut self) -> PResult<EnumCaseDecl> {
@@ -285,7 +324,7 @@ impl Parser<'_> {
         let mut payload = Vec::new();
         if self.eat_punct("(") {
             loop {
-                payload.push(self.name()?);
+                payload.push(self.type_ref()?);
                 if !self.eat_punct(",") {
                     break;
                 }
@@ -430,7 +469,7 @@ impl Parser<'_> {
         self.pos += 1;
         let name = self.name()?;
         let ty = if self.eat_punct(":") {
-            Some(self.name()?)
+            Some(self.type_ref()?)
         } else {
             None
         };
@@ -578,6 +617,12 @@ impl Parser<'_> {
         let mut expr = self.primary()?;
         while self.on_same_line() {
             let line = expr.line();
+            if let ExprKind::Ident(name) = expr.kind().clone()
+                && let Some(type_args) = self.generic_name_args()
+            {
+                expr = Expr::new(line, ExprKind::GenericName { name, type_args });
+                continue;
+            }
             if self.eat_punct(".") {
                 let name = self.name()?;
                 expr = Expr::new(
@@ -599,6 +644,17 @@ impl Parser<'_> {
                     );
                     continue;
                 }
+                if let ExprKind::GenericName { name, type_args } = expr.kind().clone() {
+                    expr = Expr::new(
+                        line,
+                        ExprKind::GenericCall {
+                            callee: name,
+                            type_args,
+                            args: self.args()?,
+                        },
+                    );
+                    continue;
+                }
                 let ExprKind::Ident(callee) = expr.kind().clone() else {
                     return self.fail("only a named function can be called");
                 };
@@ -614,6 +670,21 @@ impl Parser<'_> {
             }
         }
         Ok(expr)
+    }
+
+    fn generic_name_args(&mut self) -> Option<Vec<TypeRef>> {
+        if !self.is_punct("<") {
+            return None;
+        }
+        let start = self.pos;
+        let parsed = self
+            .type_args()
+            .ok()
+            .filter(|_| self.on_same_line() && (self.is_punct(".") || self.is_punct("(")));
+        if parsed.is_none() {
+            self.pos = start;
+        }
+        parsed
     }
 
     fn args(&mut self) -> PResult<Vec<Arg>> {
@@ -736,7 +807,7 @@ mod tests {
         st(StmtKind::Let {
             name: name.to_string(),
             mutable,
-            ty: ty.map(str::to_string),
+            ty: ty.map(TypeRef::from),
             init,
         })
     }
@@ -794,7 +865,10 @@ mod tests {
     #[test]
     fn a_return_type_is_optional() {
         assert_eq!(func("func f() { }").ret(), None);
-        assert_eq!(func("func f() -> Int { return 1 }").ret(), Some("Int"));
+        assert_eq!(
+            func("func f() -> Int { return 1 }").ret(),
+            Some(&TypeRef::from("Int"))
+        );
     }
 
     #[test]
@@ -1085,7 +1159,7 @@ mod tests {
             Decl::Func(f) => {
                 assert_eq!(f.name(), "f");
                 assert_eq!(f.params().len(), 1);
-                assert_eq!(f.ret(), Some("Bool"));
+                assert_eq!(f.ret(), Some(&TypeRef::from("Bool")));
                 assert!(f.body().is_empty());
             }
             other => panic!("expected a func, got {other:?}"),
@@ -1162,7 +1236,10 @@ mod tests {
             panic!("expected an enum");
         };
         assert!(shape.has_payload());
-        assert_eq!(shape.cases()[1].payload(), ["Int", "Int"]);
+        assert_eq!(
+            shape.cases()[1].payload(),
+            [TypeRef::from("Int"), TypeRef::from("Int")]
+        );
         assert!(shape.cases()[2].payload().is_empty());
     }
 
@@ -1189,5 +1266,59 @@ mod tests {
         };
         assert_eq!(name, "circle");
         assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn declarations_list_their_type_parameters() {
+        assert_eq!(
+            func("func id<T, U>(_ x: T) -> T { return x }").generics(),
+            ["T", "U"]
+        );
+        let Decl::Struct(boxed) = try_parse("struct Box<T> { var value: T }").unwrap() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(boxed.generics(), ["T"]);
+        let Decl::Enum(maybe) = try_parse("enum Maybe<T> { case some(T), none }").unwrap() else {
+            panic!("expected an enum");
+        };
+        assert_eq!(maybe.generics(), ["T"]);
+    }
+
+    #[test]
+    fn a_duplicate_type_parameter_is_an_error() {
+        assert!(try_parse("func f<T, T>() { }").is_err());
+    }
+
+    #[test]
+    fn type_positions_accept_type_arguments_including_nested_ones() {
+        let decl = func("func f(_ x: Box<Maybe<Int>>) -> Pair<Int, Bool> { }");
+        assert_eq!(decl.params()[0].ty().to_string(), "Box<Maybe<Int>>");
+        assert_eq!(decl.ret().unwrap().to_string(), "Pair<Int,Bool>");
+    }
+
+    #[test]
+    fn a_name_with_type_arguments_before_a_call_or_member_is_generic() {
+        let call = expr("Box<Int>(value: 1)");
+        let ExprKind::GenericCall {
+            callee, type_args, ..
+        } = call.kind()
+        else {
+            panic!("expected a generic call");
+        };
+        assert_eq!(callee, "Box");
+        assert_eq!(type_args.len(), 1);
+        let member = expr("Maybe<Int>.none");
+        let ExprKind::Member { base, .. } = member.kind() else {
+            panic!("expected a member");
+        };
+        assert!(matches!(base.kind(), ExprKind::GenericName { .. }));
+    }
+
+    #[test]
+    fn comparisons_are_not_mistaken_for_type_arguments() {
+        let e = expr("a < b");
+        assert!(matches!(e.kind(), ExprKind::Binary { .. }));
+        let e = expr("a < b && c > (d)");
+        assert!(matches!(e.kind(), ExprKind::Binary { .. }));
     }
 }

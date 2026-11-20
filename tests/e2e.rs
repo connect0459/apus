@@ -424,3 +424,87 @@ fn a_switch_with_a_default_handles_the_unlisted_payload_cases() {
     );
     assert_eq!(run(&source), "7\n");
 }
+
+#[test]
+fn a_generic_function_is_instantiated_for_each_type_it_is_called_with() {
+    let source = "func id<T>(_ x: T) -> T { return x }\n\
+        func main() { print(id(41) + 1)\nprint(id(true))\nprint(id(\"hi\")) }";
+    assert_eq!(run(source), "42\ntrue\nhi\n");
+}
+
+#[test]
+fn a_generic_function_may_take_several_parameters_and_return_one_of_them() {
+    let source = "func second<A, B>(_ a: A, _ b: B) -> B { return b }\n\
+        func main() { print(second(1, \"x\"))\nprint(second(\"y\", 2)) }";
+    assert_eq!(run(source), "x\n2\n");
+}
+
+#[test]
+fn a_generic_function_may_call_another_generic_function() {
+    let source = "func id<T>(_ x: T) -> T { return x }\n\
+        func twice<T>(_ x: T) -> T { return id(id(x)) }\n\
+        func main() { print(twice(7)) }";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn a_generic_function_may_copy_struct_values() {
+    let source = "struct P { var x: Int }\n\
+        func id<T>(_ v: T) -> T { let copy = v\nreturn copy }\n\
+        func main() { let p = id(P(x: 5))\nprint(p.x) }";
+    assert_eq!(run(source), "5\n");
+}
+
+#[test]
+fn a_recursive_generic_function_instantiates_once() {
+    let source = "func count<T>(_ x: T, _ n: Int) -> Int {\nif n == 0 { return 0 }\nreturn 1 + count(x, n - 1)\n}\n\
+        func main() { print(count(true, 4)) }";
+    assert_eq!(run(source), "4\n");
+}
+
+#[test]
+fn a_generic_struct_stores_values_of_its_type_argument() {
+    let source = "struct Box<T> { var value: T }\n\
+        func main() {\nvar a = Box(value: 3)\nvar b = Box(value: \"s\")\nprint(a.value)\nprint(b.value)\na.value = 4\nprint(a.value)\n}";
+    assert_eq!(run(source), "3\ns\n4\n");
+}
+
+#[test]
+fn a_generic_struct_can_be_named_with_explicit_type_arguments() {
+    let source = "struct Box<T> { var value: T }\n\
+        func unwrap(_ b: Box<Int>) -> Int { return b.value }\n\
+        func main() { let b: Box<Int> = Box<Int>(value: 9)\nprint(unwrap(b)) }";
+    assert_eq!(run(source), "9\n");
+}
+
+#[test]
+fn a_generic_function_can_take_and_build_a_generic_struct() {
+    let source = "struct Box<T> { var value: T }\n\
+        func wrap<T>(_ x: T) -> Box<T> { return Box(value: x) }\n\
+        func open<T>(_ b: Box<T>) -> T { return b.value }\n\
+        func main() { print(open(wrap(8)))\nprint(open(wrap(\"w\"))) }";
+    assert_eq!(run(source), "8\nw\n");
+}
+
+#[test]
+fn a_generic_enum_carries_a_value_of_its_type_argument() {
+    let source = "enum Maybe<T> { case some(T), none }\n\
+        func show(_ m: Maybe<Int>) {\nswitch m {\ncase .some(let v): print(v)\ncase .none: print(-1)\n}\n}\n\
+        func main() { show(Maybe.some(5))\nshow(Maybe<Int>.none) }";
+    assert_eq!(run(source), "5\n-1\n");
+}
+
+#[test]
+fn a_generic_function_can_switch_on_a_generic_enum() {
+    let source = "enum Maybe<T> { case some(T), none }\n\
+        func orElse<T>(_ m: Maybe<T>, _ fallback: T) -> T {\nswitch m {\ncase .some(let v): return v\ncase .none: return fallback\n}\n}\n\
+        func main() { print(orElse(Maybe.some(1), 0))\nprint(orElse(Maybe<String>.none, \"none\")) }";
+    assert_eq!(run(source), "1\nnone\n");
+}
+
+#[test]
+fn a_generic_enum_may_hold_a_pair_of_type_arguments() {
+    let source = "enum Either<L, R> { case left(L), right(R) }\n\
+        func main() {\nlet e: Either<Int, String> = Either.right(\"r\")\nswitch e {\ncase .left(let n): print(n)\ncase .right(let s): print(s)\n}\n}";
+    assert_eq!(run(source), "r\n");
+}

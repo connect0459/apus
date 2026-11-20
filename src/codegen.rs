@@ -256,7 +256,7 @@ fn clif_type(ty: Ty) -> Option<Type> {
     match ty {
         Ty::Int | Ty::Str | Ty::Struct(_) | Ty::Enum(_) => Some(types::I64),
         Ty::Bool => Some(types::I8),
-        Ty::Void => None,
+        Ty::Void | Ty::Param(_) => None,
     }
 }
 
@@ -735,7 +735,9 @@ impl Emitter<'_, '_> {
                 let rhs = self.value(rhs)?;
                 self.binary(*op, lhs, rhs)
             }
-            TExpr::Call { callee, args, ret } => return self.call(callee, args, *ret),
+            TExpr::Call {
+                callee, args, ret, ..
+            } => return self.call(callee, args, *ret),
             TExpr::StructInit { ty, args } => {
                 let values = args
                     .iter()

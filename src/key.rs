@@ -50,6 +50,10 @@ impl Encoder<'_> {
             Ty::Str => self.tag(3),
             Ty::Void => self.tag(4),
             Ty::Enum(_) => self.tag(6),
+            Ty::Param(index) => {
+                self.tag(7);
+                self.usize(index);
+            }
             Ty::Struct(id) => {
                 self.tag(5);
                 let fields = self
@@ -184,9 +188,18 @@ impl Encoder<'_> {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            TExpr::Call { callee, args, ret } => {
+            TExpr::Call {
+                callee,
+                type_args,
+                args,
+                ret,
+            } => {
                 self.tag(36);
                 self.str(callee);
+                self.usize(type_args.len());
+                for ty in type_args {
+                    self.ty(*ty);
+                }
                 self.ty(*ret);
                 self.usize(args.len());
                 for arg in args {

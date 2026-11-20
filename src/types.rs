@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructId(usize);
 
 impl StructId {
@@ -11,7 +11,7 @@ impl StructId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EnumId(usize);
 
 impl EnumId {
@@ -24,7 +24,7 @@ impl EnumId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int,
     Bool,
@@ -32,6 +32,7 @@ pub enum Ty {
     Void,
     Struct(StructId),
     Enum(EnumId),
+    Param(usize),
 }
 
 impl Ty {

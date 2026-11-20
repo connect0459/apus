@@ -3,22 +3,21 @@ use std::path::Path;
 
 const MEMO_FILE: &str = "items";
 const MEMO_MAGIC: [u8; 4] = *b"APIM";
-const MEMO_VERSION: u8 = 1;
+const MEMO_VERSION: u8 = 2;
 const HEADER_LEN: usize = 4 + 1 + 8 + 8 + 8;
-const PAIR_LEN: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemMemo {
     compiler_stamp: u64,
     signature_digest: u64,
-    keys: HashMap<u64, u64>,
+    keys: HashMap<u64, Vec<u64>>,
 }
 
 impl ItemMemo {
     pub fn new(
         compiler_stamp: u64,
         signature_digest: u64,
-        pairs: impl IntoIterator<Item = (u64, u64)>,
+        pairs: impl IntoIterator<Item = (u64, Vec<u64>)>,
     ) -> Self {
         Self {
             compiler_stamp,
@@ -31,8 +30,8 @@ impl ItemMemo {
         self.compiler_stamp == compiler_stamp && self.signature_digest == signature_digest
     }
 
-    pub fn function_key(&self, item_hash: u64) -> Option<u64> {
-        self.keys.get(&item_hash).copied()
+    pub fn function_keys(&self, item_hash: u64) -> Option<&[u64]> {
+        self.keys.get(&item_hash).map(Vec::as_slice)
     }
 
     pub fn load(dir: &Path) -> Option<Self> {
@@ -46,13 +45,23 @@ impl ItemMemo {
             ))
         };
         let count = usize::try_from(word(21)?).ok()?;
-        if bytes.len() != HEADER_LEN + count.checked_mul(PAIR_LEN)? {
-            return None;
+        let mut keys = HashMap::new();
+        let mut at = HEADER_LEN;
+        for _ in 0..count {
+            let item_hash = word(at)?;
+            let length = usize::try_from(word(at + 8)?).ok()?;
+            let end = at.checked_add(16)?.checked_add(length.checked_mul(8)?)?;
+            if end > bytes.len() {
+                return None;
+            }
+            let list = (0..length)
+                .map(|i| word(at + 16 + i * 8))
+                .collect::<Option<Vec<_>>>()?;
+            keys.insert(item_hash, list);
+            at = end;
         }
-        let mut keys = HashMap::with_capacity(count);
-        for index in 0..count {
-            let start = HEADER_LEN + index * PAIR_LEN;
-            keys.insert(word(start)?, word(start + 8)?);
+        if at != bytes.len() {
+            return None;
         }
         Some(Self {
             compiler_stamp: word(5)?,
@@ -63,17 +72,20 @@ impl ItemMemo {
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
-        let mut pairs: Vec<(u64, u64)> = self.keys.iter().map(|(h, k)| (*h, *k)).collect();
+        let mut pairs: Vec<(&u64, &Vec<u64>)> = self.keys.iter().collect();
         pairs.sort_unstable();
-        let mut out = Vec::with_capacity(HEADER_LEN + pairs.len() * PAIR_LEN);
+        let mut out = Vec::new();
         out.extend_from_slice(&MEMO_MAGIC);
         out.push(MEMO_VERSION);
         out.extend_from_slice(&self.compiler_stamp.to_le_bytes());
         out.extend_from_slice(&self.signature_digest.to_le_bytes());
         out.extend_from_slice(&(pairs.len() as u64).to_le_bytes());
-        for (item_hash, key) in pairs {
+        for (item_hash, list) in pairs {
             out.extend_from_slice(&item_hash.to_le_bytes());
-            out.extend_from_slice(&key.to_le_bytes());
+            out.extend_from_slice(&(list.len() as u64).to_le_bytes());
+            for key in list {
+                out.extend_from_slice(&key.to_le_bytes());
+            }
         }
         let temporary = dir.join(format!("{MEMO_FILE}.tmp"));
         std::fs::write(&temporary, &out)?;
@@ -86,7 +98,7 @@ mod tests {
     use super::*;
 
     fn sample() -> ItemMemo {
-        ItemMemo::new(7, 9, [(1, 100), (2, 200)])
+        ItemMemo::new(7, 9, [(1, vec![100]), (2, vec![200, 201, 202])])
     }
 
     #[test]
@@ -107,8 +119,8 @@ mod tests {
     #[test]
     fn a_memo_answers_the_key_of_a_known_item_only() {
         let memo = sample();
-        assert_eq!(memo.function_key(2), Some(200));
-        assert_eq!(memo.function_key(3), None);
+        assert_eq!(memo.function_keys(2), Some(&[200, 201, 202][..]));
+        assert_eq!(memo.function_keys(3), None);
     }
 
     #[test]
