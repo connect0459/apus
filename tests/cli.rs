@@ -80,3 +80,47 @@ fn invalid_usage_prints_the_usage_and_exits_with_status_two() {
         assert!(text(&result.stderr).contains("usage:"), "{args:?}");
     }
 }
+
+#[test]
+fn the_cache_directory_can_be_set_through_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("p.swift"), "func main() { print(1) }\n").unwrap();
+    let cache = dir.path().join("my-cache");
+    let built = Command::new(env!("CARGO_BIN_EXE_apus"))
+        .args(["build", "p.swift", "-o", "p"])
+        .env("APUS_CACHE_DIR", &cache)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", text(&built.stderr));
+    assert!(cache.join("functions.pack").exists());
+    assert!(!dir.path().join(".apus-cache").exists());
+}
+
+#[test]
+fn rebuilding_with_the_command_line_reuses_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("p.swift"), "func main() { print(1) }\n").unwrap();
+    assert!(
+        apus(&["build", "p.swift", "-o", "p"], dir.path())
+            .status
+            .success()
+    );
+    let modified = std::fs::metadata(dir.path().join("p"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(
+        apus(&["build", "p.swift", "-o", "p"], dir.path())
+            .status
+            .success()
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path().join("p"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+}

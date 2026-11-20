@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use apus::driver::build;
+use apus::driver::{BuildOptions, build_with};
 
 const USAGE: &str = "usage: apus build <source.swift> [-o <output>]";
 
@@ -46,7 +46,11 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match build(&source, &parsed.output) {
+    let mut options = BuildOptions::default();
+    if let Some(dir) = std::env::var_os("APUS_CACHE_DIR") {
+        options = options.with_cache_dir(PathBuf::from(dir));
+    }
+    match build_with(&source, &parsed.output, &options) {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
             match error.line() {
