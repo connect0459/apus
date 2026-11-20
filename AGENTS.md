@@ -37,6 +37,8 @@ Respect these layer boundaries: never introduce a dependency that points backwar
 
 - `cargo build` / `cargo test --all-targets` — build and test.
 - `just verify` — run the full CI-equivalent check (fmt, clippy, test, coverage) before opening a PR.
+- `just coverage-gaps` — run the tests under coverage and list the uncovered lines of every file. Run it when a change is done and cover whatever it lists in the code you wrote.
+- `just coverage-report` — print the same list from the last coverage run without running the tests again.
 - `just bench-front` — measure the front end on a generated 1000-function program.
 - **pre-commit hooks** — catch formatting and lint issues on every commit (`pre-commit run --all-files` to run manually).
 
@@ -49,7 +51,7 @@ Baseline to keep in mind: `swiftc -Onone` takes 3.7–6.9 s to build the 1000-fu
 - Red → Green → Refactor cycle strictly followed.
 - Use real objects; mocks are only permitted at external boundaries (file system, linker, network).
 - Write tests BEFORE implementation; run tests AFTER implementation.
-- Coverage targets: 80% line, 75% branch, 90% function.
+- Coverage targets: 80% line, 75% branch, 90% function. CI gates line and function coverage (`just coverage`); branch coverage is not measured on the stable toolchain. Write the test first, then check the files you touched with `just coverage-gaps`, so that coverage comes from the tests that specify the behavior and not from tests added afterwards to move a number.
 
 ### Domain Object Design
 

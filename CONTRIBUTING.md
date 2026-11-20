@@ -23,6 +23,8 @@ just setup
 | `cargo test --all-targets` | Run all tests |
 | `cargo fmt` | Format all Rust source files |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Lint Rust code |
+| `just coverage-gaps` | Run the tests under coverage and list uncovered lines |
+| `just coverage-html` | Open an HTML coverage report |
 | `just bench-front` | Measure the front end on a generated program |
 | `just verify` | Run the full CI-equivalent check locally |
 

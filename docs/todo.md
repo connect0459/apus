@@ -41,7 +41,7 @@
 - Wrapping operators (`&+`, `&*`) and overflow trapping are not decided.
 - Entry point is `func main()` instead of top-level statements.
 - Linking cost with the system linker on macOS is unmeasured.
-- Coverage gate stays at 80% line / 90% function; branch coverage is not gated.
+- Coverage gate stays at 80% line / 90% function; branch coverage is not gated because the stable toolchain cannot measure it. Baseline on 2026-11-20 (`cargo llvm-cov`): 95.9% lines and 93.6% functions. The weakest files are `link.rs` (50% of functions: the fallback and error paths of the system linker) and `codegen.rs` (75% of functions: the error conversions). Compare against these numbers when a change lowers coverage.
 - Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, generic arguments cannot be structs or enums with payloads where they end up as a struct field or a payload, there are no protocol constraints so a value of a type parameter can only be copied, passed, returned and stored, explicit type arguments are not accepted on function calls, an expected type reaches only the top expression of a `let` initializer or a `return`, payloads are unlabeled and limited to `Int`, `Bool`, `String` and enums without payloads, a case with bindings has a single pattern, `.circle(5)` without the type name is not accepted, and a `case` may repeat a pattern without a warning.
 
 ## Decisions
