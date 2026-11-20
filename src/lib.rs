@@ -9,6 +9,7 @@ pub mod items;
 pub mod key;
 pub mod lexer;
 pub mod link;
+pub mod memo;
 pub mod parser;
 pub mod stamp;
 pub mod tir;
