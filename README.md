@@ -15,10 +15,10 @@ An experiment: can a compiler for a Swift subset, built around per-item hashing 
 
 ## Measurements
 
-| Program | `swiftc -Onone` (cold) | apus front end (lex + split) |
+| Program | `swiftc -Onone` (cold) | apus front end (lex + split + parse) |
 | :--- | ---: | ---: |
-| 1000 functions (~110 KB) | 3.7–6.9 s | 4.8 ms |
-| 5000 functions (~570 KB) | not measured | 28 ms |
+| 1000 functions (~110 KB) | 3.7–6.9 s | ~11 ms |
+| 5000 functions (~570 KB) | not measured | ~55 ms |
 
 The front end alone is not a compiler; the comparison only bounds what is achievable. See `docs/todo.md` for milestones.
 
