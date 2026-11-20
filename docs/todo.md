@@ -21,7 +21,7 @@
   - [x] Skip parsing and checking of unchanged items, keyed by a signature digest and an item memo
 - [ ] M4: enum, generics (monomorphization), simple class
   - [x] Enum without payloads: `enum`, `Enum.case`, `==`/`!=`, enum struct fields, exhaustive `switch`
-  - [ ] Enum with payloads (tagged union, `case .circle(let r)`)
+  - [x] Enum with payloads: `Shape.circle(5)`, `case .circle(let r)`, `_` to skip a value
   - [ ] Generics (monomorphization); needs a design note on instance cache keys first
   - [ ] Simple class; needs a decision on memory management first
 
@@ -42,7 +42,7 @@
 - Entry point is `func main()` instead of top-level statements.
 - Linking cost with the system linker on macOS is unmeasured.
 - Coverage gate stays at 80% line / 90% function; branch coverage is not gated.
-- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, and a `case` may repeat a pattern without a warning.
+- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, payloads are unlabeled and limited to `Int`, `Bool`, `String` and enums without payloads, a case with bindings has a single pattern, `.circle(5)` without the type name is not accepted, and a `case` may repeat a pattern without a warning.
 
 ## Decisions
 
@@ -87,3 +87,13 @@
 **Decision.** An enum value is a 64-bit integer holding the case index, `TExpr::EnumCase` is its only new typed IR node, and the checker lowers `switch` to `let tmp = subject` followed by nested `If` statements. When the switch has no `default`, the last case becomes the final `else`, which is safe because exhaustiveness is checked first. A `default` must be the last case.
 
 **Consequences.** `key` encodes an enum type as one tag, so renaming an enum or adding cases it never selects does not change a function's key; adding or reordering cases still invalidates through the signature digest. A switch costs a linear chain of comparisons, which is acceptable for a non-optimizing backend and will matter only for enums with many cases. The subject is evaluated once. Payload enums will need a new representation (tag plus slots) and a pattern-binding construct, so this lowering will be revisited then.
+
+### A payload enum is a layout struct of one tag slot and the widest payload (2026-11-20)
+
+**Problem.** An enum whose cases carry values needs storage, copying, parameter passing and result passing, and the typed IR should not grow a second aggregate kind.
+
+**Options.** Add a tagged-union type to the typed IR and the backend; reuse the struct machinery with a synthesized layout.
+
+**Decision.** An enum with at least one payload becomes `Ty::Struct` over a synthesized layout of `1 + widest payload` slots of 8 bytes. Slot 0 holds the case index and slot `1 + n` holds the nth payload value. All slots are typed `Int` in the layout, so a copy moves whole slots whatever case they hold; a value of another type is read back with the type recorded in the `Field` node. Construction is `TStruct`-style `StructInit` with the case index first, and the checker lowers `switch` as before, reading the tag with `Field` and binding payload values with `Let` statements at the start of the case body. Enums without payloads stay scalar (`Ty::Enum`). The layout is registered after the declared structs, so their ids do not move.
+
+**Consequences.** Copy, parameter, result and cache key code is unchanged, and the key encodes a payload enum as a struct of `Int` slots. A value occupies the widest case's size even for `empty`. Equality, printing and member access on a payload enum are rejected. Payloads cannot be structs or payload enums, which would need nested layouts and recursion rules, and a struct field cannot hold a payload enum for the same reason. The bound names are immutable copies of the payload.

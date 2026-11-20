@@ -50,7 +50,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 - A cache key depends only on a function's typed IR and the layouts of the structs it uses. Editing a callee's body therefore never invalidates its callers; changing a callee's signature does, because the caller's typed IR changes.
 - Compilation of a function is deterministic and independent of other functions, so parallel and sequential builds produce identical entries.
 - Cache files are untrusted input: a corrupt or truncated file is ignored, never trusted partially.
-- An enum without payloads is a 64-bit integer holding the case index. `switch` has no typed IR node of its own: `check` lowers it to a temporary local and a chain of `if` statements.
+- An enum without payloads is a 64-bit integer holding the case index. An enum whose cases carry values is a struct of one tag slot and as many 8-byte slots as its widest case, so it is copied and passed like a struct. `switch` has no typed IR node of its own: `check` lowers it to a temporary local and a chain of `if` statements, with payload bindings as `let` statements at the start of each case.
 - Integer arithmetic traps on overflow and on division by zero, as Swift does.
 - A struct is a value. It lives in memory as one 8-byte slot per field, and an expression of struct type evaluates to the address of its storage. A struct is copied at `let` and assignment. A parameter is passed as a pointer and is immutable, so the callee never changes the caller's value. A result is written to memory supplied by the caller.
 
