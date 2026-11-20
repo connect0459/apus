@@ -11,3 +11,4 @@ pub mod tir;
 pub mod types;
 pub mod entry;
 pub mod key;
+pub mod cache;
