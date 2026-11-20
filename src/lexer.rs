@@ -39,7 +39,9 @@ impl LexError {
 }
 
 const THREE_CHAR_PUNCTS: [&str; 2] = ["..<", "..."];
-const TWO_CHAR_PUNCTS: [&str; 10] = ["->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "??"];
+const TWO_CHAR_PUNCTS: [&str; 13] = [
+    "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "??",
+];
 
 pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
     let chars: Vec<char> = src.chars().collect();
@@ -180,7 +182,11 @@ mod tests {
     use super::*;
 
     fn tokens(src: &str) -> Vec<Token> {
-        lex(src).unwrap().into_iter().map(|s| s.token().clone()).collect()
+        lex(src)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.token().clone())
+            .collect()
     }
 
     fn ident(s: &str) -> Token {
@@ -210,7 +216,7 @@ mod tests {
     #[test]
     fn multi_character_operators_are_single_tokens() {
         assert_eq!(
-            tokens("-> ..< ... == != <= >= && || += -="),
+            tokens("-> ..< ... == != <= >= && || += -= *= /= %="),
             vec![
                 punct("->"),
                 punct("..<"),
@@ -223,6 +229,9 @@ mod tests {
                 punct("||"),
                 punct("+="),
                 punct("-="),
+                punct("*="),
+                punct("/="),
+                punct("%="),
             ]
         );
     }
