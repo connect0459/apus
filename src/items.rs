@@ -15,9 +15,14 @@ pub struct Item {
     tokens: Vec<Spanned>,
     hash: u64,
     signature_hash: u64,
+    generic: bool,
 }
 
 impl Item {
+    pub fn is_generic(&self) -> bool {
+        self.generic
+    }
+
     pub fn kind(&self) -> ItemKind {
         self.kind
     }
@@ -124,8 +129,11 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         };
         let slice = tokens[start..end].to_vec();
         let hash = hash_tokens(&slice);
+        let generic = kind == ItemKind::Func
+            && matches!(slice.get(2).map(|t| t.token()), Some(Token::Punct(p)) if p == "<");
         let signature_hash = match kind {
             ItemKind::Struct | ItemKind::Enum => hash,
+            ItemKind::Func if generic => hash,
             ItemKind::Func => {
                 let header_end = slice
                     .iter()
@@ -140,6 +148,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             tokens: slice,
             hash,
             signature_hash,
+            generic,
         });
         i = end;
     }
@@ -293,6 +302,21 @@ mod tests {
         assert_ne!(
             digest_of("func f() { }"),
             digest_of("func f() { }\nfunc g() { }")
+        );
+    }
+
+    #[test]
+    fn a_function_with_type_parameters_is_generic() {
+        let found = items("func id<T>(_ x: T) -> T { return x }\nfunc f() { }");
+        assert!(found[0].is_generic());
+        assert!(!found[1].is_generic());
+    }
+
+    #[test]
+    fn editing_a_generic_function_body_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("func id<T>(_ x: T) -> T { return x }"),
+            digest_of("func id<T>(_ x: T) -> T { let y = x\nreturn y }")
         );
     }
 }
