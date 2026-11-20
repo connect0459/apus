@@ -9,3 +9,4 @@ pub mod link;
 pub mod parser;
 pub mod tir;
 pub mod types;
+pub mod entry;
