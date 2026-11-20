@@ -23,7 +23,16 @@
 
 ## Open decisions
 
-- Rebuild timings (edit one function, comment edit, no change) are not measured yet. The first attempt ran while the machine had a load average of 85 (a browser, an Xcode build and an antivirus daemon were using the CPU), which stretched even `ld` from 43 ms to over 600 ms, so those numbers were discarded. Rerun `just bench-vs-swiftc` on a quiet machine; the script warns when the load is high.
+- Rebuild timings were measured on 2026-11-20 with `just bench-vs-swiftc` (10 cores, load average 2.7 to 3.3, best of 5 runs for apus and 3 for `swiftc -Onone`; wall ms):
+
+  | | gen1000 apus | gen1000 swiftc | gen5000 apus | gen5000 swiftc |
+  | :--- | ---: | ---: | ---: | ---: |
+  | cold build | 161 | 3455 | 275 | 11379 |
+  | edit 1 function | 149 | 3499 | 274 | 11123 |
+  | edit a comment | 62 | | 199 | |
+  | no change | 7 | | 11 | |
+
+  Open question raised by the numbers: editing one function (149 ms) costs almost as much as a cold build (161 ms), and a comment edit takes 62 ms of wall time for 20 ms of CPU time although nothing is compiled or linked. The cost does not scale with the number of changed functions, so something proportional to program size dominates: candidates are loading and saving the pack file, building the Cranelift backend, assembling and hashing the whole object, and linking. Profile these stages before optimizing anything.
 - Statements end at a newline, `;` or `}`; a binary operator must stay on the same line as its left operand.
 - Wrapping operators (`&+`, `&*`) and overflow trapping are not decided.
 - Entry point is `func main()` instead of top-level statements.
