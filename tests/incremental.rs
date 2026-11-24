@@ -421,3 +421,31 @@ fn adding_a_method_checks_every_function_again() {
     assert!(report.checked() > 1);
     assert_eq!(project.run(), "6\n");
 }
+
+fn box_program(offset: i64) -> String {
+    format!(
+        "struct Box<T> {{\n  var value: T\n  func get() -> T {{ return self.value }}\n}}\n\
+         func plain() -> Int {{ return {offset} }}\n\
+         func main() {{\n  let b = Box(value: 40)\n  print(b.get() + plain())\n}}\n"
+    )
+}
+
+#[test]
+fn editing_a_caller_of_a_generic_method_reuses_the_instance() {
+    let project = Project::new();
+    project.build(&box_program(2));
+    assert_eq!(project.run(), "42\n");
+    let report = project.build(&box_program(3));
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "43\n");
+}
+
+#[test]
+fn editing_the_body_of_a_generic_method_recompiles_its_instances() {
+    let project = Project::new();
+    project.build(&box_program(2));
+    let edited = box_program(2).replace("return self.value", "let v = self.value\n    return v");
+    let report = project.build(&edited);
+    assert!(report.compiled() >= 1);
+    assert_eq!(project.run(), "42\n");
+}
