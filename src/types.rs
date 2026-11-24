@@ -31,6 +31,7 @@ pub enum Ty {
     Str,
     Void,
     Struct(StructId),
+    Class(StructId),
     Enum(EnumId),
     Param(usize),
 }
@@ -47,5 +48,9 @@ impl Ty {
 
     pub fn is_struct(self) -> bool {
         matches!(self, Ty::Struct(_))
+    }
+
+    pub fn is_class(self) -> bool {
+        matches!(self, Ty::Class(_))
     }
 }

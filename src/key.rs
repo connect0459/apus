@@ -54,8 +54,8 @@ impl Encoder<'_> {
                 self.tag(7);
                 self.usize(index);
             }
-            Ty::Struct(id) => {
-                self.tag(5);
+            Ty::Struct(id) | Ty::Class(id) => {
+                self.tag(if ty.is_class() { 8 } else { 5 });
                 let fields = self
                     .structs
                     .get(id.index())
@@ -214,6 +214,14 @@ impl Encoder<'_> {
                     self.expr(arg);
                 }
             }
+            TExpr::New { ty, args } => {
+                self.tag(40);
+                self.ty(*ty);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
             TExpr::Field { base, index, ty } => {
                 self.tag(38);
                 self.expr(base);
@@ -333,6 +341,22 @@ mod tests {
             "func extra() { }\nfunc b() -> Int { return 2 }\nfunc a() -> Int { return 1 }";
         assert_eq!(key_of(base, "a"), key_of(extended, "a"));
         assert_eq!(key_of(base, "b"), key_of(extended, "b"));
+    }
+
+    #[test]
+    fn a_function_over_a_class_and_one_over_a_struct_with_the_same_members_have_different_keys() {
+        let body = "func f(_ v: T) -> Int { return v.x }\n";
+        let as_struct = key_of(&format!("struct T {{ var x: Int }}\n{body}"), "f");
+        let as_class = key_of(&format!("class T {{ var x: Int }}\n{body}"), "f");
+        assert_ne!(as_struct, as_class);
+    }
+
+    #[test]
+    fn allocating_a_class_instance_differs_from_building_a_struct_value() {
+        let make = "func f() -> Int { let v = T(x: 1)\n return v.x }\n";
+        let as_struct = key_of(&format!("struct T {{ var x: Int }}\n{make}"), "f");
+        let as_class = key_of(&format!("class T {{ var x: Int }}\n{make}"), "f");
+        assert_ne!(as_struct, as_class);
     }
 
     #[test]

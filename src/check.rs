@@ -471,7 +471,7 @@ impl FnCx<'_> {
             ));
         };
         let binding = self.lookup(var, line)?;
-        if !binding.mutable {
+        if !binding.mutable && !binding.ty.is_class() {
             return Err(CheckError::at(
                 line,
                 format!("cannot assign to a member of '{var}': it is a constant"),
@@ -525,7 +525,7 @@ impl FnCx<'_> {
     }
 
     fn member_of(&self, line: u32, ty: Ty, name: &str) -> CResult<(usize, FieldSig)> {
-        let Ty::Struct(id) = ty else {
+        let (Ty::Struct(id) | Ty::Class(id)) = ty else {
             return Err(CheckError::at(
                 line,
                 format!("a value of type {} has no members", self.name_of(ty)),
@@ -1091,15 +1091,17 @@ impl FnCx<'_> {
         }
         let id = if inferring {
             let patterns: Vec<Ty> = sig.fields().iter().map(FieldSig::ty).collect();
-            let context = expected.map(|e| (Ty::Struct(pattern_id), e));
+            let context = expected.map(|e| (sigs.struct_ty(def, pattern_id), e));
             let type_args = self.infer(line, &base_name, generics, &patterns, &values, context)?;
             sigs.instantiate_struct(def, type_args, &self.scope, line)?
         } else {
             pattern_id
         };
-        Ok(TExpr::StructInit {
-            ty: Ty::Struct(id),
-            args: values,
+        let ty = sigs.struct_ty(def, id);
+        Ok(if ty.is_class() {
+            TExpr::New { ty, args: values }
+        } else {
+            TExpr::StructInit { ty, args: values }
         })
     }
 }

@@ -169,7 +169,7 @@ impl Backend {
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
-        for name in ["printf", "puts"] {
+        for name in ["printf", "puts", "malloc"] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
         }
@@ -254,7 +254,7 @@ fn entry_reloc(
 
 fn clif_type(ty: Ty) -> Option<Type> {
     match ty {
-        Ty::Int | Ty::Str | Ty::Struct(_) | Ty::Enum(_) => Some(types::I64),
+        Ty::Int | Ty::Str | Ty::Struct(_) | Ty::Class(_) | Ty::Enum(_) => Some(types::I64),
         Ty::Bool => Some(types::I8),
         Ty::Void | Ty::Param(_) => None,
     }
@@ -441,7 +441,7 @@ impl Emitter<'_, '_> {
 
     fn struct_fields(&self, ty: Ty) -> GResult<&[Ty]> {
         match ty {
-            Ty::Struct(id) => self
+            Ty::Struct(id) | Ty::Class(id) => self
                 .structs
                 .get(id.index())
                 .map(TStruct::fields)
@@ -459,6 +459,22 @@ impl Emitter<'_, '_> {
             3,
         ));
         Ok(self.builder.ins().stack_addr(types::I64, slot, 0))
+    }
+
+    fn alloc_object(&mut self, ty: Ty) -> GResult<Value> {
+        let count = u32::try_from(self.struct_fields(ty)?.len())?;
+        let size = i64::from(count.max(1) * FIELD_SIZE);
+        let size = self.builder.ins().iconst(types::I64, size);
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let malloc = self.import_func("malloc", sig, false);
+        let call = self.builder.ins().call(malloc, &[size]);
+        self.builder
+            .inst_results(call)
+            .first()
+            .copied()
+            .ok_or_else(|| CodegenError::from("malloc returned no value"))
     }
 
     fn copy_struct(&mut self, dest: Value, src: Value, ty: Ty) -> GResult<()> {
@@ -744,6 +760,20 @@ impl Emitter<'_, '_> {
                     .map(|a| self.value(a))
                     .collect::<GResult<Vec<_>>>()?;
                 let dest = self.alloc_struct(*ty)?;
+                let flags = MemFlagsData::trusted();
+                for (index, value) in values.into_iter().enumerate() {
+                    self.builder
+                        .ins()
+                        .store(flags, value, dest, field_offset(index));
+                }
+                dest
+            }
+            TExpr::New { ty, args } => {
+                let values = args
+                    .iter()
+                    .map(|a| self.value(a))
+                    .collect::<GResult<Vec<_>>>()?;
+                let dest = self.alloc_object(*ty)?;
                 let flags = MemFlagsData::trusted();
                 for (index, value) in values.into_iter().enumerate() {
                     self.builder

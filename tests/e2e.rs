@@ -508,3 +508,110 @@ fn a_generic_enum_may_hold_a_pair_of_type_arguments() {
         func main() {\nlet e: Either<Int, String> = Either.right(\"r\")\nswitch e {\ncase .left(let n): print(n)\ncase .right(let s): print(s)\n}\n}";
     assert_eq!(run(source), "r\n");
 }
+
+const COUNTER: &str = "class Counter { var count: Int; let label: String }\n";
+
+fn with_counter(body: &str) -> String {
+    format!("{COUNTER}{body}")
+}
+
+fn build_error(source: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    build(source, &dir.path().join("prog"))
+        .unwrap_err()
+        .message()
+        .to_string()
+}
+
+#[test]
+fn a_class_instance_exposes_the_members_it_was_created_with() {
+    let source = with_counter(
+        "func main() {\n  let c = Counter(count: 3, label: \"hits\")\n  print(c.count)\n  print(c.label)\n}",
+    );
+    assert_eq!(run(&source), "3\nhits\n");
+}
+
+#[test]
+fn copying_a_class_reference_shares_the_instance() {
+    let source = with_counter(
+        "func main() {\n  let a = Counter(count: 1, label: \"a\")\n  let b = a\n  b.count = 5\n  print(a.count)\n}",
+    );
+    assert_eq!(run(&source), "5\n");
+}
+
+#[test]
+fn a_function_can_mutate_the_instance_behind_its_parameter() {
+    let source = with_counter(
+        "func bump(_ c: Counter) { c.count += 1 }\n\
+         func main() {\n  let c = Counter(count: 1, label: \"c\")\n  bump(c)\n  bump(c)\n  print(c.count)\n}",
+    );
+    assert_eq!(run(&source), "3\n");
+}
+
+#[test]
+fn a_function_can_return_a_new_class_instance() {
+    let source = with_counter(
+        "func make(_ n: Int) -> Counter { return Counter(count: n, label: \"made\") }\n\
+         func main() {\n  let c = make(7)\n  print(c.count)\n}",
+    );
+    assert_eq!(run(&source), "7\n");
+}
+
+#[test]
+fn a_reassigned_class_variable_points_at_the_new_instance() {
+    let source = with_counter(
+        "func main() {\n  let a = Counter(count: 1, label: \"a\")\n  var b = a\n  b = Counter(count: 2, label: \"b\")\n  b.count += 10\n  print(a.count)\n  print(b.count)\n}",
+    );
+    assert_eq!(run(&source), "1\n12\n");
+}
+
+#[test]
+fn a_class_may_hold_another_class_and_be_held_by_a_struct() {
+    let source = format!(
+        "{COUNTER}class Pair {{ let first: Counter; let second: Counter }}\n\
+         struct Holder {{ var counter: Counter }}\n\
+         func main() {{\n  let c = Counter(count: 1, label: \"c\")\n  let p = Pair(first: c, second: c)\n  let f = p.first\n  f.count = 4\n  let h = Holder(counter: p.second)\n  print(h.counter.count)\n}}"
+    );
+    assert_eq!(run(&source), "4\n");
+}
+
+#[test]
+fn a_generic_struct_can_hold_a_class_instance() {
+    let source = format!(
+        "{COUNTER}struct Box<T> {{ var value: T }}\n\
+         func main() {{\n  let b = Box(value: Counter(count: 9, label: \"b\"))\n  print(b.value.count)\n}}"
+    );
+    assert_eq!(run(&source), "9\n");
+}
+
+#[test]
+fn a_generic_class_is_instantiated_per_type_argument() {
+    let source = "class Cell<T> { var value: T }\n\
+         func main() {\n  let a = Cell(value: 1)\n  let b = Cell(value: true)\n  a.value += 1\n  print(a.value)\n  print(b.value)\n}";
+    assert_eq!(run(source), "2\ntrue\n");
+}
+
+#[test]
+fn a_constant_member_of_a_class_cannot_be_assigned() {
+    let source = with_counter(
+        "func main() {\n  let c = Counter(count: 1, label: \"c\")\n  c.label = \"d\"\n}",
+    );
+    assert!(build_error(&source).contains("constant"));
+}
+
+#[test]
+fn a_class_instance_cannot_be_printed_or_compared() {
+    let print =
+        with_counter("func main() {\n  let c = Counter(count: 1, label: \"c\")\n  print(c)\n}");
+    assert!(build_error(&print).contains("cannot print"));
+    let compare = with_counter(
+        "func main() {\n  let a = Counter(count: 1, label: \"a\")\n  print(a == a)\n}",
+    );
+    assert!(build_error(&compare).contains("equality"));
+}
+
+#[test]
+fn a_class_cannot_hold_a_struct_member_yet() {
+    let source = "struct P { var x: Int }\nclass Wrapper { var p: P }\nfunc main() { }";
+    assert!(build_error(source).contains("cannot have a struct type"));
+}

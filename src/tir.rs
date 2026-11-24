@@ -142,6 +142,10 @@ pub enum TExpr {
         ty: Ty,
         args: Vec<TExpr>,
     },
+    New {
+        ty: Ty,
+        args: Vec<TExpr>,
+    },
     Field {
         base: Box<TExpr>,
         index: usize,
@@ -166,9 +170,10 @@ impl TExpr {
                 _ => Ty::Bool,
             },
             TExpr::Call { ret, .. } => *ret,
-            TExpr::StructInit { ty, .. } | TExpr::Field { ty, .. } | TExpr::EnumCase { ty, .. } => {
-                *ty
-            }
+            TExpr::StructInit { ty, .. }
+            | TExpr::New { ty, .. }
+            | TExpr::Field { ty, .. }
+            | TExpr::EnumCase { ty, .. } => *ty,
         }
     }
 }
@@ -295,6 +300,10 @@ impl<E> Rewriter<'_, E> {
                 }
             }
             TExpr::StructInit { ty, args } => TExpr::StructInit {
+                ty: (self.ty)(*ty)?,
+                args: self.exprs(args)?,
+            },
+            TExpr::New { ty, args } => TExpr::New {
                 ty: (self.ty)(*ty)?,
                 args: self.exprs(args)?,
             },

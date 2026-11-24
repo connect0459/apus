@@ -324,9 +324,8 @@ impl Signatures {
         if let Some(def) = self.struct_def_ids.get(name).copied() {
             let args =
                 self.resolve_args(tr, self.struct_defs[def].generics().len(), scope, line)?;
-            return self
-                .instantiate_struct(def, args, scope, line)
-                .map(Ty::Struct);
+            let id = self.instantiate_struct(def, args, scope, line)?;
+            return Ok(self.struct_ty(def, id));
         }
         if let Some(def) = self.enum_def_ids.get(name).copied() {
             let args = self.resolve_args(tr, self.enum_defs[def].generics().len(), scope, line)?;
@@ -565,6 +564,14 @@ impl Signatures {
         Ok(cases)
     }
 
+    pub fn struct_ty(&self, def: usize, id: StructId) -> Ty {
+        if self.struct_defs[def].is_class() {
+            Ty::Class(id)
+        } else {
+            Ty::Struct(id)
+        }
+    }
+
     pub fn enum_ty(&self, id: EnumId) -> Ty {
         match self.instances.borrow().enums[id.index()].layout {
             Some(layout) => Ty::Struct(layout),
@@ -634,7 +641,7 @@ impl Signatures {
                 .iter()
                 .find(|(_, t)| *t == Ty::Param(index))
                 .map_or_else(|| format!("T{index}"), |(name, _)| name.clone()),
-            Ty::Struct(id) => self
+            Ty::Struct(id) | Ty::Class(id) => self
                 .struct_sig(id)
                 .map_or_else(String::new, |s| s.name.clone()),
             Ty::Enum(id) => self
@@ -646,7 +653,7 @@ impl Signatures {
     fn origin_of(&self, ty: Ty) -> Option<(Kind, usize, Vec<Ty>)> {
         let instances = self.instances.borrow();
         match ty {
-            Ty::Struct(id) => match instances.struct_origin.get(id.index())? {
+            Ty::Struct(id) | Ty::Class(id) => match instances.struct_origin.get(id.index())? {
                 Origin::Struct { def, args } => Some((Kind::Struct, *def, args.clone())),
                 Origin::EnumLayout(owner) => {
                     let (def, args) = instances.enum_origin.get(owner.index())?;
@@ -708,9 +715,10 @@ impl Signatures {
             .map(|a| self.subst(*a, args, scope, line))
             .collect::<CResult<Vec<_>>>()?;
         match kind {
-            Kind::Struct => self
-                .instantiate_struct(def, substituted, scope, line)
-                .map(Ty::Struct),
+            Kind::Struct => {
+                let id = self.instantiate_struct(def, substituted, scope, line)?;
+                Ok(self.struct_ty(def, id))
+            }
             Kind::Enum => {
                 let id = self.instantiate_enum(def, substituted, scope, line)?;
                 Ok(self.enum_ty(id))
