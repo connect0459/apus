@@ -19,9 +19,9 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 17] = [
-    "func", "struct", "class", "enum", "case", "switch", "default", "var", "let", "if", "else",
-    "while", "for", "in", "return", "true", "false",
+const KEYWORDS: [&str; 19] = [
+    "func", "struct", "class", "enum", "init", "mutating", "case", "switch", "default", "var",
+    "let", "if", "else", "while", "for", "in", "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -218,7 +218,12 @@ impl Parser<'_> {
 
     fn decl(&mut self) -> PResult<Decl> {
         let line = self.line();
-        if self.eat_keyword("func") {
+        if self.eat_keyword("mutating") {
+            self.expect_keyword("func")?;
+            self.func_decl(line).map(|f| Decl::Func(f.as_mutating()))
+        } else if self.eat_keyword("init") {
+            self.init_decl(line).map(Decl::Func)
+        } else if self.eat_keyword("func") {
             self.func_decl(line).map(Decl::Func)
         } else if self.eat_keyword("struct") {
             self.struct_decl(line, false).map(Decl::Struct)
@@ -255,6 +260,25 @@ impl Parser<'_> {
             self.block()?
         };
         Ok(FuncDecl::new(line, name, params, ret, body).with_generics(generics))
+    }
+
+    fn init_decl(&mut self, line: u32) -> PResult<FuncDecl> {
+        self.expect_punct("(")?;
+        let mut params = Vec::new();
+        while !self.is_punct(")") {
+            if !params.is_empty() {
+                self.expect_punct(",")?;
+            }
+            params.push(self.param()?);
+        }
+        self.expect_punct(")")?;
+        let body = if self.header_only {
+            self.pos = self.tokens.len();
+            Vec::new()
+        } else {
+            self.block()?
+        };
+        Ok(FuncDecl::new(line, "init".to_string(), params, None, body).as_init())
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -863,6 +887,59 @@ mod tests {
             panic!("expected a struct");
         };
         assert!(!plain.is_class());
+    }
+
+    #[test]
+    fn a_function_is_neither_mutating_nor_an_initializer_by_default() {
+        let f = func("func f() { }");
+        assert!(!f.is_mutating());
+        assert!(!f.is_init());
+        assert_eq!(f.owner(), None);
+    }
+
+    #[test]
+    fn mutating_marks_a_function_as_mutating() {
+        let f = func("mutating func f() { }");
+        assert!(f.is_mutating());
+        assert_eq!(f.name(), "f");
+    }
+
+    #[test]
+    fn an_initializer_is_a_function_named_init_without_a_result() {
+        let f = func("init(x: Int, y: Int) { self.x = x }");
+        assert!(f.is_init());
+        assert_eq!(f.name(), "init");
+        assert_eq!(f.params().len(), 2);
+        assert_eq!(f.ret(), None);
+        assert_eq!(f.body().len(), 1);
+    }
+
+    #[test]
+    fn mutating_must_be_followed_by_func() {
+        assert!(try_parse("mutating init() { }").is_err());
+    }
+
+    #[test]
+    fn giving_a_function_an_owner_qualifies_its_name() {
+        let f = func("func bump() { }").with_owner("Counter");
+        assert_eq!(f.owner(), Some("Counter"));
+        assert_eq!(f.name(), "Counter.bump");
+    }
+
+    #[test]
+    fn a_signature_parse_of_an_initializer_skips_its_body() {
+        let Decl::Func(f) = parse_signature(&lex("init(x: Int) { self.x = x }").unwrap()).unwrap()
+        else {
+            panic!("expected a func");
+        };
+        assert!(f.is_init());
+        assert!(f.body().is_empty());
+    }
+
+    #[test]
+    fn init_and_mutating_cannot_be_used_as_names() {
+        assert!(try_parse("func f() { let init = 1 }").is_err());
+        assert!(try_parse("func f() { let mutating = 1 }").is_err());
     }
 
     #[test]

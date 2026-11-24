@@ -6,6 +6,7 @@ pub enum ItemKind {
     Func,
     Struct,
     Enum,
+    Method,
 }
 
 #[derive(Debug, Clone)]
@@ -16,9 +17,14 @@ pub struct Item {
     hash: u64,
     signature_hash: u64,
     generic: bool,
+    owner: Option<String>,
 }
 
 impl Item {
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
     pub fn is_generic(&self) -> bool {
         self.generic
     }
@@ -128,13 +134,18 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
                 });
             }
         };
-        let slice = tokens[start..end].to_vec();
+        let mut slice = tokens[start..end].to_vec();
+        let members = match kind {
+            ItemKind::Func | ItemKind::Method => Vec::new(),
+            ItemKind::Struct | ItemKind::Enum => extract_members(&mut slice)?,
+        };
         let hash = hash_tokens(&slice);
         let generic = kind == ItemKind::Func
             && matches!(slice.get(2).map(|t| t.token()), Some(Token::Punct(p)) if p == "<");
         let signature_hash = match kind {
             ItemKind::Struct | ItemKind::Enum => hash,
             ItemKind::Func if generic => hash,
+            ItemKind::Method => hash,
             ItemKind::Func => {
                 let header_end = slice
                     .iter()
@@ -145,15 +156,122 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         };
         items.push(Item {
             kind,
-            name,
+            name: name.clone(),
             tokens: slice,
             hash,
             signature_hash,
             generic,
+            owner: None,
         });
+        for member in members {
+            items.push(member_item(&name, member)?);
+        }
         i = end;
     }
     Ok(items)
+}
+
+fn is_member_start(token: &Token) -> bool {
+    matches!(token, Token::Ident(k) if k == "func" || k == "init" || k == "mutating")
+}
+
+fn extract_members(slice: &mut Vec<Spanned>) -> Result<Vec<Vec<Spanned>>, SplitError> {
+    let mut kept = Vec::with_capacity(slice.len());
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < slice.len() {
+        let token = slice[i].token();
+        if depth == 1 && is_member_start(token) {
+            let open = slice[i..]
+                .iter()
+                .position(|t| matches!(t.token(), Token::Punct(p) if p == "{"))
+                .map(|offset| i + offset);
+            let Some(open) = open else {
+                return Err(SplitError {
+                    line: slice[i].line(),
+                    message: "expected a body for this member".to_string(),
+                });
+            };
+            let mut inner = 0usize;
+            let mut close = None;
+            for (j, t) in slice.iter().enumerate().skip(open) {
+                match t.token() {
+                    Token::Punct(p) if p == "{" => inner += 1,
+                    Token::Punct(p) if p == "}" => {
+                        inner -= 1;
+                        if inner == 0 {
+                            close = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                return Err(SplitError {
+                    line: slice[i].line(),
+                    message: "unbalanced '{'".to_string(),
+                });
+            };
+            members.push(slice[i..=close].to_vec());
+            i = close + 1;
+            continue;
+        }
+        match token {
+            Token::Punct(p) if p == "{" => depth += 1,
+            Token::Punct(p) if p == "}" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        kept.push(slice[i].clone());
+        i += 1;
+    }
+    *slice = kept;
+    Ok(members)
+}
+
+fn member_name(tokens: &[Spanned]) -> Result<String, SplitError> {
+    let mut at = 0;
+    if matches!(tokens[at].token(), Token::Ident(k) if k == "mutating") {
+        at += 1;
+    }
+    match tokens.get(at).map(Spanned::token) {
+        Some(Token::Ident(k)) if k == "init" => Ok("init".to_string()),
+        Some(Token::Ident(k)) if k == "func" => match tokens.get(at + 1).map(Spanned::token) {
+            Some(Token::Ident(name)) => Ok(name.clone()),
+            _ => Err(SplitError {
+                line: tokens[at].line(),
+                message: "expected a name".to_string(),
+            }),
+        },
+        _ => Err(SplitError {
+            line: tokens[at.min(tokens.len() - 1)].line(),
+            message: "expected 'func' after 'mutating'".to_string(),
+        }),
+    }
+}
+
+fn member_item(owner: &str, tokens: Vec<Spanned>) -> Result<Item, SplitError> {
+    let name = format!("{owner}.{}", member_name(&tokens)?);
+    let mut hasher = Fnv1a::new();
+    hasher.write(owner.as_bytes());
+    hasher.write(&hash_tokens(&tokens).to_le_bytes());
+    let header_end = tokens
+        .iter()
+        .position(|t| matches!(t.token(), Token::Punct(p) if p == "{"))
+        .unwrap_or(tokens.len());
+    let mut signature = Fnv1a::new();
+    signature.write(owner.as_bytes());
+    signature.write(&hash_tokens(&tokens[..header_end]).to_le_bytes());
+    Ok(Item {
+        kind: ItemKind::Method,
+        name,
+        hash: hasher.finish(),
+        signature_hash: signature.finish(),
+        generic: false,
+        owner: Some(owner.to_string()),
+        tokens,
+    })
 }
 
 pub fn hash_tokens(tokens: &[Spanned]) -> u64 {
@@ -326,5 +444,82 @@ mod tests {
             digest_of("func id<T>(_ x: T) -> T { return x }"),
             digest_of("func id<T>(_ x: T) -> T { let y = x\nreturn y }")
         );
+    }
+
+    const COUNTER: &str = "class Counter {\n  var n: Int\n  func bump() { self.n += 1 }\n  mutating func reset() { }\n  init(n: Int) { self.n = n }\n}\nfunc main() { }";
+
+    #[test]
+    fn the_members_of_a_type_become_items_of_their_own() {
+        let found = items(COUNTER);
+        let summary: Vec<(ItemKind, &str)> = found.iter().map(|i| (i.kind(), i.name())).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (ItemKind::Struct, "Counter"),
+                (ItemKind::Method, "Counter.bump"),
+                (ItemKind::Method, "Counter.reset"),
+                (ItemKind::Method, "Counter.init"),
+                (ItemKind::Func, "main"),
+            ]
+        );
+        assert_eq!(found[1].owner(), Some("Counter"));
+        assert_eq!(found[4].owner(), None);
+    }
+
+    #[test]
+    fn a_member_item_keeps_its_modifier_and_its_whole_body() {
+        let found = items(COUNTER);
+        let reset = &found[2];
+        assert_eq!(
+            reset.tokens().first().map(|t| t.token().clone()),
+            Some(Token::Ident("mutating".to_string()))
+        );
+        assert_eq!(
+            reset.tokens().last().map(|t| t.token().clone()),
+            Some(Token::Punct("}".to_string()))
+        );
+    }
+
+    #[test]
+    fn editing_a_method_body_changes_neither_the_type_item_nor_the_digest() {
+        let before = "struct P { var x: Int\n func f() -> Int { return 1 } }";
+        let after = "struct P { var x: Int\n func f() -> Int { return 2 } }";
+        assert_eq!(hash_of(before, "P"), hash_of(after, "P"));
+        assert_eq!(digest_of(before), digest_of(after));
+        assert_ne!(hash_of(before, "P.f"), hash_of(after, "P.f"));
+    }
+
+    #[test]
+    fn changing_a_method_header_changes_the_digest() {
+        assert_ne!(
+            digest_of("struct P { var x: Int\n func f() -> Int { return 1 } }"),
+            digest_of("struct P { var x: Int\n func f() -> Bool { return true } }")
+        );
+    }
+
+    #[test]
+    fn marking_a_method_mutating_changes_the_digest() {
+        assert_ne!(
+            digest_of("struct P { var x: Int\n func f() { } }"),
+            digest_of("struct P { var x: Int\n mutating func f() { } }")
+        );
+    }
+
+    #[test]
+    fn identical_method_text_in_different_types_hashes_differently() {
+        let src = "struct A { var x: Int\n func f() { } }\nstruct B { var x: Int\n func f() { } }";
+        assert_ne!(hash_of(src, "A.f"), hash_of(src, "B.f"));
+    }
+
+    #[test]
+    fn an_enum_may_have_methods() {
+        let found = items("enum E { case a, b\n func f() { } }");
+        assert_eq!(found[0].kind(), ItemKind::Enum);
+        assert_eq!(found[1].name(), "E.f");
+    }
+
+    #[test]
+    fn a_method_without_a_name_is_an_error() {
+        assert!(split_items(&lex("struct P { func { } }").unwrap()).is_err());
     }
 }

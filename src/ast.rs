@@ -74,6 +74,9 @@ pub struct FuncDecl {
     params: Vec<Param>,
     ret: Option<TypeName>,
     body: Vec<Stmt>,
+    owner: Option<String>,
+    mutating: bool,
+    init: bool,
 }
 
 impl FuncDecl {
@@ -91,12 +94,43 @@ impl FuncDecl {
             params,
             ret,
             body,
+            owner: None,
+            mutating: false,
+            init: false,
         }
     }
 
     pub fn with_generics(mut self, generics: Vec<String>) -> Self {
         self.generics = generics;
         self
+    }
+
+    pub fn as_mutating(mut self) -> Self {
+        self.mutating = true;
+        self
+    }
+
+    pub fn as_init(mut self) -> Self {
+        self.init = true;
+        self
+    }
+
+    pub fn with_owner(mut self, owner: &str) -> Self {
+        self.name = format!("{owner}.{}", self.name);
+        self.owner = Some(owner.to_string());
+        self
+    }
+
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
+    pub fn is_mutating(&self) -> bool {
+        self.mutating
+    }
+
+    pub fn is_init(&self) -> bool {
+        self.init
     }
 
     pub fn generics(&self) -> &[String] {
