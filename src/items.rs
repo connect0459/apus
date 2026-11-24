@@ -135,6 +135,8 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             }
         };
         let mut slice = tokens[start..end].to_vec();
+        let owner_generic =
+            matches!(slice.get(2).map(|t| t.token()), Some(Token::Punct(p)) if p == "<");
         let members = match kind {
             ItemKind::Func | ItemKind::Method => Vec::new(),
             ItemKind::Struct | ItemKind::Enum => extract_members(&mut slice)?,
@@ -164,7 +166,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             owner: None,
         });
         for member in members {
-            items.push(member_item(&name, member)?);
+            items.push(member_item(&name, member, owner_generic)?);
         }
         i = end;
     }
@@ -251,7 +253,7 @@ fn member_name(tokens: &[Spanned]) -> Result<String, SplitError> {
     }
 }
 
-fn member_item(owner: &str, tokens: Vec<Spanned>) -> Result<Item, SplitError> {
+fn member_item(owner: &str, tokens: Vec<Spanned>, generic: bool) -> Result<Item, SplitError> {
     let name = format!("{owner}.{}", member_name(&tokens)?);
     let mut hasher = Fnv1a::new();
     hasher.write(owner.as_bytes());
@@ -260,15 +262,16 @@ fn member_item(owner: &str, tokens: Vec<Spanned>) -> Result<Item, SplitError> {
         .iter()
         .position(|t| matches!(t.token(), Token::Punct(p) if p == "{"))
         .unwrap_or(tokens.len());
+    let signed = if generic { tokens.len() } else { header_end };
     let mut signature = Fnv1a::new();
     signature.write(owner.as_bytes());
-    signature.write(&hash_tokens(&tokens[..header_end]).to_le_bytes());
+    signature.write(&hash_tokens(&tokens[..signed]).to_le_bytes());
     Ok(Item {
         kind: ItemKind::Method,
         name,
         hash: hasher.finish(),
         signature_hash: signature.finish(),
-        generic: false,
+        generic,
         owner: Some(owner.to_string()),
         tokens,
     })
@@ -536,5 +539,22 @@ mod tests {
     #[test]
     fn a_member_body_that_never_closes_is_an_error() {
         assert!(split_items(&lex("struct P { func f() { ").unwrap()).is_err());
+    }
+
+    #[test]
+    fn the_members_of_a_generic_type_are_generic_items() {
+        let found = items(
+            "struct Box<T> { var v: T\n func get() -> T { return self.v } }\nstruct P { var x: Int\n func f() { } }",
+        );
+        assert!(found[1].is_generic());
+        assert!(!found[3].is_generic());
+    }
+
+    #[test]
+    fn editing_a_method_body_of_a_generic_type_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("struct Box<T> { var v: T\n func get() -> T { return self.v } }"),
+            digest_of("struct Box<T> { var v: T\n func get() -> T { let x = self.v\n return x } }")
+        );
     }
 }
