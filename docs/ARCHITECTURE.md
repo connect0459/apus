@@ -4,7 +4,7 @@
 
 apus compiles a Swift subset (a dialect, not Swift) to a native macOS arm64 executable. Its goal is a fast edit-and-rebuild loop: after editing one function, only that function is recompiled.
 
-The unit of incremental work is the top-level **item** (a `func`, a `struct`, a `class` or an `enum`). Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
+The unit of incremental work is the **item**: a top-level `func`, `struct`, `class` or `enum`, or a method or initializer of a type, which `items` splits out of its type body. Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
 
 ```text
 source → lexer → items → parser → check → mono → codegen → link → driver
@@ -18,13 +18,15 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`lexer`** turns source text into tokens. Comments and whitespace produce no tokens, but every token remembers its line. The parser relies on lines to decide where statements end.
 
-**`items`** splits the token stream into top-level items and computes a content hash for each. It is the only stage that sees the whole file; later stages receive one item at a time.
+**`items`** splits the token stream into top-level items, takes the methods and initializers out of each type body as items of their own, and computes a content hash for each. It is the only stage that sees the whole file; later stages receive one item at a time.
 
 **`ast` and `parser`** define the syntax tree and parse a single item into it. The parser never looks at tokens outside the item it was given. Every statement and expression remembers its line.
 
 **`types`, `sigs` and `check`** hold the type system and the checker. `Signatures` (in `sigs`) is built once from the declarations of all items; it also interns the instances of generic structs and enums, so it grows while functions are checked. `check_func` checks one function using only that function's body and the signatures, and produces typed IR. A generic function is checked once with opaque type parameters (`Ty::Param`), and calls to generic functions record their `type_args`. The only whole-program information a function body can see is a signature, never another body.
 
 **`mono`** turns calls with concrete type arguments into instances: it substitutes the types of the generic function's typed IR, names the instance `name<Type,...>`, and does the same for the calls inside it, one instance per name. An instance is an ordinary typed function from then on.
+
+**`init_check`** decides, from the syntax of an initializer alone, whether it sets every member before using `self`.
 
 **`tir`** is the typed IR that `check` produces and `codegen` consumes. Every expression carries its type, so `codegen` never infers anything.
 
@@ -58,6 +60,9 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 - A struct is a value. It lives in memory as one 8-byte slot per field, and an expression of struct type evaluates to the address of its storage. A struct is copied at `let` and assignment. A parameter is passed as a pointer and is immutable, so the callee never changes the caller's value. A result is written to memory supplied by the caller.
 
 - A class is a heap block of one 8-byte slot per member behind a 64-bit pointer (`Ty::Class`). It is copied, passed and returned as a scalar, `TExpr::New` allocates it with `malloc`, and nothing frees it. Members are read and assigned through the pointer, so a copy of the reference shares the instance.
+
+- A method is the function `Type.method` with `self` as its first parameter, an initializer is `Type.init` returning the type, and a call through a value is lowered by `check` to a plain call. A `mutating` method receives the address of the caller's variable. An initializer starts from a zero-filled `self` and `init_check` guarantees that no zero is observed.
+- A member's hash includes its owner, and the signature digest includes its header but not its body.
 
 ## Cross-Cutting Concerns
 
