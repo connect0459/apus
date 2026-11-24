@@ -775,12 +775,6 @@ fn a_method_cannot_be_declared_twice() {
 }
 
 #[test]
-fn methods_of_a_generic_type_are_not_supported_yet() {
-    let source = "struct Box<T> { var v: T\n  func get() -> T { return self.v } }\nfunc main() { }";
-    assert!(build_error(source).contains("generic"));
-}
-
-#[test]
 fn a_generic_method_is_not_supported_yet() {
     let source = "struct C { var n: Int\n  func id<T>(_ x: T) -> T { return x } }\nfunc main() { }";
     assert!(build_error(source).contains("generic"));
@@ -896,12 +890,111 @@ fn an_enum_cannot_have_an_initializer_yet() {
 }
 
 #[test]
-fn an_initializer_of_a_generic_type_is_not_supported_yet() {
-    let source = "struct B<T> {\n  var v: T\n  init(v: T) { self.v = v }\n}\nfunc main() { }";
-    assert!(build_error(source).contains("generic"));
+fn init_outside_a_type_is_rejected_at_the_top_level() {
+    assert!(build_error("init() { }\nfunc main() { }").contains("top level"));
+}
+
+const BOX: &str = "struct Box<T> {\n  var value: T\n  func get() -> T { return self.value }\n  mutating func set(_ v: T) { self.value = v }\n}\n";
+
+#[test]
+fn a_method_of_a_generic_struct_returns_the_type_argument() {
+    let source = format!("{BOX}func main() {{\n  let b = Box(value: 5)\n  print(b.get())\n}}");
+    assert_eq!(run(&source), "5\n");
 }
 
 #[test]
-fn init_outside_a_type_is_rejected_at_the_top_level() {
-    assert!(build_error("init() { }\nfunc main() { }").contains("top level"));
+fn each_instantiation_of_a_generic_type_gets_its_own_method_instance() {
+    let source = format!(
+        "{BOX}func main() {{\n  let a = Box(value: 5)\n  let b = Box(value: true)\n  let c = Box(value: \"s\")\n  print(a.get())\n  print(b.get())\n  print(c.get())\n}}"
+    );
+    assert_eq!(run(&source), "5\ntrue\ns\n");
+}
+
+#[test]
+fn a_mutating_method_of_a_generic_struct_writes_through_the_variable() {
+    let source =
+        format!("{BOX}func main() {{\n  var b = Box(value: 1)\n  b.set(9)\n  print(b.get())\n}}");
+    assert_eq!(run(&source), "9\n");
+}
+
+#[test]
+fn a_method_of_a_generic_class_changes_the_shared_instance() {
+    let source = "class Cell<T> {\n  var value: T\n  func put(_ v: T) { self.value = v }\n  func take() -> T { return self.value }\n}\n\
+         func main() {\n  let c = Cell(value: 1)\n  let d = c\n  d.put(7)\n  print(c.take())\n}";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn a_method_of_a_generic_type_can_call_another_method_through_self() {
+    let source = "struct Box<T> {\n  var value: T\n  func get() -> T { return self.value }\n  func again() -> T { return self.get() }\n}\n\
+         func main() { print(Box(value: 3).again()) }";
+    assert_eq!(run(source), "3\n");
+}
+
+#[test]
+fn a_generic_function_can_call_a_method_on_a_value_of_a_generic_type() {
+    let source = format!(
+        "{BOX}func read<T>(_ b: Box<T>) -> T {{ return b.get() }}\n\
+         func main() {{\n  print(read(Box(value: 4)))\n  print(read(Box(value: false)))\n}}"
+    );
+    assert_eq!(run(&source), "4\nfalse\n");
+}
+
+#[test]
+fn a_method_of_a_generic_enum_switches_on_self() {
+    let source = "enum Opt<T> {\n  case none\n  case some(T)\n  func orElse(_ d: T) -> T {\n    switch self {\n    case .none: return d\n    case .some(let v): return v\n    }\n  }\n}\n\
+         func main() {\n  let a = Opt<Int>.some(4)\n  let b = Opt<Int>.none\n  print(a.orElse(0))\n  print(b.orElse(8))\n}";
+    assert_eq!(run(source), "4\n8\n");
+}
+
+#[test]
+fn a_mutating_method_of_a_generic_enum_replaces_self() {
+    let source = "enum Opt<T> {\n  case none\n  case some(T)\n  mutating func fill(_ v: T) { self = Opt<T>.some(v) }\n  func isSome() -> Bool {\n    switch self {\n    case .none: return false\n    case .some(_): return true\n    }\n  }\n}\n\
+         func main() {\n  var o = Opt<Int>.none\n  o.fill(2)\n  print(o.isSome())\n}";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn an_initializer_of_a_generic_type_infers_the_type_arguments() {
+    let source = "struct Pair<A, B> {\n  var first: A\n  var second: B\n  init(a: A, b: B) {\n    self.first = a\n    self.second = b\n  }\n  func swapped() -> Pair<B, A> { return Pair(a: self.second, b: self.first) }\n}\n\
+         func main() {\n  let p = Pair(a: 1, b: true)\n  let q = p.swapped()\n  print(q.first)\n  print(q.second)\n}";
+    assert_eq!(run(source), "true\n1\n");
+}
+
+#[test]
+fn an_initializer_of_a_generic_class_may_take_explicit_type_arguments() {
+    let source = "class Cell<T> {\n  var value: T\n  init(start: T) { self.value = start }\n}\n\
+         func main() {\n  let c = Cell<Int>(start: 6)\n  print(c.value)\n}";
+    assert_eq!(run(source), "6\n");
+}
+
+#[test]
+fn explicit_type_arguments_are_checked_against_an_initializer() {
+    let source = "class Cell<T> {\n  var value: T\n  init(start: T) { self.value = start }\n}\n\
+         func main() { let c = Cell<Int>(start: true) }";
+    assert!(build_error(source).contains("expected Int"));
+}
+
+#[test]
+fn a_method_argument_of_the_wrong_type_is_rejected_for_a_generic_receiver() {
+    let source = format!("{BOX}func main() {{\n  var b = Box(value: 1)\n  b.set(true)\n}}");
+    assert!(build_error(&source).contains("expected Int"));
+}
+
+#[test]
+fn a_method_body_of_a_generic_type_is_checked_even_when_unused() {
+    let source = "struct Box<T> {\n  var value: T\n  func bad() -> Int { return self.value }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("expected Int"));
+}
+
+#[test]
+fn a_method_of_a_generic_type_cannot_use_an_operator_on_the_type_parameter() {
+    let source = "struct Box<T> {\n  var value: T\n  func twice() -> T { return self.value + self.value }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("expected Int"));
+}
+
+#[test]
+fn a_generic_method_of_a_generic_type_is_still_not_supported() {
+    let source = "struct Box<T> {\n  var value: T\n  func map<U>(_ x: U) -> U { return x }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("generic method"));
 }

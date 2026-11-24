@@ -31,11 +31,8 @@ impl CheckError {
     }
 }
 
-fn generic_owner(line: u32, owner: &str) -> CheckError {
-    CheckError::at(
-        line,
-        format!("methods of the generic type '{owner}' are not supported yet"),
-    )
+fn identity(generics: &[String]) -> Vec<Ty> {
+    (0..generics.len()).map(Ty::Param).collect()
 }
 
 pub type CResult<T> = Result<T, CheckError>;
@@ -300,8 +297,7 @@ impl Signatures {
                 format!("'{}' is already the name of a type", func.name()),
             ));
         }
-        let scope = scope_of(func.generics());
-        let owner_ty = match func.owner() {
+        let owner = match func.owner() {
             Some(owner) => Some(self.member_owner(func, owner)?),
             None if func.is_mutating() || func.is_init() => {
                 return Err(CheckError::at(
@@ -311,6 +307,12 @@ impl Signatures {
             }
             None => None,
         };
+        let owner_ty = owner.as_ref().map(|(ty, _)| *ty);
+        let generics = match &owner {
+            Some((_, generics)) => generics.clone(),
+            None => func.generics().to_vec(),
+        };
+        let scope = scope_of(&generics);
         let receiver = owner_ty.filter(|_| !func.is_init());
         let mut params: Vec<ParamSig> = receiver
             .map(|ty| ParamSig { label: None, ty })
@@ -328,7 +330,7 @@ impl Signatures {
             (None, _) => Ty::Void,
         };
         let sig = FuncSig {
-            generics: func.generics().to_vec(),
+            generics,
             params,
             ret,
             receiver: receiver.is_some(),
@@ -343,7 +345,7 @@ impl Signatures {
         Ok(())
     }
 
-    fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<Ty> {
+    fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<(Ty, Vec<String>)> {
         let line = func.line();
         if !func.generics().is_empty() {
             return Err(CheckError::at(
@@ -351,18 +353,15 @@ impl Signatures {
                 format!("generic methods are not supported yet: '{}'", func.name()),
             ));
         }
-        let ty = if let Some(def) = self.struct_def_ids.get(owner).copied() {
-            if !self.struct_defs[def].generics().is_empty() {
-                return Err(generic_owner(line, owner));
-            }
-            let id = self.instantiate_struct(def, Vec::new(), &[], line)?;
-            self.struct_ty(def, id)
+        let (ty, generics) = if let Some(def) = self.struct_def_ids.get(owner).copied() {
+            let generics = self.struct_defs[def].generics().to_vec();
+            let id =
+                self.instantiate_struct(def, identity(&generics), &scope_of(&generics), line)?;
+            (self.struct_ty(def, id), generics)
         } else if let Some(def) = self.enum_def_ids.get(owner).copied() {
-            if !self.enum_defs[def].generics().is_empty() {
-                return Err(generic_owner(line, owner));
-            }
-            let id = self.instantiate_enum(def, Vec::new(), &[], line)?;
-            self.enum_ty(id)
+            let generics = self.enum_defs[def].generics().to_vec();
+            let id = self.instantiate_enum(def, identity(&generics), &scope_of(&generics), line)?;
+            (self.enum_ty(id), generics)
         } else {
             return Err(CheckError::at(line, format!("unknown type '{owner}'")));
         };
@@ -387,17 +386,15 @@ impl Signatures {
                 format!("the enum '{owner}' cannot have an initializer yet"),
             ));
         }
-        Ok(ty)
+        Ok((ty, generics))
     }
 
     pub fn owner_name(&self, ty: Ty) -> Option<String> {
-        if let Some(sig) = self.enum_of(ty) {
-            return Some(sig.base_name().to_string());
-        }
-        match ty {
-            Ty::Struct(id) | Ty::Class(id) => self.struct_sig(id).map(|s| s.name.clone()),
-            _ => None,
-        }
+        let (kind, def, _) = self.origin_of(ty)?;
+        Some(match kind {
+            Kind::Struct => self.struct_defs[def].name().to_string(),
+            Kind::Enum => self.enum_defs[def].name().to_string(),
+        })
     }
 
     pub fn resolve_type(&self, tr: &TypeRef, scope: &Scope, line: u32) -> CResult<Ty> {

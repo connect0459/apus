@@ -5,7 +5,7 @@ use crate::ast::{
     UnaryOp,
 };
 use crate::init_check::check_initialization;
-use crate::sigs::{CResult, EnumSig, FieldSig, PRINT, scope_of};
+use crate::sigs::{CResult, EnumSig, FieldSig, FuncSig, PRINT, ParamSig, scope_of};
 use crate::tir::{LocalId, TExpr, TFunc, TStmt};
 use crate::types::Ty;
 
@@ -647,6 +647,7 @@ impl FnCx<'_> {
                 base,
                 name,
                 args,
+                None,
             )?));
         }
         let ExprKind::Call { callee, args } = expr.kind() else {
@@ -763,7 +764,9 @@ impl FnCx<'_> {
             ExprKind::MemberCall { base, name, args } if self.enum_target(base).is_some() => {
                 self.enum_construct(line, base, name, args, expected)
             }
-            ExprKind::MemberCall { base, name, args } => self.method_call(line, base, name, args),
+            ExprKind::MemberCall { base, name, args } => {
+                self.method_call(line, base, name, args, expected)
+            }
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 let (index, field) = self.member_of(line, base.ty(), name)?;
@@ -781,7 +784,14 @@ impl FnCx<'_> {
         }
     }
 
-    fn method_call(&mut self, line: u32, base: &Expr, name: &str, args: &[Arg]) -> CResult<TExpr> {
+    fn method_call(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        name: &str,
+        args: &[Arg],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
         let receiver = self.value(base)?;
         let sigs = self.sigs;
         let owner = sigs.owner_name(receiver.ty()).ok_or_else(|| {
@@ -819,26 +829,10 @@ impl FnCx<'_> {
         }
         let mut checked = vec![receiver];
         for (arg, param) in args.iter().zip(params) {
-            if arg.label() != param.label() {
-                return Err(CheckError::at(
-                    line,
-                    format!(
-                        "argument label {:?} does not match the expected label {:?}",
-                        arg.label(),
-                        param.label()
-                    ),
-                ));
-            }
-            let value = self.value(arg.value())?;
-            self.expect(line, param.ty(), value.ty())?;
-            checked.push(value);
+            self.expect_label(line, arg, param.label())?;
+            checked.push(self.value(arg.value())?);
         }
-        Ok(TExpr::Call {
-            callee: qualified,
-            type_args: Vec::new(),
-            args: checked,
-            ret: sig.ret(),
-        })
+        self.finish_call(line, &qualified, sig, checked, expected, None)
     }
 
     fn is_mutable_variable(&self, base: &Expr) -> bool {
@@ -904,13 +898,18 @@ impl FnCx<'_> {
         let callee_scope = scope_of(generics);
         for (pattern, value) in patterns.iter().zip(values) {
             if !self.sigs.unify(*pattern, value.ty(), &mut bound) {
+                let wanted = match pattern {
+                    Ty::Param(index) => bound.get(*index).copied().flatten().unwrap_or(*pattern),
+                    other => *other,
+                };
+                let shown = if wanted == *pattern {
+                    self.sigs.display(wanted, &callee_scope)
+                } else {
+                    self.name_of(wanted)
+                };
                 return Err(CheckError::at(
                     line,
-                    format!(
-                        "expected {}, but found {}",
-                        self.sigs.display(*pattern, &callee_scope),
-                        self.name_of(value.ty())
-                    ),
+                    format!("expected {shown}, but found {}", self.name_of(value.ty())),
                 ));
             }
         }
@@ -1097,6 +1096,17 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
+        self.call_with(line, callee, args, expected, None)
+    }
+
+    fn call_with(
+        &mut self,
+        line: u32,
+        callee: &str,
+        args: &[Arg],
+        expected: Option<Ty>,
+        explicit: Option<&[TypeRef]>,
+    ) -> CResult<TExpr> {
         let sigs = self.sigs;
         let init_name = format!("{callee}.init");
         let callee = if sigs.struct_def(callee).is_some() && sigs.func(&init_name).is_some() {
@@ -1120,36 +1130,69 @@ impl FnCx<'_> {
                 ),
             ));
         }
-        let generic = !sig.generics().is_empty();
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(sig.params()) {
-            if arg.label() != param.label() {
-                return Err(CheckError::at(
-                    line,
-                    format!(
-                        "argument label {:?} does not match the expected label {:?}",
-                        arg.label(),
-                        param.label()
-                    ),
-                ));
-            }
-            let value = self.value(arg.value())?;
-            if !generic {
-                self.expect(line, param.ty(), value.ty())?;
-            }
-            checked.push(value);
+            self.expect_label(line, arg, param.label())?;
+            checked.push(self.value(arg.value())?);
         }
-        if !generic {
+        let explicit = match explicit {
+            Some(given) => Some(self.explicit_args(
+                line,
+                callee.strip_suffix(".init").unwrap_or(callee),
+                sig.generics().len(),
+                given,
+            )?),
+            None => None,
+        };
+        self.finish_call(line, callee, sig, checked, expected, explicit)
+    }
+
+    fn expect_label(&self, line: u32, arg: &Arg, label: Option<&str>) -> CResult<()> {
+        if arg.label() == label {
+            Ok(())
+        } else {
+            Err(CheckError::at(
+                line,
+                format!(
+                    "argument label {:?} does not match the expected label {:?}",
+                    arg.label(),
+                    label
+                ),
+            ))
+        }
+    }
+
+    fn finish_call(
+        &self,
+        line: u32,
+        callee: &str,
+        sig: &FuncSig,
+        checked: Vec<TExpr>,
+        expected: Option<Ty>,
+        explicit: Option<Vec<Ty>>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let patterns: Vec<Ty> = sig.params().iter().map(ParamSig::ty).collect();
+        let type_args = if sig.generics().is_empty() {
+            Vec::new()
+        } else if let Some(given) = explicit {
+            given
+        } else {
+            let context = expected.map(|e| (sig.ret(), e));
+            let inferred =
+                self.infer(line, callee, sig.generics(), &patterns, &checked, context)?;
+            let ret = sigs.subst(sig.ret(), &inferred, &self.scope, line)?;
             return Ok(TExpr::Call {
                 callee: callee.to_string(),
-                type_args: Vec::new(),
+                type_args: inferred,
                 args: checked,
-                ret: sig.ret(),
+                ret,
             });
+        };
+        for (pattern, value) in patterns.iter().zip(&checked) {
+            let wanted = sigs.subst(*pattern, &type_args, &self.scope, line)?;
+            self.expect(line, wanted, value.ty())?;
         }
-        let patterns: Vec<Ty> = sig.params().iter().map(|p| p.ty()).collect();
-        let context = expected.map(|e| (sig.ret(), e));
-        let type_args = self.infer(line, callee, sig.generics(), &patterns, &checked, context)?;
         let ret = sigs.subst(sig.ret(), &type_args, &self.scope, line)?;
         Ok(TExpr::Call {
             callee: callee.to_string(),
@@ -1166,7 +1209,11 @@ impl FnCx<'_> {
         type_args: &[TypeRef],
         args: &[Arg],
     ) -> CResult<TExpr> {
+        let init_name = format!("{callee}.init");
         match self.sigs.struct_def(callee) {
+            Some(_) if self.sigs.func(&init_name).is_some() => {
+                self.call_with(line, &init_name, args, None, Some(type_args))
+            }
             Some(def) => self.struct_init(line, def, Some(type_args), args, None),
             None => Err(CheckError::at(
                 line,
