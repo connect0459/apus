@@ -389,3 +389,35 @@ fn generic_instances_are_dropped_from_the_cache_when_no_longer_used() {
     project.build("func main() { print(1) }\n");
     assert_eq!(Cache::open(&project.cache_dir()).len(), 1);
 }
+
+fn counter_program(step: i64) -> String {
+    format!(
+        "class Counter {{\n  var n: Int\n  func bump() {{ self.n += {step} }}\n  func read() -> Int {{ return self.n }}\n}}\n\
+         func other() -> Int {{ return 5 }}\n\
+         func main() {{\n  let c = Counter(n: 0)\n  c.bump()\n  print(c.read() + other())\n}}\n"
+    )
+}
+
+#[test]
+fn editing_a_method_body_checks_and_compiles_only_that_method() {
+    let project = Project::new();
+    project.build(&counter_program(1));
+    assert_eq!(project.run(), "6\n");
+    let report = project.build(&counter_program(2));
+    assert_eq!(report.checked(), 1);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "7\n");
+}
+
+#[test]
+fn adding_a_method_checks_every_function_again() {
+    let project = Project::new();
+    project.build(&counter_program(1));
+    let extended = counter_program(1).replace(
+        "func read()",
+        "func twice() -> Int { return self.n * 2 }\n  func read()",
+    );
+    let report = project.build(&extended);
+    assert!(report.checked() > 1);
+    assert_eq!(project.run(), "6\n");
+}
