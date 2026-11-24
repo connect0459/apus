@@ -4,7 +4,7 @@
 
 apus compiles a Swift subset (a dialect, not Swift) to a native macOS arm64 executable. Its goal is a fast edit-and-rebuild loop: after editing one function, only that function is recompiled.
 
-The unit of incremental work is the top-level **item** (a `func`, a `struct` or an `enum`). Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
+The unit of incremental work is the top-level **item** (a `func`, a `struct`, a `class` or an `enum`). Everything is organized so that an item can be hashed, parsed, checked and compiled without looking at the bodies of other items.
 
 ```text
 source → lexer → items → parser → check → mono → codegen → link → driver
@@ -56,6 +56,8 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 - An enum without payloads is a 64-bit integer holding the case index. An enum whose cases carry values is a struct of one tag slot and as many 8-byte slots as its widest case, so it is copied and passed like a struct. `switch` has no typed IR node of its own: `check` lowers it to a temporary local and a chain of `if` statements, with payload bindings as `let` statements at the start of each case.
 - Integer arithmetic traps on overflow and on division by zero, as Swift does.
 - A struct is a value. It lives in memory as one 8-byte slot per field, and an expression of struct type evaluates to the address of its storage. A struct is copied at `let` and assignment. A parameter is passed as a pointer and is immutable, so the callee never changes the caller's value. A result is written to memory supplied by the caller.
+
+- A class is a heap block of one 8-byte slot per member behind a 64-bit pointer (`Ty::Class`). It is copied, passed and returned as a scalar, `TExpr::New` allocates it with `malloc`, and nothing frees it. Members are read and assigned through the pointer, so a copy of the reference shares the instance.
 
 ## Cross-Cutting Concerns
 

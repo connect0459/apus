@@ -23,7 +23,9 @@
   - [x] Enum without payloads: `enum`, `Enum.case`, `==`/`!=`, enum struct fields, exhaustive `switch`
   - [x] Enum with payloads: `Shape.circle(5)`, `case .circle(let r)`, `_` to skip a value
   - [x] Generics by monomorphization: generic functions, structs and enums, inferred type arguments
-  - [ ] Simple class; needs a decision on memory management first
+  - [x] Simple class: reference semantics, memberwise init, mutable members, generic classes; instances are never freed
+  - [ ] Reference counting for classes, with `deinit`, `weak` and `unowned` (see the class decision)
+  - [ ] Class methods, `init`, inheritance and `===`
 
 ## Open decisions
 
@@ -42,7 +44,7 @@
 - Entry point is `func main()` instead of top-level statements.
 - Linking cost with the system linker on macOS is unmeasured.
 - Coverage gate stays at 80% line / 90% function; branch coverage is not gated because the stable toolchain cannot measure it. Baseline on 2026-11-20 (`cargo llvm-cov`): 95.9% lines and 93.6% functions. The weakest files are `link.rs` (50% of functions: the fallback and error paths of the system linker) and `codegen.rs` (75% of functions: the error conversions). Compare against these numbers when a change lowers coverage.
-- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, generic arguments cannot be structs or enums with payloads where they end up as a struct field or a payload, there are no protocol constraints so a value of a type parameter can only be copied, passed, returned and stored, explicit type arguments are not accepted on function calls, an expected type reaches only the top expression of a `let` initializer or a `return`, payloads are unlabeled and limited to `Int`, `Bool`, `String` and enums without payloads, a case with bindings has a single pattern, `.circle(5)` without the type name is not accepted, and a `case` may repeat a pattern without a warning.
+- Known gaps in the M2 language: equality on `String` and structs, `Int.min % -1` does not trap, structs cannot contain structs, `String` has no operations beyond literals and `print`, an enum value cannot be printed, `switch` works only on enums, generic arguments cannot be structs or enums with payloads where they end up as a struct field or a payload, there are no protocol constraints so a value of a type parameter can only be copied, passed, returned and stored, explicit type arguments are not accepted on function calls, an expected type reaches only the top expression of a `let` initializer or a `return`, payloads are unlabeled and limited to `Int`, `Bool`, `String` and enums without payloads, a class has no methods, no custom `init`, no inheritance and no `===`, a class member cannot be a struct, a member of a class is assignable only through a variable (`c.a.b = 1` is rejected), a class cannot refer to itself because there is no optional, a case with bindings has a single pattern, `.circle(5)` without the type name is not accepted, and a `case` may repeat a pattern without a warning.
 
 ## Decisions
 
@@ -107,3 +109,13 @@
 **Decision.** `Ty::Param(i)` is an opaque type. A generic function is checked once into a typed IR that mentions `Param` and carries `type_args` on each call. `Signatures` (`src/sigs.rs`) interns struct and enum instances by definition and type arguments, so `Box<Int>` is a layout of its own and `Box<T>` inside a generic body is a symbolic instance. Type arguments are inferred by unifying parameter types with argument types, and for a `let` annotation or a `return` the expected type seeds the unification. `mono` (`src/mono.rs`) turns each call with concrete `type_args` into an instance: it substitutes the types of the generic typed IR, names the result `name<Type,...>` and rewrites calls transitively, with one instance per name. An instance is an ordinary function, keyed by its typed IR like any other. Generic function items hash their whole text into the signature digest, and the item memo keeps, for each non-generic function, the keys of its own entry and of every instance it needs.
 
 **Consequences.** Editing a generic function body rechecks every function, but only instances whose typed IR changed are recompiled. Editing a non-generic function leaves the instances of other callers in the cache and the object. Instances are compiled once however many callers use them. A type parameter supports no operators until protocol constraints exist. A generic argument that becomes a struct field or an enum payload must not be a struct or an enum with payloads; the error is reported where the instance is created. Instance names are readable (`id<Int>`), so a user function can never collide with one.
+
+### A class is a heap block behind a pointer and is never freed (2026-11-24)
+
+**Problem.** A class needs reference semantics, so its lifetime must be managed somehow, and the choice touches the checker, the typed IR, the cache key and code generation.
+
+**Options.** Leak (`malloc` only); reference counting like Swift; one program-wide arena. The language has no `deinit`, `weak`, `unowned` or `isKnownUniquelyReferenced`, so no program can observe the difference between leaking and reference counting except through memory use. Reference counting would also turn every copy of a struct that holds a class reference from a slot move into a per-field retain, which rewrites the copy, parameter, result and key machinery that structs and payload enums share.
+
+**Decision.** `Ty::Class(StructId)` is a type of its own that shares the struct layout table: one 8-byte slot per member. A class value is a 64-bit pointer, so it is copied, passed and returned like an `Int`, never through the struct memory path. `TExpr::New` allocates with libc `malloc` and stores the members; nothing frees. Member reads and `AssignField` work on the pointer unchanged, and a class member may be assigned through a `let` binding or a parameter when the member is `var`. The key encodes a class with its own tag, so a class and a struct with the same members never share a key.
+
+**Consequences.** Every copy of a class reference is visible in the typed IR as a value of `Ty::Class`, and allocation is the single `New` node, so a later lowering pass can insert retain and release without changing the checker. Introducing `deinit` or `weak` is the point where leaking stops being observably correct and reference counting must replace it. Programs leak every instance, which is acceptable for a short-lived compiler experiment. `==` and printing are rejected for classes.
