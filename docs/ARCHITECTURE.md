@@ -26,7 +26,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`mono`** turns calls with concrete type arguments into instances: it substitutes the types of the generic function's typed IR, names the instance `name<Type,...>`, and does the same for the calls inside it, one instance per name. An instance is an ordinary typed function from then on.
 
-**`init_check`** decides, from the syntax of an initializer alone, whether it sets every member before using `self`.
+**`init_check`** decides, from the syntax of an initializer and the names of the type's members, methods and the initializer's parameters, whether it sets every member before using `self`, with or without writing `self.`.
 
 **`tir`** is the typed IR that `check` produces and `codegen` consumes. Every expression carries its type, so `codegen` never infers anything.
 
