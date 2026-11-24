@@ -159,6 +159,7 @@ pub struct StructDecl {
     name: String,
     generics: Vec<String>,
     fields: Vec<Field>,
+    class: bool,
 }
 
 impl StructDecl {
@@ -168,12 +169,22 @@ impl StructDecl {
             name,
             generics: Vec::new(),
             fields,
+            class: false,
         }
     }
 
     pub fn with_generics(mut self, generics: Vec<String>) -> Self {
         self.generics = generics;
         self
+    }
+
+    pub fn as_class(mut self) -> Self {
+        self.class = true;
+        self
+    }
+
+    pub fn is_class(&self) -> bool {
+        self.class
     }
 
     pub fn generics(&self) -> &[String] {

@@ -74,12 +74,13 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
     while i < tokens.len() {
         let kind = match tokens[i].token() {
             Token::Ident(k) if k == "func" => ItemKind::Func,
-            Token::Ident(k) if k == "struct" => ItemKind::Struct,
+            Token::Ident(k) if k == "struct" || k == "class" => ItemKind::Struct,
             Token::Ident(k) if k == "enum" => ItemKind::Enum,
             _ => {
                 return Err(SplitError {
                     line: tokens[i].line(),
-                    message: "expected 'func', 'struct' or 'enum' at top level".to_string(),
+                    message: "expected 'func', 'struct', 'class' or 'enum' at top level"
+                        .to_string(),
                 });
             }
         };
@@ -210,6 +211,13 @@ mod tests {
                 (ItemKind::Func, "g"),
             ]
         );
+    }
+
+    #[test]
+    fn a_class_is_an_item_named_after_the_class() {
+        let found = items("class C { var x: Int }\nfunc f() { }");
+        assert_eq!(found[0].kind(), ItemKind::Struct);
+        assert_eq!(found[0].name(), "C");
     }
 
     #[test]

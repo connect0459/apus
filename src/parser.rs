@@ -19,9 +19,9 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 16] = [
-    "func", "struct", "enum", "case", "switch", "default", "var", "let", "if", "else", "while",
-    "for", "in", "return", "true", "false",
+const KEYWORDS: [&str; 17] = [
+    "func", "struct", "class", "enum", "case", "switch", "default", "var", "let", "if", "else",
+    "while", "for", "in", "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -221,11 +221,13 @@ impl Parser<'_> {
         if self.eat_keyword("func") {
             self.func_decl(line).map(Decl::Func)
         } else if self.eat_keyword("struct") {
-            self.struct_decl(line).map(Decl::Struct)
+            self.struct_decl(line, false).map(Decl::Struct)
+        } else if self.eat_keyword("class") {
+            self.struct_decl(line, true).map(Decl::Struct)
         } else if self.eat_keyword("enum") {
             self.enum_decl(line).map(Decl::Enum)
         } else {
-            self.fail("expected 'func', 'struct' or 'enum'")
+            self.fail("expected 'func', 'struct', 'class' or 'enum'")
         }
     }
 
@@ -273,7 +275,7 @@ impl Parser<'_> {
         Ok(Param::new(label, name, ty))
     }
 
-    fn struct_decl(&mut self, line: u32) -> PResult<StructDecl> {
+    fn struct_decl(&mut self, line: u32, class: bool) -> PResult<StructDecl> {
         let name = self.name()?;
         let generics = self.generic_params()?;
         self.expect_punct("{")?;
@@ -288,7 +290,7 @@ impl Parser<'_> {
             } else if self.eat_keyword("let") {
                 false
             } else {
-                return self.fail("expected 'var' or 'let' in a struct body");
+                return self.fail("expected 'var' or 'let' in a struct or class body");
             };
             let field_name = self.name()?;
             self.expect_punct(":")?;
@@ -296,7 +298,8 @@ impl Parser<'_> {
             fields.push(Field::new(field_name, mutable, ty));
             self.end_of_statement()?;
         }
-        Ok(StructDecl::new(line, name, fields).with_generics(generics))
+        let decl = StructDecl::new(line, name, fields).with_generics(generics);
+        Ok(if class { decl.as_class() } else { decl })
     }
 
     fn enum_decl(&mut self, line: u32) -> PResult<EnumDecl> {
@@ -847,6 +850,19 @@ mod tests {
     fn a_declaration_is_known_by_its_name() {
         assert_eq!(try_parse("func f() { }").unwrap().name(), "f");
         assert_eq!(try_parse("struct P { }").unwrap().name(), "P");
+    }
+
+    #[test]
+    fn a_class_declaration_is_a_struct_declaration_marked_as_a_class() {
+        let Decl::Struct(class) = try_parse("class C { var x: Int }").unwrap() else {
+            panic!("expected a class");
+        };
+        assert!(class.is_class());
+        assert_eq!(class.fields().len(), 1);
+        let Decl::Struct(plain) = try_parse("struct C { var x: Int }").unwrap() else {
+            panic!("expected a struct");
+        };
+        assert!(!plain.is_class());
     }
 
     #[test]
