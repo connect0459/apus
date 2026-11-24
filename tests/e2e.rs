@@ -615,3 +615,178 @@ fn a_class_cannot_hold_a_struct_member_yet() {
     let source = "struct P { var x: Int }\nclass Wrapper { var p: P }\nfunc main() { }";
     assert!(build_error(source).contains("cannot have a struct type"));
 }
+
+const GAUGE: &str = "class Gauge {\n  var level: Int\n  func raise(by amount: Int) { self.level += amount }\n  func read() -> Int { return self.level }\n}\n";
+
+#[test]
+fn a_class_method_changes_the_instance_it_is_called_on() {
+    let source = format!(
+        "{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  g.raise(by: 4)\n  g.raise(by: 5)\n  print(g.read())\n}}"
+    );
+    assert_eq!(run(&source), "10\n");
+}
+
+#[test]
+fn a_method_can_call_another_method_through_self() {
+    let source = "class Gauge {\n  var level: Int\n  func read() -> Int { return self.level }\n  func double() -> Int { return self.read() * 2 }\n}\n\
+         func main() { print(Gauge(level: 21).double()) }";
+    assert_eq!(run(source), "42\n");
+}
+
+const VECTOR: &str = "struct V {\n  var x: Int\n  var y: Int\n  func sum() -> Int { return self.x + self.y }\n  func scaled(by k: Int) -> V { return V(x: self.x * k, y: self.y * k) }\n  mutating func shift(dx: Int, dy: Int) {\n    self.x += dx\n    self.y += dy\n  }\n}\n";
+
+#[test]
+fn a_struct_method_reads_the_value_it_is_called_on() {
+    let source = format!(
+        "{VECTOR}func main() {{\n  let v = V(x: 3, y: 4)\n  print(v.sum())\n  print(v.scaled(by: 2).sum())\n}}"
+    );
+    assert_eq!(run(&source), "7\n14\n");
+}
+
+#[test]
+fn a_mutating_method_changes_the_variable_it_is_called_on() {
+    let source = format!(
+        "{VECTOR}func main() {{\n  var v = V(x: 1, y: 1)\n  v.shift(dx: 2, dy: 3)\n  v.shift(dx: 10, dy: 10)\n  print(v.x)\n  print(v.y)\n}}"
+    );
+    assert_eq!(run(&source), "13\n14\n");
+}
+
+#[test]
+fn a_mutating_method_does_not_change_a_copy_made_before_the_call() {
+    let source = format!(
+        "{VECTOR}func main() {{\n  var v = V(x: 1, y: 1)\n  let before = v\n  v.shift(dx: 5, dy: 5)\n  print(before.x)\n  print(v.x)\n}}"
+    );
+    assert_eq!(run(&source), "1\n6\n");
+}
+
+#[test]
+fn a_mutating_method_may_call_another_mutating_method_on_self() {
+    let source = "struct C {\n  var n: Int\n  mutating func inc() { self.n += 1 }\n  mutating func twice() {\n    self.inc()\n    self.inc()\n  }\n}\n\
+         func main() {\n  var c = C(n: 0)\n  c.twice()\n  print(c.n)\n}";
+    assert_eq!(run(source), "2\n");
+}
+
+#[test]
+fn a_mutating_method_can_replace_self_wholesale() {
+    let source = "struct C {\n  var n: Int\n  mutating func reset() { self = C(n: 0) }\n}\n\
+         func main() {\n  var c = C(n: 9)\n  c.reset()\n  print(c.n)\n}";
+    assert_eq!(run(source), "0\n");
+}
+
+#[test]
+fn an_enum_method_switches_on_self() {
+    let source = "enum Light {\n  case red, green\n  func next() -> Light {\n    switch self {\n    case .red: return Light.green\n    case .green: return Light.red\n    }\n  }\n}\n\
+         func main() {\n  let l = Light.red\n  print(l.next() == Light.green)\n}";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn a_mutating_method_of_an_enum_with_payloads_replaces_self() {
+    let source = "enum Shape {\n  case empty\n  case circle(Int)\n  mutating func grow() {\n    switch self {\n    case .empty: self = Shape.circle(1)\n    case .circle(let r): self = Shape.circle(r + 1)\n    }\n  }\n  func size() -> Int {\n    switch self {\n    case .empty: return 0\n    case .circle(let r): return r\n    }\n  }\n}\n\
+         func main() {\n  var s = Shape.empty\n  s.grow()\n  s.grow()\n  print(s.size())\n}";
+    assert_eq!(run(source), "2\n");
+}
+
+#[test]
+fn a_method_can_take_and_return_class_instances() {
+    let source = "class Box {\n  var v: Int\n  func with(other: Box) -> Box { return Box(v: self.v + other.v) }\n}\n\
+         func main() {\n  let a = Box(v: 1)\n  let b = Box(v: 2)\n  print(a.with(other: b).v)\n}";
+    assert_eq!(run(source), "3\n");
+}
+
+#[test]
+fn methods_of_different_types_may_share_a_name() {
+    let source = "struct A { var x: Int\n  func get() -> Int { return self.x } }\n\
+         struct B { var x: Int\n  func get() -> Int { return self.x + 100 } }\n\
+         func main() { print(A(x: 1).get())\n print(B(x: 1).get()) }";
+    assert_eq!(run(source), "1\n101\n");
+}
+
+#[test]
+fn a_non_mutating_method_cannot_assign_to_self() {
+    let source = "struct C { var n: Int\n  func bad() { self.n = 1 } }\nfunc main() { }";
+    assert!(build_error(source).contains("constant"));
+}
+
+#[test]
+fn a_mutating_method_cannot_be_called_on_a_constant() {
+    let source =
+        format!("{VECTOR}func main() {{\n  let v = V(x: 1, y: 1)\n  v.shift(dx: 1, dy: 1)\n}}");
+    assert!(build_error(&source).contains("mutating"));
+}
+
+#[test]
+fn a_mutating_method_cannot_be_called_on_a_temporary() {
+    let source = format!("{VECTOR}func main() {{\n  V(x: 1, y: 1).shift(dx: 1, dy: 1)\n}}");
+    assert!(build_error(&source).contains("mutating"));
+}
+
+#[test]
+fn a_class_method_cannot_be_mutating() {
+    let source = "class C { var n: Int\n  mutating func bad() { } }\nfunc main() { }";
+    assert!(build_error(source).contains("class"));
+}
+
+#[test]
+fn a_mutating_method_of_an_enum_without_payloads_is_rejected() {
+    let source = "enum E { case a, b\n  mutating func flip() { self = E.b } }\nfunc main() { }";
+    assert!(build_error(source).contains("payload"));
+}
+
+#[test]
+fn calling_an_unknown_method_names_the_type_and_the_method() {
+    let source = format!("{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  g.lower()\n}}");
+    let message = build_error(&source);
+    assert!(
+        message.contains("Gauge") && message.contains("lower"),
+        "{message}"
+    );
+}
+
+#[test]
+fn method_arguments_are_checked_like_function_arguments() {
+    let label = format!("{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  g.raise(4)\n}}");
+    assert!(build_error(&label).contains("label"));
+    let count =
+        format!("{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  g.raise(by: 1, by: 2)\n}}");
+    assert!(build_error(&count).contains("argument"));
+    let ty = format!("{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  g.raise(by: true)\n}}");
+    assert!(build_error(&ty).contains("expected Int"));
+}
+
+#[test]
+fn a_method_with_a_result_cannot_be_used_as_a_statement_value_of_the_wrong_type() {
+    let source =
+        format!("{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  let x: Bool = g.read()\n}}");
+    assert!(build_error(&source).contains("expected Bool"));
+}
+
+#[test]
+fn a_method_that_returns_nothing_cannot_be_used_as_a_value() {
+    let source =
+        format!("{GAUGE}func main() {{\n  let g = Gauge(level: 1)\n  let x = g.raise(by: 1)\n}}");
+    assert!(build_error(&source).contains("does not produce a value"));
+}
+
+#[test]
+fn a_method_cannot_be_declared_twice() {
+    let source = "struct C { var n: Int\n  func f() { }\n  func f() { } }\nfunc main() { }";
+    assert!(build_error(source).contains("duplicate"));
+}
+
+#[test]
+fn methods_of_a_generic_type_are_not_supported_yet() {
+    let source = "struct Box<T> { var v: T\n  func get() -> T { return self.v } }\nfunc main() { }";
+    assert!(build_error(source).contains("generic"));
+}
+
+#[test]
+fn a_generic_method_is_not_supported_yet() {
+    let source = "struct C { var n: Int\n  func id<T>(_ x: T) -> T { return x } }\nfunc main() { }";
+    assert!(build_error(source).contains("generic"));
+}
+
+#[test]
+fn a_mutating_func_outside_a_type_is_rejected_at_the_top_level() {
+    assert!(build_error("mutating func f() { }\nfunc main() { }").contains("top level"));
+}

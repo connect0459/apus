@@ -25,7 +25,15 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         locals: Vec::new(),
         scopes: vec![HashMap::new()],
     };
-    for (param, param_sig) in func.params().iter().zip(sig.params()) {
+    let receiver = sig.has_receiver();
+    if let Some(self_sig) = sig.params().first().filter(|_| receiver) {
+        cx.declare(func.line(), "self", self_sig.ty(), sig.is_mutating())?;
+    }
+    for (param, param_sig) in func
+        .params()
+        .iter()
+        .zip(sig.params().iter().skip(usize::from(receiver)))
+    {
         cx.declare(func.line(), param.name(), param_sig.ty(), false)?;
     }
     let body = cx.block(func.body())?;
@@ -40,7 +48,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     }
     Ok(TFunc::new(
         func.name().to_string(),
-        func.params().len(),
+        func.params().len() + usize::from(receiver),
         sig.ret(),
         cx.locals,
         body,
@@ -584,6 +592,16 @@ impl FnCx<'_> {
     }
 
     fn expr_stmt(&mut self, expr: &Expr) -> CResult<TStmt> {
+        if let ExprKind::MemberCall { base, name, args } = expr.kind()
+            && self.enum_target(base).is_none()
+        {
+            return Ok(TStmt::Eval(self.method_call(
+                expr.line(),
+                base,
+                name,
+                args,
+            )?));
+        }
         let ExprKind::Call { callee, args } = expr.kind() else {
             return Err(CheckError::at(
                 expr.line(),
@@ -698,10 +716,7 @@ impl FnCx<'_> {
             ExprKind::MemberCall { base, name, args } if self.enum_target(base).is_some() => {
                 self.enum_construct(line, base, name, args, expected)
             }
-            ExprKind::MemberCall { .. } => Err(CheckError::at(
-                line,
-                "only an enum case can be called through a type name",
-            )),
+            ExprKind::MemberCall { base, name, args } => self.method_call(line, base, name, args),
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 let (index, field) = self.member_of(line, base.ty(), name)?;
@@ -716,6 +731,75 @@ impl FnCx<'_> {
                 line,
                 "a range can only be used in a for loop",
             )),
+        }
+    }
+
+    fn method_call(&mut self, line: u32, base: &Expr, name: &str, args: &[Arg]) -> CResult<TExpr> {
+        let receiver = self.value(base)?;
+        let sigs = self.sigs;
+        let owner = sigs.owner_name(receiver.ty()).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "a value of type {} has no methods",
+                    self.name_of(receiver.ty())
+                ),
+            )
+        })?;
+        let qualified = format!("{owner}.{name}");
+        let sig = sigs
+            .func(&qualified)
+            .filter(|sig| sig.has_receiver())
+            .ok_or_else(|| CheckError::at(line, format!("'{owner}' has no method '{name}'")))?;
+        if sig.is_mutating() && !self.is_mutable_variable(base) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "cannot call the mutating method '{name}' on a constant or a temporary value"
+                ),
+            ));
+        }
+        let params = &sig.params()[1..];
+        if args.len() != params.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{qualified}' takes {} argument(s), but {} were given",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut checked = vec![receiver];
+        for (arg, param) in args.iter().zip(params) {
+            if arg.label() != param.label() {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "argument label {:?} does not match the expected label {:?}",
+                        arg.label(),
+                        param.label()
+                    ),
+                ));
+            }
+            let value = self.value(arg.value())?;
+            self.expect(line, param.ty(), value.ty())?;
+            checked.push(value);
+        }
+        Ok(TExpr::Call {
+            callee: qualified,
+            type_args: Vec::new(),
+            args: checked,
+            ret: sig.ret(),
+        })
+    }
+
+    fn is_mutable_variable(&self, base: &Expr) -> bool {
+        match base.kind() {
+            ExprKind::Ident(name) => self
+                .lookup(name, base.line())
+                .is_ok_and(|binding| binding.mutable),
+            _ => false,
         }
     }
 

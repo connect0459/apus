@@ -31,6 +31,13 @@ impl CheckError {
     }
 }
 
+fn generic_owner(line: u32, owner: &str) -> CheckError {
+    CheckError::at(
+        line,
+        format!("methods of the generic type '{owner}' are not supported yet"),
+    )
+}
+
 pub type CResult<T> = Result<T, CheckError>;
 
 pub type Scope = [(String, Ty)];
@@ -64,9 +71,19 @@ pub struct FuncSig {
     generics: Vec<String>,
     params: Vec<ParamSig>,
     ret: Ty,
+    receiver: bool,
+    mutating: bool,
 }
 
 impl FuncSig {
+    pub fn has_receiver(&self) -> bool {
+        self.receiver
+    }
+
+    pub fn is_mutating(&self) -> bool {
+        self.mutating
+    }
+
     pub fn generics(&self) -> &[String] {
         &self.generics
     }
@@ -284,24 +301,38 @@ impl Signatures {
             ));
         }
         let scope = scope_of(func.generics());
-        let params = func
-            .params()
-            .iter()
-            .map(|p| {
-                Ok(ParamSig {
-                    label: p.label().map(str::to_string),
-                    ty: self.resolve_type(p.ty(), &scope, func.line())?,
-                })
-            })
-            .collect::<CResult<Vec<_>>>()?;
-        let ret = match func.ret() {
-            Some(ty) => self.resolve_type(ty, &scope, func.line())?,
-            None => Ty::Void,
+        let owner_ty = match func.owner() {
+            Some(owner) => Some(self.member_owner(func, owner)?),
+            None if func.is_mutating() || func.is_init() => {
+                return Err(CheckError::at(
+                    func.line(),
+                    "'mutating' and 'init' belong inside a type",
+                ));
+            }
+            None => None,
+        };
+        let receiver = owner_ty.filter(|_| !func.is_init());
+        let mut params: Vec<ParamSig> = receiver
+            .map(|ty| ParamSig { label: None, ty })
+            .into_iter()
+            .collect();
+        for p in func.params() {
+            params.push(ParamSig {
+                label: p.label().map(str::to_string),
+                ty: self.resolve_type(p.ty(), &scope, func.line())?,
+            });
+        }
+        let ret = match (func.ret(), owner_ty) {
+            (_, Some(ty)) if func.is_init() => ty,
+            (Some(ty), _) => self.resolve_type(ty, &scope, func.line())?,
+            (None, _) => Ty::Void,
         };
         let sig = FuncSig {
             generics: func.generics().to_vec(),
             params,
             ret,
+            receiver: receiver.is_some(),
+            mutating: func.is_mutating(),
         };
         if self.funcs.insert(func.name().to_string(), sig).is_some() {
             return Err(CheckError::at(
@@ -310,6 +341,63 @@ impl Signatures {
             ));
         }
         Ok(())
+    }
+
+    fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<Ty> {
+        let line = func.line();
+        if !func.generics().is_empty() {
+            return Err(CheckError::at(
+                line,
+                format!("generic methods are not supported yet: '{}'", func.name()),
+            ));
+        }
+        let ty = if let Some(def) = self.struct_def_ids.get(owner).copied() {
+            if !self.struct_defs[def].generics().is_empty() {
+                return Err(generic_owner(line, owner));
+            }
+            let id = self.instantiate_struct(def, Vec::new(), &[], line)?;
+            self.struct_ty(def, id)
+        } else if let Some(def) = self.enum_def_ids.get(owner).copied() {
+            if !self.enum_defs[def].generics().is_empty() {
+                return Err(generic_owner(line, owner));
+            }
+            let id = self.instantiate_enum(def, Vec::new(), &[], line)?;
+            self.enum_ty(id)
+        } else {
+            return Err(CheckError::at(line, format!("unknown type '{owner}'")));
+        };
+        if func.is_mutating() && ty.is_class() {
+            return Err(CheckError::at(
+                line,
+                format!("a method of the class '{owner}' cannot be mutating"),
+            ));
+        }
+        if func.is_mutating() && matches!(ty, Ty::Enum(_)) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{}' cannot be mutating: only an enum with payloads can have mutating methods yet",
+                    func.name()
+                ),
+            ));
+        }
+        if func.is_init() && (self.is_enum_ty(ty)) {
+            return Err(CheckError::at(
+                line,
+                format!("the enum '{owner}' cannot have an initializer yet"),
+            ));
+        }
+        Ok(ty)
+    }
+
+    pub fn owner_name(&self, ty: Ty) -> Option<String> {
+        if let Some(sig) = self.enum_of(ty) {
+            return Some(sig.base_name().to_string());
+        }
+        match ty {
+            Ty::Struct(id) | Ty::Class(id) => self.struct_sig(id).map(|s| s.name.clone()),
+            _ => None,
+        }
     }
 
     pub fn resolve_type(&self, tr: &TypeRef, scope: &Scope, line: u32) -> CResult<Ty> {

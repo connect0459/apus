@@ -10,7 +10,7 @@ use crate::check::{CheckError, Signatures, check_func};
 use crate::codegen::{Backend, CodegenError};
 use crate::entry::FuncEntry;
 use crate::hash::{Fnv1a, hash_bytes};
-use crate::items::{ItemKind, SplitError, signature_digest, split_items};
+use crate::items::{Item, ItemKind, SplitError, signature_digest, split_items};
 use crate::key::function_key;
 use crate::lexer::{LexError, lex};
 use crate::link::{LinkError, link};
@@ -134,7 +134,7 @@ pub fn build_with(
 
     let mut slots: Vec<Slot> = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        if item.kind() != ItemKind::Func || item.is_generic() {
+        if !is_function(item) || item.is_generic() {
             continue;
         }
         let known = memo.as_ref().and_then(|m| {
@@ -165,7 +165,7 @@ pub fn build_with(
     if !dirty.is_empty() {
         let mut needs_body = vec![false; items.len()];
         for (index, item) in items.iter().enumerate() {
-            needs_body[index] = item.kind() != ItemKind::Func || item.is_generic();
+            needs_body[index] = !is_function(item) || item.is_generic();
         }
         for slot in &dirty {
             needs_body[slots[*slot].item_index] = true;
@@ -177,7 +177,10 @@ pub fn build_with(
             } else {
                 parse_signature
             };
-            decls.push(parse(item.tokens())?);
+            decls.push(match (parse(item.tokens())?, item.owner()) {
+                (Decl::Func(func), Some(owner)) => Decl::Func(func.with_owner(owner)),
+                (decl, _) => decl,
+            });
         }
         let sigs = Signatures::collect(&decls)?;
         let mut generic_decls: HashMap<&str, &FuncDecl> = HashMap::new();
@@ -308,6 +311,10 @@ pub fn build_with(
         reused: entries.len().saturating_sub(compiled_count),
         linked: link_needed,
     })
+}
+
+fn is_function(item: &Item) -> bool {
+    matches!(item.kind(), ItemKind::Func | ItemKind::Method)
 }
 
 struct Unit {
