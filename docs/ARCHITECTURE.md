@@ -62,7 +62,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 - A class is a heap block of one 8-byte slot per member behind a 64-bit pointer (`Ty::Class`). It is copied, passed and returned as a scalar, `TExpr::New` allocates it with `malloc`, and nothing frees it. Members are read and assigned through the pointer, so a copy of the reference shares the instance.
 
 - A method is the function `Type.method` with `self` as its first parameter, an initializer is `Type.init` returning the type, and a call through a value is lowered by `check` to a plain call. A `mutating` method receives the address of the caller's variable. An initializer starts from a zero-filled `self` and `init_check` guarantees that no zero is observed.
-- A member's hash includes its owner, and the signature digest includes its header but not its body.
+- A member's hash includes its owner, and the signature digest includes its header but not its body, except for the members of a generic type: those are generic functions over the type's parameters, so their whole text is part of the digest and `mono` instantiates them per type argument.
 
 ## Cross-Cutting Concerns
 
