@@ -4,7 +4,7 @@ use crate::ast::{
     Arg, BinOp, CaseLabel, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind, SwitchCase, TypeRef,
     UnaryOp,
 };
-use crate::init_check::check_initialization;
+use crate::init_check::{InitScope, check_initialization};
 use crate::sigs::{CResult, EnumSig, FieldSig, FuncSig, PRINT, ParamSig, scope_of};
 use crate::tir::{LocalId, TExpr, TFunc, TStmt};
 use crate::types::Ty;
@@ -78,7 +78,12 @@ fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
         .struct_sig(id)
         .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
     let members: Vec<&str> = sig.fields().iter().map(FieldSig::name).collect();
-    check_initialization(func.body(), &members, func.line())
+    let owner = cx.sigs.owner_name(ty).unwrap_or_default();
+    let methods = cx.sigs.method_names(&owner);
+    let methods: Vec<&str> = methods.iter().map(String::as_str).collect();
+    let params: Vec<&str> = func.params().iter().map(|p| p.name()).collect();
+    let scope = InitScope::new(&members, &methods, &params);
+    check_initialization(func.body(), scope, func.line())
         .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
     let zeros: Vec<TExpr> = sig.fields().iter().map(|f| TExpr::Zero(f.ty())).collect();
     let init = if ty.is_class() {
@@ -485,7 +490,17 @@ impl FnCx<'_> {
         op: Option<BinOp>,
         value: &Expr,
     ) -> CResult<TStmt> {
-        let binding = self.lookup(name, line)?;
+        let binding = match self.lookup(name, line) {
+            Ok(binding) => binding,
+            Err(error) => {
+                return match self.implicit_member(line, name) {
+                    Some((receiver, _, _)) => {
+                        self.assign_through(line, "self", receiver, name, op, value)
+                    }
+                    None => Err(error),
+                };
+            }
+        };
         if !binding.mutable {
             return Err(CheckError::at(
                 line,
@@ -516,6 +531,24 @@ impl FnCx<'_> {
             ));
         };
         let binding = self.lookup(var, line)?;
+        self.assign_through(line, var, binding, name, op, value)
+    }
+
+    fn implicit_member(&self, line: u32, name: &str) -> Option<(Binding, usize, FieldSig)> {
+        let receiver = self.lookup("self", line).ok()?;
+        let (index, field) = self.member_of(line, receiver.ty, name).ok()?;
+        Some((receiver, index, field))
+    }
+
+    fn assign_through(
+        &mut self,
+        line: u32,
+        var: &str,
+        binding: Binding,
+        name: &str,
+        op: Option<BinOp>,
+        value: &Expr,
+    ) -> CResult<TStmt> {
         if !binding.mutable && !binding.ty.is_class() {
             return Err(CheckError::at(
                 line,
@@ -719,10 +752,17 @@ impl FnCx<'_> {
                 "a string literal cannot contain a NUL character",
             )),
             ExprKind::Str(text) => Ok(TExpr::Str(text.clone())),
-            ExprKind::Ident(name) => {
-                let binding = self.lookup(name, line)?;
-                Ok(TExpr::Local(binding.local, binding.ty))
-            }
+            ExprKind::Ident(name) => match self.lookup(name, line) {
+                Ok(binding) => Ok(TExpr::Local(binding.local, binding.ty)),
+                Err(error) => match self.implicit_member(line, name) {
+                    Some((receiver, index, field)) => Ok(TExpr::Field {
+                        base: Box::new(TExpr::Local(receiver.local, receiver.ty)),
+                        index,
+                        ty: field.ty(),
+                    }),
+                    None => Err(error),
+                },
+            },
             ExprKind::Unary { op, expr: operand } => {
                 let operand = self.value(operand)?;
                 let wanted = match op {
@@ -1108,6 +1148,16 @@ impl FnCx<'_> {
         explicit: Option<&[TypeRef]>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
+        if explicit.is_none()
+            && let Some(receiver) = self.lookup("self", line).ok()
+            && let Some(owner) = sigs.owner_name(receiver.ty)
+            && sigs
+                .func(&format!("{owner}.{callee}"))
+                .is_some_and(FuncSig::has_receiver)
+        {
+            let base = Expr::new(line, ExprKind::Ident("self".to_string()));
+            return self.method_call(line, &base, callee, args, expected);
+        }
         let init_name = format!("{callee}.init");
         let callee = if sigs.struct_def(callee).is_some() && sigs.func(&init_name).is_some() {
             init_name.as_str()

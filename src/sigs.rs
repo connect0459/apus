@@ -389,6 +389,15 @@ impl Signatures {
         Ok((ty, generics))
     }
 
+    pub fn method_names(&self, owner: &str) -> Vec<String> {
+        let prefix = format!("{owner}.");
+        self.funcs
+            .iter()
+            .filter(|(_, sig)| sig.has_receiver())
+            .filter_map(|(name, _)| name.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    }
+
     pub fn owner_name(&self, ty: Ty) -> Option<String> {
         let (kind, def, _) = self.origin_of(ty)?;
         Some(match kind {

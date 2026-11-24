@@ -998,3 +998,124 @@ fn a_generic_method_of_a_generic_type_is_still_not_supported() {
     let source = "struct Box<T> {\n  var value: T\n  func map<U>(_ x: U) -> U { return x }\n}\nfunc main() { }";
     assert!(build_error(source).contains("generic method"));
 }
+
+#[test]
+fn a_method_reads_and_assigns_members_without_writing_self() {
+    let source = "class Gauge {\n  var level: Int\n  func raise(by amount: Int) { level += amount }\n  func read() -> Int { return level * 2 }\n}\n\
+         func main() {\n  let g = Gauge(level: 1)\n  g.raise(by: 4)\n  print(g.read())\n}";
+    assert_eq!(run(source), "10\n");
+}
+
+#[test]
+fn a_mutating_method_assigns_members_without_writing_self() {
+    let source = "struct V {\n  var x: Int\n  var y: Int\n  mutating func shift(dx: Int) {\n    x += dx\n    y = y + dx\n  }\n}\n\
+         func main() {\n  var v = V(x: 1, y: 2)\n  v.shift(dx: 10)\n  print(v.x)\n  print(v.y)\n}";
+    assert_eq!(run(source), "11\n12\n");
+}
+
+#[test]
+fn a_method_calls_another_method_without_writing_self() {
+    let source = "struct C {\n  var n: Int\n  func read() -> Int { return n }\n  func double() -> Int { return read() * 2 }\n  mutating func inc() { n += 1 }\n  mutating func twice() {\n    inc()\n    inc()\n  }\n}\n\
+         func main() {\n  var c = C(n: 20)\n  c.twice()\n  print(c.double())\n}";
+    assert_eq!(run(source), "44\n");
+}
+
+#[test]
+fn a_local_variable_shadows_a_member() {
+    let source = "class C {\n  var n: Int\n  func f() -> Int {\n    let n = 100\n    return n\n  }\n  func g() -> Int { return n }\n}\n\
+         func main() {\n  let c = C(n: 1)\n  print(c.f())\n  print(c.g())\n}";
+    assert_eq!(run(source), "100\n1\n");
+}
+
+#[test]
+fn a_parameter_shadows_a_member_and_self_reaches_the_member() {
+    let source = "class C {\n  var n: Int\n  func set(n: Int) { self.n = n }\n}\n\
+         func main() {\n  let c = C(n: 1)\n  c.set(n: 8)\n  print(c.n)\n}";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn a_method_of_a_generic_type_reads_its_members_without_writing_self() {
+    let source = "struct Box<T> {\n  var value: T\n  func get() -> T { return value }\n  func again() -> T { return get() }\n}\n\
+         func main() { print(Box(value: 5).again()) }";
+    assert_eq!(run(source), "5\n");
+}
+
+#[test]
+fn a_method_of_an_enum_calls_another_method_without_writing_self() {
+    let source = "enum Light {\n  case red, green\n  func isRed() -> Bool {\n    switch self {\n    case .red: return true\n    case .green: return false\n    }\n  }\n  func isGreen() -> Bool { return !isRed() }\n}\n\
+         func main() { print(Light.green.isGreen()) }";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn a_method_is_preferred_over_a_function_of_the_same_name() {
+    let source = "func value() -> Int { return 1 }\nstruct C {\n  var n: Int\n  func value() -> Int { return n }\n  func f() -> Int { return value() }\n}\n\
+         func main() {\n  print(C(n: 7).f())\n  print(value())\n}";
+    assert_eq!(run(source), "7\n1\n");
+}
+
+#[test]
+fn an_initializer_assigns_members_without_writing_self() {
+    let source = "class C {\n  var a: Int\n  var b: Int\n  init(start: Int) {\n    a = start\n    b = start * 2\n  }\n}\n\
+         func main() {\n  let c = C(start: 3)\n  print(c.a)\n  print(c.b)\n}";
+    assert_eq!(run(source), "3\n6\n");
+}
+
+#[test]
+fn an_initializer_may_use_members_and_methods_once_every_member_is_set() {
+    let source = "class C {\n  var a: Int\n  var b: Int\n  func twice() -> Int { return a * 2 }\n  init(start: Int) {\n    a = start\n    b = 0\n    b = twice() + a\n  }\n}\n\
+         func main() { print(C(start: 3).b) }";
+    assert_eq!(run(source), "9\n");
+}
+
+#[test]
+fn a_local_declared_in_an_initializer_shadows_a_member() {
+    let source = "struct S {\n  var n: Int\n  init(start: Int) {\n    var m = start\n    m += 1\n    n = m\n  }\n}\n\
+         func main() { print(S(start: 4).n) }";
+    assert_eq!(run(source), "5\n");
+}
+
+#[test]
+fn an_initializer_cannot_read_a_member_before_every_member_is_set() {
+    let source = "struct P {\n  var x: Int\n  var y: Int\n  init() {\n    x = 1\n    y = x\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("before"));
+}
+
+#[test]
+fn an_initializer_cannot_call_a_method_before_every_member_is_set() {
+    let source = "struct P {\n  var x: Int\n  func f() -> Int { return 1 }\n  init() {\n    x = f()\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("before"));
+}
+
+#[test]
+fn a_non_mutating_method_cannot_assign_a_member_implicitly() {
+    let source = "struct C {\n  var n: Int\n  func bad() { n = 1 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("constant"));
+}
+
+#[test]
+fn a_non_mutating_method_cannot_call_a_mutating_method_implicitly() {
+    let source = "struct C {\n  var n: Int\n  mutating func inc() { n += 1 }\n  func bad() { inc() }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("mutating"));
+}
+
+#[test]
+fn an_unknown_name_in_a_method_is_still_not_found() {
+    let source =
+        "struct C {\n  var n: Int\n  func f() -> Int { return missing }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("cannot find 'missing'"));
+}
+
+#[test]
+fn a_member_name_is_not_visible_outside_the_type() {
+    let source = "struct C { var n: Int }\nfunc f() -> Int { return n }\nfunc main() { }";
+    assert!(build_error(source).contains("cannot find 'n'"));
+}
+
+#[test]
+fn a_constant_member_cannot_be_assigned_implicitly_in_a_method() {
+    let source =
+        "class C {\n  let n: Int\n  init() { n = 1 }\n  func bad() { n = 2 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("constant"));
+}
