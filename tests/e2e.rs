@@ -790,3 +790,118 @@ fn a_generic_method_is_not_supported_yet() {
 fn a_mutating_func_outside_a_type_is_rejected_at_the_top_level() {
     assert!(build_error("mutating func f() { }\nfunc main() { }").contains("top level"));
 }
+
+const ACCOUNT: &str = "class Account {\n  let owner: String\n  var balance: Int\n  init(owner: String, deposit: Int) {\n    self.owner = owner\n    self.balance = deposit * 2\n  }\n  func report() -> Int { return self.balance }\n}\n";
+
+#[test]
+fn a_class_initializer_computes_its_members_from_its_parameters() {
+    let source = format!(
+        "{ACCOUNT}func main() {{\n  let a = Account(owner: \"ann\", deposit: 5)\n  print(a.owner)\n  print(a.report())\n}}"
+    );
+    assert_eq!(run(&source), "ann\n10\n");
+}
+
+#[test]
+fn a_struct_initializer_builds_a_value() {
+    let source = "struct P {\n  var x: Int\n  var y: Int\n  init(side: Int) {\n    self.x = side\n    self.y = side\n  }\n  func area() -> Int { return self.x * self.y }\n}\n\
+         func main() {\n  var p = P(side: 4)\n  p.x = 5\n  print(p.area())\n}";
+    assert_eq!(run(source), "20\n");
+}
+
+#[test]
+fn an_initializer_may_use_self_once_every_member_is_set() {
+    let source = "class C {\n  var a: Int\n  var b: Int\n  init(a: Int) {\n    self.a = a\n    self.b = 0\n    self.b = self.a + 1\n  }\n}\n\
+         func main() { print(C(a: 1).b) }";
+    assert_eq!(run(source), "2\n");
+}
+
+#[test]
+fn an_initializer_may_return_early_after_setting_every_member() {
+    let source = "struct S {\n  var n: Int\n  init(n: Int) {\n    self.n = n\n    if n > 5 { return }\n    self.n = 0\n  }\n}\n\
+         func main() {\n  print(S(n: 9).n)\n  print(S(n: 3).n)\n}";
+    assert_eq!(run(source), "9\n0\n");
+}
+
+#[test]
+fn an_initializer_may_run_other_statements_before_assigning() {
+    let source = "struct S {\n  var n: Int\n  init(n: Int) {\n    var doubled = n\n    doubled += n\n    self.n = doubled\n  }\n}\n\
+         func main() { print(S(n: 4).n) }";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn an_initializer_may_set_a_member_that_holds_a_class_instance() {
+    let source = "class Inner { var v: Int }\nclass Outer {\n  var inner: Inner\n  init(v: Int) { self.inner = Inner(v: v) }\n}\n\
+         func main() { print(Outer(v: 7).inner.v) }";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn a_custom_initializer_replaces_the_memberwise_one() {
+    let source = "struct P {\n  var x: Int\n  init(side: Int) { self.x = side }\n}\nfunc main() { let p = P(x: 1) }";
+    assert!(build_error(source).contains("label"));
+}
+
+#[test]
+fn an_initializer_must_set_every_member() {
+    let source =
+        "struct P {\n  var x: Int\n  var y: Int\n  init() { self.x = 1 }\n}\nfunc main() { }";
+    let message = build_error(source);
+    assert!(
+        message.contains("'y'") && message.contains("initialize"),
+        "{message}"
+    );
+}
+
+#[test]
+fn assignments_inside_a_branch_do_not_count_as_initialization() {
+    let source = "struct P {\n  var x: Int\n  init(flag: Bool) {\n    if flag { self.x = 1 } else { self.x = 2 }\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("initialize"));
+}
+
+#[test]
+fn self_cannot_be_read_before_every_member_is_set() {
+    let source = "struct P {\n  var x: Int\n  var y: Int\n  init() {\n    self.x = 1\n    self.y = self.x\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("before"));
+}
+
+#[test]
+fn an_initializer_cannot_return_before_every_member_is_set() {
+    let source = "struct P {\n  var x: Int\n  init(flag: Bool) {\n    if flag { return }\n    self.x = 1\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("before"));
+}
+
+#[test]
+fn an_initializer_cannot_return_a_value() {
+    let source = "struct P {\n  var x: Int\n  init() {\n    self.x = 1\n    return 1\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("initializer"));
+}
+
+#[test]
+fn a_constant_member_is_assignable_in_an_initializer_but_not_in_a_method() {
+    let source = "class C {\n  let n: Int\n  init() { self.n = 1 }\n  func bad() { self.n = 2 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("constant"));
+}
+
+#[test]
+fn a_type_cannot_have_two_initializers() {
+    let source = "struct P {\n  var x: Int\n  init() { self.x = 1 }\n  init() { self.x = 2 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("duplicate"));
+}
+
+#[test]
+fn an_enum_cannot_have_an_initializer_yet() {
+    let source = "enum E {\n  case a\n  init() { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("initializer"));
+}
+
+#[test]
+fn an_initializer_of_a_generic_type_is_not_supported_yet() {
+    let source = "struct B<T> {\n  var v: T\n  init(v: T) { self.v = v }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("generic"));
+}
+
+#[test]
+fn init_outside_a_type_is_rejected_at_the_top_level() {
+    assert!(build_error("init() { }\nfunc main() { }").contains("top level"));
+}

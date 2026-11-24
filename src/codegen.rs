@@ -719,6 +719,11 @@ impl Emitter<'_, '_> {
                 .builder
                 .ins()
                 .iconst(types::I64, i64::try_from(*index)?),
+            TExpr::Zero(ty) => {
+                let clif = clif_type(*ty)
+                    .ok_or_else(|| CodegenError::from("a zero value has no representable type"))?;
+                self.builder.ins().iconst(clif, 0)
+            }
             TExpr::Bool(b) => self.builder.ins().iconst(types::I8, i64::from(*b)),
             TExpr::Str(text) => self.string_address(text),
             TExpr::Local(local, _) => self.builder.use_var(self.vars[local.index()]),

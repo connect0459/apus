@@ -5,6 +5,7 @@ pub mod codegen;
 pub mod driver;
 pub mod entry;
 pub mod hash;
+pub mod init_check;
 pub mod items;
 pub mod key;
 pub mod lexer;

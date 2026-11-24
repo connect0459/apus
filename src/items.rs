@@ -522,4 +522,19 @@ mod tests {
     fn a_method_without_a_name_is_an_error() {
         assert!(split_items(&lex("struct P { func { } }").unwrap()).is_err());
     }
+
+    #[test]
+    fn a_member_without_a_body_is_an_error() {
+        assert!(split_items(&lex("struct P { func f() }").unwrap()).is_err());
+    }
+
+    #[test]
+    fn mutating_without_func_is_an_error() {
+        assert!(split_items(&lex("struct P { mutating x() { } }").unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_member_body_that_never_closes_is_an_error() {
+        assert!(split_items(&lex("struct P { func f() { ").unwrap()).is_err());
+    }
 }

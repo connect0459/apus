@@ -4,6 +4,7 @@ use crate::ast::{
     Arg, BinOp, CaseLabel, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind, SwitchCase, TypeRef,
     UnaryOp,
 };
+use crate::init_check::check_initialization;
 use crate::sigs::{CResult, EnumSig, FieldSig, PRINT, scope_of};
 use crate::tir::{LocalId, TExpr, TFunc, TStmt};
 use crate::types::Ty;
@@ -24,6 +25,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         ret: sig.ret(),
         locals: Vec::new(),
         scopes: vec![HashMap::new()],
+        init_self: None,
     };
     let receiver = sig.has_receiver();
     if let Some(self_sig) = sig.params().first().filter(|_| receiver) {
@@ -36,8 +38,17 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     {
         cx.declare(func.line(), param.name(), param_sig.ty(), false)?;
     }
-    let body = cx.block(func.body())?;
-    if sig.ret() != Ty::Void && !always_returns(func.body()) {
+    let prelude = if func.is_init() {
+        init_prelude(&mut cx, func, sig.ret())?
+    } else {
+        Vec::new()
+    };
+    let mut body = cx.block(func.body())?;
+    if let Some(local) = cx.init_self {
+        body.splice(0..0, prelude);
+        body.push(TStmt::Return(Some(TExpr::Local(local, sig.ret()))));
+    }
+    if sig.ret() != Ty::Void && !func.is_init() && !always_returns(func.body()) {
         return Err(CheckError::at(
             func.line(),
             format!(
@@ -53,6 +64,31 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         cx.locals,
         body,
     ))
+}
+
+fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
+    let (Ty::Struct(id) | Ty::Class(id)) = ty else {
+        return Err(CheckError::at(
+            func.line(),
+            "internal error: an initializer needs a struct or a class",
+        ));
+    };
+    let sig = cx
+        .sigs
+        .struct_sig(id)
+        .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
+    let members: Vec<&str> = sig.fields().iter().map(FieldSig::name).collect();
+    check_initialization(func.body(), &members, func.line())
+        .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
+    let zeros: Vec<TExpr> = sig.fields().iter().map(|f| TExpr::Zero(f.ty())).collect();
+    let init = if ty.is_class() {
+        TExpr::New { ty, args: zeros }
+    } else {
+        TExpr::StructInit { ty, args: zeros }
+    };
+    let local = cx.declare(func.line(), "self", ty, true)?;
+    cx.init_self = Some(local);
+    Ok(vec![TStmt::Let { local, init }])
 }
 
 fn always_returns(stmts: &[Stmt]) -> bool {
@@ -84,6 +120,7 @@ struct FnCx<'a> {
     ret: Ty,
     locals: Vec<Ty>,
     scopes: Vec<HashMap<String, Binding>>,
+    init_self: Option<LocalId>,
 }
 
 impl FnCx<'_> {
@@ -486,7 +523,8 @@ impl FnCx<'_> {
             ));
         }
         let (index, field) = self.member_of(line, binding.ty, name)?;
-        if !field.is_mutable() {
+        let initializing = var == "self" && self.init_self.is_some();
+        if !field.is_mutable() && !initializing {
             return Err(CheckError::at(
                 line,
                 format!("cannot assign to '{name}': it is a constant"),
@@ -555,6 +593,15 @@ impl FnCx<'_> {
     }
 
     fn return_stmt(&mut self, line: u32, value: Option<&Expr>) -> CResult<TStmt> {
+        if let Some(local) = self.init_self {
+            return match value {
+                None => Ok(TStmt::Return(Some(TExpr::Local(local, self.ret)))),
+                Some(_) => Err(CheckError::at(
+                    line,
+                    "an initializer does not return a value",
+                )),
+            };
+        }
         match (value, self.ret) {
             (None, Ty::Void) => Ok(TStmt::Return(None)),
             (None, _) => Err(CheckError::at(line, "this function must return a value")),
@@ -1051,6 +1098,12 @@ impl FnCx<'_> {
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
+        let init_name = format!("{callee}.init");
+        let callee = if sigs.struct_def(callee).is_some() && sigs.func(&init_name).is_some() {
+            init_name.as_str()
+        } else {
+            callee
+        };
         if let Some(def) = sigs.struct_def(callee) {
             return self.struct_init(line, def, None, args, expected);
         }

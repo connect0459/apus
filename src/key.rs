@@ -233,6 +233,10 @@ impl Encoder<'_> {
                 self.ty(*ty);
                 self.usize(*index);
             }
+            TExpr::Zero(ty) => {
+                self.tag(41);
+                self.ty(*ty);
+            }
         }
     }
 }

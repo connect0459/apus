@@ -155,6 +155,7 @@ pub enum TExpr {
         ty: Ty,
         index: usize,
     },
+    Zero(Ty),
 }
 
 impl TExpr {
@@ -173,7 +174,8 @@ impl TExpr {
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
             | TExpr::Field { ty, .. }
-            | TExpr::EnumCase { ty, .. } => *ty,
+            | TExpr::EnumCase { ty, .. }
+            | TExpr::Zero(ty) => *ty,
         }
     }
 }
@@ -316,6 +318,7 @@ impl<E> Rewriter<'_, E> {
                 ty: (self.ty)(*ty)?,
                 index: *index,
             },
+            TExpr::Zero(ty) => TExpr::Zero((self.ty)(*ty)?),
         })
     }
 }
