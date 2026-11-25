@@ -58,6 +58,9 @@ pub fn check_initialization(
         scope,
         locals: vec![scope.params.iter().map(|p| (*p).to_string()).collect()],
     };
+    if scan.delegates(body)? {
+        return Ok(());
+    }
     let mut pending: Vec<&str> = scope.own.unwrap_or(scope.members).to_vec();
     let mut super_pending = scope.own.is_some();
     for stmt in body {
@@ -133,6 +136,109 @@ pub fn check_enum_initialization(
 }
 
 impl Scan<'_> {
+    fn is_self_init(&self, stmt: &Stmt) -> bool {
+        matches!(
+            stmt.kind(),
+            StmtKind::Expr(expr) if matches!(
+                expr.kind(),
+                ExprKind::MemberCall { base, name, args }
+                    if name == "init"
+                        && matches!(base.kind(), ExprKind::Ident(n) if n == SELF)
+                        && !args.iter().any(|a| self.expr_uses_self(a.value()))
+            )
+        )
+    }
+
+    fn is_self_init_call(stmt: &Stmt) -> bool {
+        matches!(
+            stmt.kind(),
+            StmtKind::Expr(expr) if matches!(
+                expr.kind(),
+                ExprKind::MemberCall { base, name, .. }
+                    if name == "init" && matches!(base.kind(), ExprKind::Ident(n) if n == SELF)
+            )
+        )
+    }
+
+    fn nests_self_init(stmt: &Stmt) -> bool {
+        let any = |stmts: &[Stmt]| {
+            stmts
+                .iter()
+                .any(|s| Self::is_self_init_call(s) || Self::nests_self_init(s))
+        };
+        match stmt.kind() {
+            StmtKind::If {
+                then_body,
+                else_body,
+                ..
+            }
+            | StmtKind::IfLet {
+                then_body,
+                else_body,
+                ..
+            } => any(then_body) || else_body.as_deref().is_some_and(any),
+            StmtKind::While { body, .. }
+            | StmtKind::WhileLet { body, .. }
+            | StmtKind::For { body, .. } => any(body),
+            StmtKind::Guard { else_body, .. } | StmtKind::GuardLet { else_body, .. } => {
+                any(else_body)
+            }
+            StmtKind::Switch { cases, .. } => cases.iter().any(|c| any(c.body())),
+            StmtKind::Labeled { stmt, .. } => {
+                Self::is_self_init_call(stmt) || Self::nests_self_init(stmt)
+            }
+            _ => false,
+        }
+    }
+
+    fn delegates(&mut self, body: &[Stmt]) -> Result<bool, InitViolation> {
+        let calls: Vec<usize> = body
+            .iter()
+            .enumerate()
+            .filter(|(_, stmt)| Self::is_self_init_call(stmt))
+            .map(|(index, _)| index)
+            .collect();
+        if let Some(nested) = body
+            .iter()
+            .find(|stmt| !Self::is_self_init_call(stmt) && Self::nests_self_init(stmt))
+        {
+            return Err(InitViolation {
+                line: nested.line(),
+                message: "'self.init' must be a top-level statement of the initializer".to_string(),
+            });
+        }
+        let Some(&first) = calls.first() else {
+            return Ok(false);
+        };
+        if let Some(&second) = calls.get(1) {
+            return Err(InitViolation {
+                line: body[second].line(),
+                message: "'self.init' is called twice".to_string(),
+            });
+        }
+        if !self.is_self_init(&body[first]) {
+            return Err(InitViolation {
+                line: body[first].line(),
+                message: "the arguments of 'self.init' cannot use 'self'".to_string(),
+            });
+        }
+        for stmt in &body[..first] {
+            if self.stmt_uses_self(stmt) {
+                return Err(InitViolation {
+                    line: stmt.line(),
+                    message: "'self' is used before 'self.init' is called".to_string(),
+                });
+            }
+            if returns(stmt) {
+                return Err(InitViolation {
+                    line: stmt.line(),
+                    message: "an initializer returns before it calls 'self.init'".to_string(),
+                });
+            }
+        }
+        Ok(true)
+    }
+
     fn is_super_init(&self, stmt: &Stmt) -> bool {
         matches!(
             stmt.kind(),
@@ -148,7 +254,10 @@ impl Scan<'_> {
 
     fn assigns_self(&mut self, stmts: &[Stmt]) -> Result<bool, InitViolation> {
         for stmt in stmts {
-            if self.plain_self_assignment(stmt) || self.branches_assign_self(stmt)? {
+            if self.plain_self_assignment(stmt)
+                || self.is_self_init(stmt)
+                || self.branches_assign_self(stmt)?
+            {
                 return Ok(true);
             }
             if self.stmt_uses_self(stmt) {

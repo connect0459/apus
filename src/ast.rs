@@ -143,7 +143,16 @@ impl FuncDecl {
     }
 
     pub fn with_owner(mut self, owner: &str) -> Self {
-        self.name = format!("{owner}.{}", self.name);
+        self.name = if self.init {
+            let shape: Vec<String> = self
+                .params
+                .iter()
+                .map(|p| format!("{}:{}", p.label().unwrap_or("_"), p.ty()))
+                .collect();
+            format!("{owner}.init({})", shape.join(","))
+        } else {
+            format!("{owner}.{}", self.name)
+        };
         self.owner = Some(owner.to_string());
         self
     }

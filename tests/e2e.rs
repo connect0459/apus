@@ -974,7 +974,7 @@ fn a_constant_member_is_assignable_in_an_initializer_but_not_in_a_method() {
 }
 
 #[test]
-fn a_type_cannot_have_two_initializers() {
+fn a_type_cannot_have_two_initializers_with_the_same_signature() {
     let source = "struct P {\n  var x: Int\n  init() { self.x = 1 }\n  init() { self.x = 2 }\n}\nfunc main() { }";
     assert!(build_error(source).contains("duplicate"));
 }
@@ -3869,4 +3869,150 @@ fn a_nested_assignment_checks_the_type_of_the_member() {
 fn a_member_path_through_an_unowned_member_cannot_be_assigned() {
     let source = "class Leaf {\n  var v: Int\n}\nclass Branch {\n  unowned var leaf: Leaf\n}\nfunc main() {\n  let l = Leaf(v: 1)\n  let b = Branch(leaf: l)\n  b.leaf.v = 2\n}";
     assert!(build_error(source).contains("unowned"));
+}
+
+#[test]
+fn initializers_with_different_argument_labels_can_coexist() {
+    let source = "struct P {\n  var x: Int\n  var y: Int\n  init(x: Int) {\n    self.x = x\n    self.y = 0\n  }\n  init(y: Int) {\n    self.x = 0\n    self.y = y\n  }\n  init() {\n    self.x = 7\n    self.y = 7\n  }\n}\nfunc main() {\n  let a = P(x: 1)\n  let b = P(y: 2)\n  let c = P()\n  print(a.x * 100 + a.y)\n  print(b.x * 100 + b.y)\n  print(c.x * 100 + c.y)\n}";
+    assert_eq!(run(source), "100\n2\n707\n");
+}
+
+#[test]
+fn initializers_are_chosen_by_the_type_of_the_argument() {
+    let source = "struct V {\n  var tag: Int\n  init(_ n: Int) { self.tag = 1 }\n  init(_ s: String) { self.tag = 2 }\n  init(_ b: Bool) { self.tag = 3 }\n}\nfunc main() {\n  print(V(5).tag)\n  print(V(\"a\").tag)\n  print(V(true).tag)\n}";
+    assert_eq!(run(source), "1\n2\n3\n");
+}
+
+#[test]
+fn initializers_are_chosen_by_the_number_of_arguments() {
+    let source = "struct R {\n  var area: Int\n  init(side: Int) { self.area = side * side }\n  init(w: Int, h: Int) { self.area = w * h }\n}\nfunc main() {\n  print(R(side: 3).area)\n  print(R(w: 2, h: 5).area)\n}";
+    assert_eq!(run(source), "9\n10\n");
+}
+
+#[test]
+fn the_most_specific_class_initializer_wins() {
+    let source = "class Animal {\n  var id: Int\n}\nclass Cat: Animal {\n  var lives: Int\n}\nstruct Kennel {\n  var kind: Int\n  init(_ a: Animal) { self.kind = 1 }\n  init(_ c: Cat) { self.kind = 2 }\n}\nfunc main() {\n  let cat = Cat(id: 1, lives: 9)\n  let animal = Animal(id: 2)\n  print(Kennel(cat).kind)\n  print(Kennel(animal).kind)\n}";
+    assert_eq!(run(source), "2\n1\n");
+}
+
+#[test]
+fn an_exact_match_beats_a_conversion() {
+    let source = "struct W {\n  var kind: Int\n  init(_ n: Int?) { self.kind = 1 }\n  init(_ n: Int) { self.kind = 2 }\n  init(_ s: String) { self.kind = 3 }\n}\nfunc main() {\n  print(W(4).kind)\n  let o: Int? = 4\n  print(W(o).kind)\n  print(W(\"x\").kind)\n}";
+    assert_eq!(run(source), "2\n1\n3\n");
+}
+
+#[test]
+fn a_class_and_an_enum_may_have_several_initializers() {
+    let source = "class Counter {\n  var n: Int\n  init() { self.n = 0 }\n  init(start: Int) { self.n = start }\n}\nenum Level {\n  case low, high\n  init(code: Int) {\n    if code > 5 { self = Level.high } else { self = Level.low }\n  }\n  init(flag: Bool) {\n    if flag { self = Level.high } else { self = Level.low }\n  }\n}\nfunc main() {\n  print(Counter().n)\n  print(Counter(start: 4).n)\n  print(Level(code: 9) == Level.high)\n  print(Level(flag: false) == Level.low)\n}";
+    assert_eq!(run(source), "0\n4\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_subclass_chooses_the_superclass_initializer_by_its_arguments() {
+    let source = "class Base {\n  var code: Int\n  init(code: Int) { self.code = code }\n  init(name: String) { self.code = 99 }\n}\nclass Child: Base {\n  var extra: Int\n  init(extra: Int) {\n    self.extra = extra\n    super.init(code: extra + 1)\n  }\n  init(label: String) {\n    self.extra = 0\n    super.init(name: label)\n  }\n}\nfunc main() {\n  let a = Child(extra: 4)\n  let b = Child(label: \"x\")\n  print(a.code)\n  print(b.code)\n}";
+    assert_eq!(run(source), "5\n99\n");
+}
+
+#[test]
+fn a_generic_type_may_have_several_initializers() {
+    let source = "struct Pair<T> {\n  var a: T\n  var b: T\n  init(value: T) {\n    self.a = value\n    self.b = value\n  }\n  init(first: T, second: T) {\n    self.a = first\n    self.b = second\n  }\n}\nfunc main() {\n  let p = Pair(value: 3)\n  let q = Pair(first: 1, second: 2)\n  let r = Pair<Int>(value: 9)\n  print(p.a + p.b)\n  print(q.a * 10 + q.b)\n  print(r.a)\n}";
+    assert_eq!(run(source), "6\n12\n9\n");
+}
+
+#[test]
+fn two_initializers_with_the_same_labels_and_types_are_rejected() {
+    let source = "struct S {\n  var x: Int\n  init(x: Int) { self.x = x }\n  init(x: Int) { self.x = 0 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("duplicate"));
+}
+
+#[test]
+fn a_call_that_matches_no_initializer_lists_the_choices() {
+    let source = "struct S {\n  var x: Int\n  init(x: Int) { self.x = x }\n  init(y: Int) { self.x = y }\n}\nfunc main() {\n  let s = S(z: 1)\n}";
+    let message = build_error(source);
+    assert!(message.contains("no initializer of 'S'"), "{message}");
+    let by_type = "struct S {\n  var x: Int\n  init(_ x: Int) { self.x = x }\n  init(_ s: String) { self.x = 0 }\n}\nfunc main() {\n  let s = S(true)\n}";
+    assert!(build_error(by_type).contains("no initializer of 'S'"));
+}
+
+#[test]
+fn an_ambiguous_initializer_call_is_rejected() {
+    let source = "struct S {\n  var x: Int\n  init(_ a: Int?) { self.x = 1 }\n  init(_ b: Bool?) { self.x = 2 }\n}\nfunc main() {\n  let s = S(nil)\n}";
+    assert!(!build_error(source).is_empty());
+}
+
+#[test]
+fn a_type_with_one_initializer_keeps_its_original_diagnostics() {
+    let source = "struct S {\n  var x: Int\n  init(x: Int) { self.x = x }\n}\nfunc main() {\n  let s = S(1, 2)\n}";
+    assert!(build_error(source).contains("takes 1 argument"));
+}
+
+#[test]
+fn an_initializer_may_delegate_to_another_one() {
+    let source = "struct P {\n  var x: Int\n  var y: Int\n  init(x: Int, y: Int) {\n    self.x = x\n    self.y = y\n  }\n  init(side: Int) {\n    self.init(x: side, y: side)\n  }\n  init() {\n    self.init(side: 5)\n    self.y += 1\n  }\n}\nfunc main() {\n  let a = P(side: 3)\n  let b = P()\n  print(a.x + a.y)\n  print(b.x * 10 + b.y)\n}";
+    assert_eq!(run(source), "6\n56\n");
+}
+
+#[test]
+fn a_delegating_initializer_may_use_its_parameters_and_self_afterwards() {
+    let source = "struct Range {\n  var lo: Int\n  var hi: Int\n  init(lo: Int, hi: Int) {\n    self.lo = lo\n    self.hi = hi\n  }\n  init(size: Int) {\n    let doubled = size * 2\n    self.init(lo: 0, hi: doubled)\n    if self.hi > 10 { self.hi = 10 }\n    print(self.hi)\n  }\n}\nfunc main() {\n  let r = Range(size: 8)\n  print(r.hi)\n  let s = Range(size: 2)\n  print(s.hi)\n}";
+    assert_eq!(run(source), "10\n10\n4\n4\n");
+}
+
+#[test]
+fn a_class_initializer_may_delegate_without_running_deinit_twice() {
+    let source = "class Tracked {\n  var id: Int\n  var tag: Int\n  init(id: Int, tag: Int) {\n    self.id = id\n    self.tag = tag\n  }\n  init(id: Int) {\n    self.init(id: id, tag: 7)\n  }\n  deinit { print(0 - self.id) }\n}\nfunc main() {\n  let t = Tracked(id: 3)\n  print(t.tag)\n}";
+    assert_eq!(run(source), "7\n-3\n");
+}
+
+#[test]
+fn an_enum_initializer_may_delegate_on_every_path() {
+    let source = "enum Level {\n  case low, high\n  init(code: Int) {\n    if code > 5 { self = Level.high } else { self = Level.low }\n  }\n  init(flag: Bool) {\n    if flag { self.init(code: 9) } else { self.init(code: 0) }\n  }\n  init() {\n    self.init(flag: true)\n  }\n}\nfunc main() {\n  print(Level(flag: true) == Level.high)\n  print(Level(flag: false) == Level.low)\n  print(Level() == Level.high)\n}";
+    assert_eq!(run(source), "true\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_generic_initializer_may_delegate() {
+    let source = "struct Box<T> {\n  var v: T\n  var w: T\n  init(v: T, w: T) {\n    self.v = v\n    self.w = w\n  }\n  init(both: T) {\n    self.init(v: both, w: both)\n  }\n}\nfunc main() {\n  let b = Box(both: 4)\n  print(b.v + b.w)\n}";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn a_subclass_initializer_may_delegate_to_one_that_calls_super() {
+    let source = "class Base {\n  var code: Int\n  init(code: Int) { self.code = code }\n}\nclass Child: Base {\n  var extra: Int\n  init(extra: Int, code: Int) {\n    self.extra = extra\n    super.init(code: code)\n  }\n  init(extra: Int) {\n    self.init(extra: extra, code: 100)\n  }\n}\nfunc main() {\n  let c = Child(extra: 4)\n  print(c.extra + c.code)\n}";
+    assert_eq!(run(source), "104\n");
+}
+
+#[test]
+fn a_delegating_initializer_cannot_use_self_before_it_delegates() {
+    let before = "struct P {\n  var x: Int\n  init(x: Int) { self.x = x }\n  init() {\n    self.x = 1\n    self.init(x: 2)\n  }\n}\nfunc main() { }";
+    assert!(build_error(before).contains("before"));
+    let args = "struct P {\n  var x: Int\n  init(x: Int) { self.x = x }\n  init() {\n    self.init(x: self.x)\n  }\n}\nfunc main() { }";
+    assert!(!build_error(args).is_empty());
+}
+
+#[test]
+fn delegation_must_be_a_top_level_statement_called_once() {
+    let nested = "struct P {\n  var x: Int\n  init(x: Int) { self.x = x }\n  init(flag: Bool) {\n    if flag { self.init(x: 1) } else { self.x = 2 }\n  }\n}\nfunc main() { }";
+    assert!(build_error(nested).contains("top-level"));
+    let twice = "struct P {\n  var x: Int\n  init(x: Int) { self.x = x }\n  init() {\n    self.init(x: 1)\n    self.init(x: 2)\n  }\n}\nfunc main() { }";
+    assert!(build_error(twice).contains("twice"));
+}
+
+#[test]
+fn an_initializer_cannot_delegate_to_itself() {
+    let source =
+        "struct P {\n  var x: Int\n  init(x: Int) {\n    self.init(x: x)\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("itself"));
+}
+
+#[test]
+fn delegation_is_possible_only_inside_an_initializer() {
+    let source = "struct P {\n  var x: Int\n  init(x: Int) { self.x = x }\n  func again() {\n    self.init(x: 1)\n  }\n}\nfunc main() { }";
+    assert!(!build_error(source).is_empty());
+}
+
+#[test]
+fn an_initializer_that_does_not_delegate_still_initializes_every_member() {
+    let source = "struct P {\n  var x: Int\n  var y: Int\n  init(x: Int, y: Int) {\n    self.x = x\n    self.y = y\n  }\n  init(x: Int) {\n    self.x = x\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("'y'"));
 }

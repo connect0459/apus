@@ -38,6 +38,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         targets: Vec::new(),
         pending_label: None,
         bounds: sig.bounds().to_vec(),
+        name: func.name().to_string(),
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -235,6 +236,7 @@ pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFu
         targets: Vec::new(),
         pending_label: None,
         bounds: Vec::new(),
+        name: name.clone(),
     };
     let left = cx.declare(0, "left", ty, false)?;
     let right = cx.declare(0, "right", ty, false)?;
@@ -358,6 +360,7 @@ struct FnCx<'a> {
     targets: Vec<Target>,
     pending_label: Option<String>,
     bounds: Vec<Vec<String>>,
+    name: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -893,6 +896,9 @@ impl FnCx<'_> {
                     return Ok(());
                 };
                 self.chain_statements(stmt.line(), subject, link, out)
+            }
+            StmtKind::Expr(expr) if self.is_self_init(expr) => {
+                self.self_init(stmt.line(), expr, out)
             }
             StmtKind::Expr(expr) if self.is_super_init(expr) => {
                 self.super_init(stmt.line(), expr, out)
@@ -2374,11 +2380,24 @@ impl FnCx<'_> {
                 "internal error: a superclass is a class",
             ));
         };
-        let layout = sigs
-            .struct_sig(parent_id)
-            .ok_or_else(|| CheckError::at(line, "internal error: unknown superclass layout"))?;
+        self.adopt_members(line, target, parent_id, built, out)
+    }
+
+    fn adopt_members(
+        &mut self,
+        line: u32,
+        target: LocalId,
+        source_id: StructId,
+        built: TExpr,
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let source = built.ty();
+        let layout = self
+            .sigs
+            .struct_sig(source_id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown class layout"))?;
         let temporary = LocalId::new(self.locals.len());
-        self.locals.push(parent);
+        self.locals.push(source);
         out.push(TStmt::Let {
             local: temporary,
             init: built,
@@ -2388,14 +2407,61 @@ impl FnCx<'_> {
                 local: target,
                 index,
                 value: TExpr::Moved(Box::new(TExpr::Field {
-                    base: Box::new(TExpr::Local(temporary, parent)),
+                    base: Box::new(TExpr::Local(temporary, source)),
                     index,
                     ty: field.ty(),
                 })),
             });
         }
-        out.push(TStmt::Free(TExpr::Local(temporary, parent)));
+        out.push(TStmt::Free(TExpr::Local(temporary, source)));
         Ok(())
+    }
+
+    fn is_self_init(&self, expr: &Expr) -> bool {
+        matches!(
+            expr.kind(),
+            ExprKind::MemberCall { base, name, .. }
+                if name == "init"
+                    && matches!(base.kind(), ExprKind::Ident(n) if n == "self")
+                    && self.lookup("self", base.line()).is_ok()
+        )
+    }
+
+    fn self_init(&mut self, line: u32, expr: &Expr, out: &mut Vec<TStmt>) -> CResult<()> {
+        let ExprKind::MemberCall { args, .. } = expr.kind() else {
+            return Err(CheckError::at(line, "internal error: not a self.init call"));
+        };
+        let Some(target) = self.init_self else {
+            return Err(CheckError::at(
+                line,
+                "'self.init' can only be called from an initializer",
+            ));
+        };
+        let ty = self.locals[target.index()];
+        let owner = self
+            .sigs
+            .owner_name(ty)
+            .ok_or_else(|| CheckError::at(line, "internal error: an initializer needs a type"))?;
+        let built = self.call(line, &owner, args, None)?;
+        if let TExpr::Call { callee, .. } = &built
+            && *callee == self.name
+        {
+            return Err(CheckError::at(
+                line,
+                "an initializer cannot delegate to itself",
+            ));
+        }
+        self.expect(line, ty, built.ty())?;
+        match ty {
+            Ty::Class(id) => self.adopt_members(line, target, id, built, out),
+            _ => {
+                out.push(TStmt::Assign {
+                    local: target,
+                    value: built,
+                });
+                Ok(())
+            }
+        }
     }
 
     fn is_super(&self, base: &Expr) -> bool {
@@ -3021,19 +3087,32 @@ impl FnCx<'_> {
             let base = Expr::new(line, ExprKind::Ident("self".to_string()));
             return self.method_call(line, &base, callee, args, expected, explicit);
         }
-        let init_name = format!("{callee}.init");
         let is_type = sigs.struct_def(callee).is_some() || sigs.enum_def(callee).is_some();
-        let callee = if is_type && sigs.func(&init_name).is_some() {
-            init_name.as_str()
-        } else {
-            callee
-        };
+        if is_type && sigs.has_init(callee) {
+            return self.init_call(line, callee, args, expected, explicit);
+        }
         if let Some(def) = sigs.struct_def(callee) {
             return self.struct_init(line, def, None, args, expected);
         }
         let sig = sigs
             .func(callee)
             .ok_or_else(|| CheckError::at(line, format!("cannot find function '{callee}'")))?;
+        let checked = self.check_arguments(line, callee, sig, args)?;
+        let explicit = match explicit {
+            Some(given) => Some(self.explicit_args(line, callee, sig.generics().len(), given)?),
+            None => None,
+        };
+        self.finish_call(line, callee, sig, checked, expected, explicit)
+    }
+
+    fn check_arguments(
+        &mut self,
+        line: u32,
+        callee: &str,
+        sig: &FuncSig,
+        args: &[Arg],
+    ) -> CResult<Vec<TExpr>> {
+        let sigs = self.sigs;
         if args.len() != sig.params().len() {
             return Err(CheckError::at(
                 line,
@@ -3052,16 +3131,145 @@ impl FnCx<'_> {
             }
             checked.push(self.value(arg.value())?);
         }
+        Ok(checked)
+    }
+
+    fn init_call(
+        &mut self,
+        line: u32,
+        owner: &str,
+        args: &[Arg],
+        expected: Option<Ty>,
+        explicit: Option<&[TypeRef]>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let names = sigs.initializers(owner);
+        let candidates: Vec<&String> = if names.len() == 1 {
+            names.iter().collect()
+        } else {
+            names
+                .iter()
+                .filter(|name| {
+                    sigs.func(name).is_some_and(|sig| {
+                        sig.params().len() == args.len()
+                            && sig
+                                .params()
+                                .iter()
+                                .zip(args)
+                                .all(|(param, arg)| param.label() == arg.label())
+                    })
+                })
+                .collect()
+        };
+        let (name, checked) = match candidates.as_slice() {
+            [] => return Err(self.no_initializer(line, owner)),
+            [only] => {
+                let sig = sigs
+                    .func(only)
+                    .ok_or_else(|| CheckError::at(line, "internal error: unknown initializer"))?;
+                (
+                    (*only).clone(),
+                    self.check_arguments(line, only, sig, args)?,
+                )
+            }
+            several => self.choose_initializer(line, owner, several, args)?,
+        };
+        let sig = sigs
+            .func(&name)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown initializer"))?;
         let explicit = match explicit {
-            Some(given) => Some(self.explicit_args(
-                line,
-                callee.strip_suffix(".init").unwrap_or(callee),
-                sig.generics().len(),
-                given,
-            )?),
+            Some(given) => Some(self.explicit_args(line, owner, sig.generics().len(), given)?),
             None => None,
         };
-        self.finish_call(line, callee, sig, checked, expected, explicit)
+        self.finish_call(line, &name, sig, checked, expected, explicit)
+    }
+
+    fn no_initializer(&self, line: u32, owner: &str) -> CheckError {
+        let prefix = format!("{owner}.");
+        let choices: Vec<&str> = self
+            .sigs
+            .initializers(owner)
+            .iter()
+            .map(|name| name.strip_prefix(&prefix).unwrap_or(name))
+            .collect();
+        CheckError::at(
+            line,
+            format!(
+                "no initializer of '{owner}' takes these arguments; the choices are {}",
+                choices.join(", ")
+            ),
+        )
+    }
+
+    fn choose_initializer(
+        &mut self,
+        line: u32,
+        owner: &str,
+        candidates: &[&String],
+        args: &[Arg],
+    ) -> CResult<(String, Vec<TExpr>)> {
+        let sigs = self.sigs;
+        let mut checked = Vec::with_capacity(args.len());
+        for (position, arg) in args.iter().enumerate() {
+            let wanted: Vec<Ty> = candidates
+                .iter()
+                .filter_map(|name| sigs.func(name))
+                .map(|sig| sig.params()[position].ty())
+                .collect();
+            if let Some(first) = wanted.first()
+                && wanted.iter().all(|ty| ty == first)
+                && !sigs.has_param(*first)
+            {
+                self.expected = Some(*first);
+            }
+            checked.push(self.value(arg.value())?);
+        }
+        let mut best: Option<(usize, &String)> = None;
+        let mut tied = false;
+        for name in candidates {
+            let Some(score) = sigs
+                .func(name)
+                .and_then(|sig| self.initializer_score(sig, &checked))
+            else {
+                continue;
+            };
+            match best {
+                Some((top, _)) if score < top => {}
+                Some((top, _)) if score == top => tied = true,
+                _ => {
+                    best = Some((score, name));
+                    tied = false;
+                }
+            }
+        }
+        match best {
+            None => Err(self.no_initializer(line, owner)),
+            Some(_) if tied => Err(CheckError::at(
+                line,
+                format!("ambiguous use of an initializer of '{owner}'"),
+            )),
+            Some((_, name)) => Ok((name.clone(), checked)),
+        }
+    }
+
+    fn initializer_score(&self, sig: &FuncSig, values: &[TExpr]) -> Option<usize> {
+        let sigs = self.sigs;
+        let mut bound: Vec<Option<Ty>> = vec![None; sig.generics().len()];
+        let mut score = 0;
+        for (param, value) in sig.params().iter().zip(values) {
+            let found = value.ty();
+            if param.ty() == found {
+                score += 1;
+            } else if sigs.has_param(param.ty()) {
+                if !sigs.unify(param.ty(), found, &mut bound) {
+                    return None;
+                }
+                score += 1;
+            } else if !self.convertible(param.ty(), found) {
+                return None;
+            }
+        }
+        Some(score)
     }
 
     fn expect_label(&self, line: u32, arg: &Arg, label: Option<&str>) -> CResult<()> {
@@ -3130,10 +3338,12 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
-        let init_name = format!("{callee}.init");
-        let has_init = self.sigs.func(&init_name).is_some();
+        let is_type =
+            self.sigs.struct_def(callee).is_some() || self.sigs.enum_def(callee).is_some();
+        if is_type && self.sigs.has_init(callee) {
+            return self.init_call(line, callee, args, None, Some(type_args));
+        }
         match self.sigs.struct_def(callee) {
-            _ if has_init => self.call_with(line, &init_name, args, None, Some(type_args)),
             Some(def) => self.struct_init(line, def, Some(type_args), args, None),
             None => self.call_with(line, callee, args, expected, Some(type_args)),
         }

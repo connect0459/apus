@@ -380,6 +380,7 @@ pub struct Signatures {
     enum_def_ids: HashMap<String, usize>,
     protocols: HashMap<String, ProtocolSig>,
     assoc_types: Vec<(String, String)>,
+    inits: HashMap<String, Vec<String>>,
     instances: RefCell<Instances>,
 }
 
@@ -393,6 +394,7 @@ impl Signatures {
             enum_def_ids: HashMap::new(),
             protocols: standard_protocols(),
             assoc_types: Vec::new(),
+            inits: HashMap::new(),
             instances: RefCell::new(Instances::default()),
         };
         let mut protocol_decls: Vec<&ProtocolDecl> = Vec::new();
@@ -1255,10 +1257,21 @@ impl Signatures {
             mutating: func.is_mutating(),
         };
         if self.funcs.insert(func.name().to_string(), sig).is_some() {
+            let kind = if func.is_init() {
+                "initializer"
+            } else {
+                "function"
+            };
             return Err(CheckError::at(
                 func.line(),
-                format!("duplicate function '{}'", func.name()),
+                format!("duplicate {kind} '{}'", func.name()),
             ));
+        }
+        if let (true, Some(owner)) = (func.is_init(), func.owner()) {
+            self.inits
+                .entry(owner.to_string())
+                .or_default()
+                .push(func.name().to_string());
         }
         Ok(())
     }
@@ -1312,11 +1325,19 @@ impl Signatures {
         }
     }
 
+    pub fn initializers(&self, owner: &str) -> &[String] {
+        self.inits.get(owner).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn has_init(&self, owner: &str) -> bool {
+        !self.initializers(owner).is_empty()
+    }
+
     pub fn inherited_init_owner(&self, ty: Ty) -> Option<String> {
         let mut current = self.superclass(ty);
         while let Some(t) = current {
             let owner = self.owner_name(t)?;
-            if self.funcs.contains_key(&format!("{owner}.init")) {
+            if self.has_init(&owner) {
                 return Some(owner);
             }
             current = self.superclass(t);

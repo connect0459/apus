@@ -1122,7 +1122,8 @@ impl Parser<'_> {
                     },
                 ));
             } else if self.eat_punct(".") {
-                let after_super = matches!(expr.kind(), ExprKind::Ident(n) if n == "super");
+                let after_super =
+                    matches!(expr.kind(), ExprKind::Ident(n) if n == "super" || n == "self");
                 let name = if after_super && self.eat_keyword("init") {
                     "init".to_string()
                 } else {
