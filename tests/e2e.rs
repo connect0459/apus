@@ -2605,3 +2605,74 @@ fn a_mutating_call_inside_an_optional_chain_is_rejected() {
     let source = "struct S {\n  var n: Int\n  mutating func bump() { self.n += 1 }\n}\nclass C {\n  var s: S\n}\nfunc main() {\n  let c: C? = C(s: S(n: 1))\n  c?.s.bump()\n}";
     assert!(build_error(source).contains("mutating"));
 }
+
+#[test]
+fn guard_let_binds_a_name_for_the_rest_of_the_block() {
+    let source = "func double(_ x: Int?) -> Int {\n  guard let v = x else { return 0 - 1 }\n  return v * 2\n}\nfunc main() {\n  print(double(4))\n  print(double(nil))\n}";
+    assert_eq!(run(source), "8\n-1\n");
+}
+
+#[test]
+fn guard_let_binding_is_visible_in_nested_blocks_after_it() {
+    let source = "func f(_ x: Int?) -> Int {\n  guard let v = x else { return 0 }\n  if v > 1 {\n    return v + 100\n  }\n  return v\n}\nfunc main() {\n  print(f(5))\n  print(f(1))\n  print(f(nil))\n}";
+    assert_eq!(run(source), "105\n1\n0\n");
+}
+
+#[test]
+fn guard_let_binding_is_not_visible_in_its_else_body() {
+    let source = "func f(_ x: Int?) -> Int {\n  guard let v = x else { return v }\n  return v\n}\nfunc main() { }";
+    assert!(build_error(source).contains("cannot find"));
+}
+
+#[test]
+fn guard_var_binds_a_variable_that_can_be_changed() {
+    let source = "func f(_ x: Int?) -> Int {\n  guard var v = x else { return 0 }\n  v += 10\n  return v\n}\nfunc main() {\n  print(f(1))\n}";
+    assert_eq!(run(source), "11\n");
+}
+
+#[test]
+fn guard_with_a_condition_continues_only_when_it_holds() {
+    let source = "func f(_ n: Int) -> Int {\n  guard n > 0 else { return 0 - 1 }\n  return n\n}\nfunc main() {\n  print(f(3))\n  print(f(0))\n}";
+    assert_eq!(run(source), "3\n-1\n");
+}
+
+#[test]
+fn guard_may_be_used_inside_a_loop_body() {
+    let source = "func find(_ limit: Int) -> Int {\n  var i = 0\n  while i < 10 {\n    guard i < limit else { return i }\n    i += 1\n  }\n  return 99\n}\nfunc main() {\n  print(find(3))\n  print(find(50))\n}";
+    assert_eq!(run(source), "3\n99\n");
+}
+
+#[test]
+fn the_else_body_of_a_guard_must_leave_the_scope() {
+    let source =
+        "func f(_ x: Int?) {\n  guard let v = x else { print(0) }\n  print(v)\n}\nfunc main() { }";
+    assert!(build_error(source).contains("guard"));
+}
+
+#[test]
+fn the_else_body_of_a_guard_may_leave_through_every_branch() {
+    let source = "func f(_ x: Int?, _ flag: Bool) -> Int {\n  guard let v = x else {\n    if flag { return 1 } else { return 2 }\n  }\n  return v\n}\nfunc main() {\n  print(f(nil, true))\n  print(f(nil, false))\n  print(f(7, true))\n}";
+    assert_eq!(run(source), "1\n2\n7\n");
+}
+
+#[test]
+fn guard_let_needs_an_optional() {
+    let source = "func f(_ x: Int) -> Int {\n  guard let v = x else { return 0 }\n  return v\n}\nfunc main() { }";
+    assert!(build_error(source).contains("optional"));
+}
+
+#[test]
+fn guard_let_keeps_an_instance_until_the_end_of_the_block() {
+    let source = tracked(
+        "func f(_ t: Tracked?) -> Int {\n  guard let v = t else { return 0 }\n  print(10)\n  return v.id\n}\nfunc main() {\n  print(f(Tracked(id: 1)))\n  print(20)\n}",
+    );
+    assert_eq!(run(&source), "10\n1\n-1\n20\n");
+}
+
+#[test]
+fn an_early_exit_from_guard_releases_what_was_declared_before_it() {
+    let source = tracked(
+        "func f(_ x: Int?) -> Int {\n  let a = Tracked(id: 1)\n  guard let v = x else { return 0 }\n  print(v)\n  return 1\n}\nfunc main() {\n  print(f(nil))\n  print(f(5))\n}",
+    );
+    assert_eq!(run(&source), "-1\n0\n5\n-1\n1\n");
+}

@@ -462,6 +462,26 @@ impl FnCx<'_> {
                 value,
                 body,
             } => self.while_let(stmt.line(), name, *mutable, value, body, out),
+            StmtKind::Guard { cond, else_body } => {
+                self.require_exit(stmt.line(), else_body)?;
+                let cond = self.condition(cond)?;
+                let leave = self.block(else_body)?;
+                out.push(TStmt::If {
+                    cond: TExpr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(cond),
+                    },
+                    then_body: leave,
+                    else_body: Vec::new(),
+                });
+                Ok(())
+            }
+            StmtKind::GuardLet {
+                name,
+                mutable,
+                value,
+                else_body,
+            } => self.guard_let(stmt.line(), name, *mutable, value, else_body, out),
             StmtKind::Expr(expr) if matches!(expr.kind(), ExprKind::OptionalChain { .. }) => {
                 let ExprKind::OptionalChain { subject, link } = expr.kind() else {
                     return Ok(());
@@ -554,6 +574,69 @@ impl FnCx<'_> {
             ],
             else_body: Vec::new(),
         })
+    }
+
+    fn require_exit(&self, line: u32, else_body: &[Stmt]) -> CResult<()> {
+        if always_returns(else_body) {
+            Ok(())
+        } else {
+            Err(CheckError::at(
+                line,
+                "the 'else' body of a 'guard' must leave the scope: end every path with 'return'",
+            ))
+        }
+    }
+
+    fn guard_let(
+        &mut self,
+        line: u32,
+        name: &str,
+        mutable: bool,
+        value: &Expr,
+        else_body: &[Stmt],
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        self.require_exit(line, else_body)?;
+        let value = self.value(value)?;
+        let optional = value.ty();
+        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'guard let' needs an optional, but found {}",
+                    self.name_of(optional)
+                ),
+            )
+        })?;
+        let held = self.temp(optional);
+        let leave = self.block(else_body)?;
+        out.push(TStmt::Let {
+            local: held,
+            init: value,
+        });
+        out.push(TStmt::If {
+            cond: TExpr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(TExpr::Field {
+                    base: Box::new(TExpr::Local(held, optional)),
+                    index: 0,
+                    ty: Ty::Int,
+                }),
+                rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+            },
+            then_body: leave,
+            else_body: Vec::new(),
+        });
+        let local = self.declare(line, name, inner, mutable)?;
+        out.push(TStmt::Let {
+            local,
+            init: TExpr::Field {
+                base: Box::new(TExpr::Local(held, optional)),
+                index: 1,
+                ty: inner,
+            },
+        });
+        Ok(())
     }
 
     fn while_let(
@@ -945,7 +1028,10 @@ impl FnCx<'_> {
             }
             StmtKind::For { var, iter, body } => self.for_stmt(line, var, iter, body),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
-            StmtKind::Switch { .. } | StmtKind::WhileLet { .. } => Err(CheckError::at(
+            StmtKind::Switch { .. }
+            | StmtKind::WhileLet { .. }
+            | StmtKind::Guard { .. }
+            | StmtKind::GuardLet { .. } => Err(CheckError::at(
                 line,
                 "internal error: this statement must be lowered into a block",
             )),

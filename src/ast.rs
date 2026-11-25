@@ -448,6 +448,16 @@ pub enum StmtKind {
         value: Expr,
         body: Vec<Stmt>,
     },
+    Guard {
+        cond: Expr,
+        else_body: Vec<Stmt>,
+    },
+    GuardLet {
+        name: String,
+        mutable: bool,
+        value: Expr,
+        else_body: Vec<Stmt>,
+    },
     For {
         var: String,
         iter: Expr,

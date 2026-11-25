@@ -264,6 +264,20 @@ impl Scan<'_> {
                 }
                 used
             }
+            StmtKind::Guard { cond, else_body } => {
+                let used = self.expr_uses_self(cond);
+                used | self.block_uses_self(else_body)
+            }
+            StmtKind::GuardLet {
+                name,
+                value,
+                else_body,
+                ..
+            } => {
+                let used = self.expr_uses_self(value) | self.block_uses_self(else_body);
+                self.declare(name);
+                used
+            }
             StmtKind::WhileLet {
                 name, value, body, ..
             } => {
@@ -374,6 +388,9 @@ fn returns(stmt: &Stmt) -> bool {
             else_body,
             ..
         } => any_returns(then_body) || else_body.as_deref().is_some_and(any_returns),
+        StmtKind::Guard { else_body, .. } | StmtKind::GuardLet { else_body, .. } => {
+            any_returns(else_body)
+        }
         StmtKind::While { body, .. }
         | StmtKind::WhileLet { body, .. }
         | StmtKind::For { body, .. } => any_returns(body),

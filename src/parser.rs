@@ -19,10 +19,10 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 24] = [
+const KEYWORDS: [&str; 25] = [
     "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "weak",
-    "nil", "case", "switch", "default", "var", "let", "if", "else", "while", "for", "in", "return",
-    "true", "false",
+    "nil", "guard", "case", "switch", "default", "var", "let", "if", "else", "while", "for", "in",
+    "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -545,6 +545,22 @@ impl Parser<'_> {
             self.if_kind()?
         } else if self.eat_keyword("switch") {
             self.switch_kind()?
+        } else if self.eat_keyword("guard") {
+            if let Some((name, mutable, value)) = self.optional_binding()? {
+                self.expect_keyword("else")?;
+                let else_body = self.block()?;
+                StmtKind::GuardLet {
+                    name,
+                    mutable,
+                    value,
+                    else_body,
+                }
+            } else {
+                let cond = self.expr()?;
+                self.expect_keyword("else")?;
+                let else_body = self.block()?;
+                StmtKind::Guard { cond, else_body }
+            }
         } else if self.eat_keyword("while") {
             if let Some((name, mutable, value)) = self.optional_binding()? {
                 let body = self.block()?;
@@ -1040,6 +1056,27 @@ mod tests {
             lets[1].kind(),
             StmtKind::WhileLet { mutable: false, .. }
         ));
+    }
+
+    #[test]
+    fn guard_takes_a_condition_or_a_binding_and_an_else_body() {
+        let stmts = body(
+            "guard x > 0 else { return }\nguard let v = y else { return }\nguard var w = z else { return }",
+        );
+        assert!(matches!(stmts[0].kind(), StmtKind::Guard { .. }));
+        assert!(matches!(
+            stmts[1].kind(),
+            StmtKind::GuardLet { mutable: false, .. }
+        ));
+        assert!(matches!(
+            stmts[2].kind(),
+            StmtKind::GuardLet { mutable: true, .. }
+        ));
+    }
+
+    #[test]
+    fn guard_needs_an_else_body() {
+        assert!(try_parse("func f() { guard x > 0 { } }").is_err());
     }
 
     #[test]
