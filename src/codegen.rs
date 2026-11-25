@@ -29,6 +29,7 @@ const VARIADIC_PADDING: usize = 7;
 const FIELD_SIZE: u32 = 8;
 const UNREACHABLE: TrapCode = TrapCode::unwrap_user(1);
 const UNOWNED_DEAD: TrapCode = TrapCode::unwrap_user(2);
+const UNWRAPPED_NIL: TrapCode = TrapCode::unwrap_user(3);
 const NAMESPACE_FUNC: u32 = 0;
 const NAMESPACE_DATA: u32 = 1;
 
@@ -1007,6 +1008,21 @@ impl Emitter<'_, '_> {
                 value
             }
             TExpr::Moved(inner) => return self.expr(inner),
+            TExpr::Unwrap { base, ty } => {
+                let owner = base.ty();
+                let base = self.value(base)?;
+                let flags = MemFlagsData::trusted();
+                let tag = self.builder.ins().load(types::I64, flags, base, 0);
+                self.builder.ins().trapz(tag, UNWRAPPED_NIL);
+                let offset = field_offset(self.slot_start(owner, 1));
+                if ty.is_struct() {
+                    self.builder.ins().iadd_imm_s(base, i64::from(offset))
+                } else {
+                    let clif = clif_type(*ty)
+                        .ok_or_else(|| CodegenError::from("a payload has no representable type"))?;
+                    self.builder.ins().load(clif, flags, base, offset)
+                }
+            }
             TExpr::RetainUnowned(inner) => {
                 let value = self.value(inner)?;
                 self.retain_unowned(value)?;

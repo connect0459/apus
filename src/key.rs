@@ -296,6 +296,11 @@ impl Encoder<'_> {
                 self.tag(46);
                 self.str(name);
             }
+            TExpr::Unwrap { base, ty } => {
+                self.tag(49);
+                self.expr(base);
+                self.ty(*ty);
+            }
             TExpr::RetainUnowned(inner) => {
                 self.tag(47);
                 self.expr(inner);

@@ -2091,3 +2091,111 @@ fn replacing_a_nested_struct_releases_the_instance_it_held() {
     );
     assert_eq!(run(&source), "-1\n10\n-2\n");
 }
+
+#[test]
+fn an_optional_holds_a_value_or_nil() {
+    let source = "func main() {\n  let a: Int? = 5\n  let b: Int? = nil\n  print(a == nil)\n  print(b == nil)\n  print(a != nil)\n  print(b != nil)\n  print(a!)\n}";
+    assert_eq!(run(source), "false\ntrue\ntrue\nfalse\n5\n");
+}
+
+#[test]
+fn a_value_is_promoted_to_an_optional_where_one_is_expected() {
+    let source = "func half(_ n: Int) -> Int? {\n  if n % 2 == 0 { return n / 2 }\n  return nil\n}\nfunc show(_ x: Int?) -> Int {\n  if x == nil { return 0 - 1 }\n  return x!\n}\nfunc main() {\n  print(show(half(8)))\n  print(show(half(7)))\n  print(show(3))\n  print(show(nil))\n}";
+    assert_eq!(run(source), "4\n-1\n3\n-1\n");
+}
+
+#[test]
+fn an_optional_can_be_assigned_a_value_or_nil_later() {
+    let source = "func main() {\n  var x: Int? = nil\n  print(x == nil)\n  x = 7\n  print(x!)\n  x = nil\n  print(x == nil)\n}";
+    assert_eq!(run(source), "true\n7\ntrue\n");
+}
+
+#[test]
+fn an_optional_can_hold_a_bool_a_string_or_an_enum() {
+    let source = "enum Color { case red, green }\nfunc main() {\n  let b: Bool? = true\n  let s: String? = \"hi\"\n  let c: Color? = Color.green\n  print(b!)\n  print(s!)\n  print(c! == Color.green)\n}";
+    assert_eq!(run(source), "true\nhi\ntrue\n");
+}
+
+#[test]
+fn an_optional_can_be_a_member_of_a_struct_and_a_class() {
+    let source = "struct S {\n  var v: Int?\n  var n: Int\n}\nclass C {\n  var v: Int?\n}\nfunc main() {\n  let s = S(v: 3, n: 1)\n  let t = S(v: nil, n: 2)\n  let c = C(v: nil)\n  print(s.v!)\n  print(t.v == nil)\n  c.v = 9\n  print(c.v!)\n  print(s.n + t.n)\n}";
+    assert_eq!(run(source), "3\ntrue\n9\n3\n");
+}
+
+#[test]
+fn an_optional_of_a_struct_keeps_the_whole_struct() {
+    let source = "struct P { var x: Int\n var y: Int }\nfunc make(_ ok: Bool) -> P? {\n  if ok { return P(x: 1, y: 2) }\n  return nil\n}\nfunc main() {\n  let a = make(true)\n  let b = make(false)\n  print(a!.x)\n  print(a!.y)\n  print(b == nil)\n}";
+    assert_eq!(run(source), "1\n2\ntrue\n");
+}
+
+#[test]
+fn an_optional_of_an_optional_wraps_twice() {
+    let source = "func main() {\n  let a: Int?? = 4\n  let b: Int?? = nil\n  print(a == nil)\n  print(b == nil)\n  print(a!!)\n}";
+    assert_eq!(run(source), "false\ntrue\n4\n");
+}
+
+#[test]
+fn an_optional_instance_is_retained_and_released_like_an_instance() {
+    let source = tracked(
+        "func main() {\n  var t: Tracked? = Tracked(id: 1)\n  print(10)\n  t = nil\n  print(20)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n20\n");
+}
+
+#[test]
+fn an_optional_instance_goes_out_of_scope_with_its_variable() {
+    let source = tracked(
+        "func main() {\n  let t: Tracked? = Tracked(id: 1)\n  let u: Tracked? = t\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_class_can_refer_to_itself_through_an_optional() {
+    let source = "class Node {\n  var value: Int\n  var next: Node?\n}\nfunc main() {\n  let c = Node(value: 3, next: nil)\n  let b = Node(value: 2, next: c)\n  let a = Node(value: 1, next: b)\n  print(a.next!.value)\n  print(a.next!.next!.value)\n  print(c.next == nil)\n}";
+    assert_eq!(run(source), "2\n3\ntrue\n");
+}
+
+#[test]
+fn a_linked_list_releases_every_node() {
+    let source = "class Node {\n  var value: Int\n  var next: Node?\n  deinit { print(0 - self.value) }\n}\nfunc main() {\n  let c = Node(value: 3, next: nil)\n  let b = Node(value: 2, next: c)\n  let a = Node(value: 1, next: b)\n  print(10)\n}";
+    assert_eq!(run(source), "10\n-1\n-2\n-3\n");
+}
+
+#[test]
+fn unwrapping_nil_traps() {
+    run_expecting_a_crash("func main() {\n  let x: Int? = nil\n  print(x!)\n}");
+}
+
+#[test]
+fn nil_needs_a_type_from_its_context() {
+    assert!(build_error("func main() {\n  let x = nil\n}").contains("nil"));
+}
+
+#[test]
+fn comparing_a_value_that_is_not_an_optional_with_nil_is_rejected() {
+    assert!(build_error("func main() {\n  let x = 1\n  print(x == nil)\n}").contains("optional"));
+}
+
+#[test]
+fn unwrapping_a_value_that_is_not_an_optional_is_rejected() {
+    assert!(build_error("func main() {\n  let x = 1\n  print(x!)\n}").contains("optional"));
+}
+
+#[test]
+fn an_optional_is_not_accepted_where_its_wrapped_type_is_expected() {
+    let source = "func f(_ n: Int) { }\nfunc main() {\n  let x: Int? = 1\n  f(x)\n}";
+    assert!(build_error(source).contains("expected Int"));
+}
+
+#[test]
+fn an_optional_type_prints_with_a_question_mark_in_errors() {
+    let source = "func f(_ n: Int?) { }\nfunc main() {\n  f(true)\n}";
+    assert!(build_error(source).contains("Int?"));
+}
+
+#[test]
+fn a_subclass_instance_is_promoted_to_an_optional_superclass() {
+    let source = "class A { var x: Int }\nclass B: A { var y: Int }\nfunc main() {\n  let a: A? = B(x: 1, y: 2)\n  print(a!.x)\n}";
+    assert_eq!(run(source), "1\n");
+}

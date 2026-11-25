@@ -302,7 +302,9 @@ impl Scan<'_> {
     fn expr_uses_self(&self, expr: &Expr) -> bool {
         match expr.kind() {
             ExprKind::Ident(name) => name == SELF || self.is_member(name),
-            ExprKind::Int(_)
+            ExprKind::Unwrap(inner) => self.expr_uses_self(inner),
+            ExprKind::Nil
+            | ExprKind::Int(_)
             | ExprKind::Bool(_)
             | ExprKind::Str(_)
             | ExprKind::GenericName { .. } => false,

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{Decl, EnumDecl, FuncDecl, StructDecl, TypeRef};
+use crate::ast::{Decl, EnumCaseDecl, EnumDecl, FuncDecl, StructDecl, TypeRef};
 use crate::tir::{TExpr, TStruct};
 use crate::types::{EnumId, StructId, Ty};
 
@@ -36,6 +36,22 @@ fn identity(generics: &[String]) -> Vec<Ty> {
 }
 
 const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
+
+pub const OPTIONAL: &str = "Optional";
+pub const NONE_CASE: usize = 0;
+pub const SOME_CASE: usize = 1;
+
+fn optional_decl() -> EnumDecl {
+    EnumDecl::new(
+        0,
+        OPTIONAL.to_string(),
+        vec![
+            EnumCaseDecl::new("none".to_string(), Vec::new()),
+            EnumCaseDecl::new("some".to_string(), vec![TypeRef::from("Wrapped")]),
+        ],
+    )
+    .with_generics(vec!["Wrapped".to_string()])
+}
 
 pub type CResult<T> = Result<T, CheckError>;
 
@@ -249,6 +265,7 @@ impl Signatures {
             enum_def_ids: HashMap::new(),
             instances: RefCell::new(Instances::default()),
         };
+        sigs.register_enum_def(&optional_decl())?;
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -646,20 +663,43 @@ impl Signatures {
                 format!("a struct cannot contain itself: '{name}'"),
             ));
         }
+        let reserved = decl.is_class().then(|| {
+            let mut instances = self.instances.borrow_mut();
+            let id = StructId::new(instances.structs.len());
+            instances.structs.push(Rc::new(StructSig {
+                name: name.clone(),
+                fields: Vec::new(),
+            }));
+            instances.struct_origin.push(Origin::Struct {
+                def,
+                args: key.1.clone(),
+            });
+            instances.struct_index.insert(key.clone(), id);
+            id
+        });
         let fields = self.struct_fields(decl, &key.1, &name, scope, line);
         self.instances.borrow_mut().struct_pending.remove(&key);
         let (fields, superclass) = fields?;
         let mut instances = self.instances.borrow_mut();
-        let id = StructId::new(instances.structs.len());
+        let id = match reserved {
+            Some(id) => {
+                instances.structs[id.index()] = Rc::new(StructSig { name, fields });
+                id
+            }
+            None => {
+                let id = StructId::new(instances.structs.len());
+                instances.structs.push(Rc::new(StructSig { name, fields }));
+                instances.struct_origin.push(Origin::Struct {
+                    def,
+                    args: key.1.clone(),
+                });
+                instances.struct_index.insert(key, id);
+                id
+            }
+        };
         if let Some(parent) = superclass {
             instances.superclass.insert(id, parent);
         }
-        instances.structs.push(Rc::new(StructSig { name, fields }));
-        instances.struct_origin.push(Origin::Struct {
-            def,
-            args: key.1.clone(),
-        });
-        instances.struct_index.insert(key, id);
         Ok(id)
     }
 
@@ -822,10 +862,11 @@ impl Signatures {
                 format!("an enum cannot contain itself: '{name}'"),
             ));
         }
-        let cases = self.enum_cases(decl, &key.1, &name, scope, line);
+        let cases = self.enum_cases(decl, &key.1, &name, line);
         self.instances.borrow_mut().enum_pending.remove(&key);
         let cases = cases?;
         let has_payload = decl.has_payload();
+        let at = if line == 0 { decl.line() } else { line };
         let mut instances = self.instances.borrow_mut();
         let id = EnumId::new(instances.enums.len());
         let layout = if has_payload {
@@ -837,9 +878,17 @@ impl Signatures {
                 unowned: false,
             }];
             for slot in 0..widest {
+                let ty = Self::slot_type(&cases, slot).ok_or_else(|| {
+                    CheckError::at(
+                        at,
+                        format!(
+                            "the payloads at position {slot} of '{name}' must have the same type when it is a class or a struct"
+                        ),
+                    )
+                })?;
                 fields.push(FieldSig {
                     name: format!("payload{slot}"),
-                    ty: Ty::Int,
+                    ty,
                     mutable: false,
                     unowned: false,
                 });
@@ -867,12 +916,29 @@ impl Signatures {
         Ok(id)
     }
 
+    fn slot_type(cases: &[CaseSig], slot: usize) -> Option<Ty> {
+        let types: Vec<Ty> = cases
+            .iter()
+            .filter_map(|c| c.payload.get(slot).copied())
+            .collect();
+        let first = *types.first()?;
+        if types.iter().all(|t| *t == first) {
+            Some(first)
+        } else if types
+            .iter()
+            .any(|t| matches!(t, Ty::Class(_) | Ty::Struct(_)))
+        {
+            None
+        } else {
+            Some(Ty::Int)
+        }
+    }
+
     fn enum_cases(
         &self,
         decl: &EnumDecl,
         args: &[Ty],
         name: &str,
-        scope: &Scope,
         line: u32,
     ) -> CResult<Vec<CaseSig>> {
         let own_scope: Vec<(String, Ty)> = decl
@@ -892,17 +958,7 @@ impl Signatures {
             }
             let mut payload = Vec::new();
             for tr in case.payload() {
-                let ty = self.resolve_type(tr, &own_scope, at)?;
-                if let Ty::Struct(_) = ty {
-                    return Err(CheckError::at(
-                        at,
-                        format!(
-                            "a payload cannot have a struct type yet: '{}' in '{name}'",
-                            self.display(ty, scope)
-                        ),
-                    ));
-                }
-                payload.push(ty);
+                payload.push(self.resolve_type(tr, &own_scope, at)?);
             }
             cases.push(CaseSig {
                 name: case.name().to_string(),
@@ -1007,7 +1063,22 @@ impl Signatures {
         self.display(ty, &[])
     }
 
+    pub fn optional_of(&self, ty: Ty) -> CResult<Ty> {
+        let id = self.instantiate_enum(0, vec![ty], &[], 0)?;
+        Ok(self.enum_ty(id))
+    }
+
+    pub fn unwrapped(&self, ty: Ty) -> Option<Ty> {
+        match self.origin_of(ty)? {
+            (Kind::Enum, 0, args) => args.first().copied(),
+            _ => None,
+        }
+    }
+
     pub fn display(&self, ty: Ty, scope: &Scope) -> String {
+        if let Some(inner) = self.unwrapped(ty) {
+            return format!("{}?", self.display(inner, scope));
+        }
         match ty {
             Ty::Int => "Int".to_string(),
             Ty::Bool => "Bool".to_string(),

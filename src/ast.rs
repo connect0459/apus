@@ -528,6 +528,8 @@ impl PartialEq for Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
+    Nil,
+    Unwrap(Box<Expr>),
     Int(i64),
     Bool(bool),
     Str(String),

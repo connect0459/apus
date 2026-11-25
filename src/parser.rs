@@ -19,10 +19,10 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 22] = [
-    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "case",
-    "switch", "default", "var", "let", "if", "else", "while", "for", "in", "return", "true",
-    "false",
+const KEYWORDS: [&str; 23] = [
+    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "nil",
+    "case", "switch", "default", "var", "let", "if", "else", "while", "for", "in", "return",
+    "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -190,7 +190,20 @@ impl Parser<'_> {
         } else {
             Vec::new()
         };
-        Ok(TypeRef::new(name, args))
+        let mut ty = TypeRef::new(name, args);
+        loop {
+            let wraps = if self.eat_punct("??") {
+                2
+            } else if self.eat_punct("?") {
+                1
+            } else {
+                break;
+            };
+            for _ in 0..wraps {
+                ty = TypeRef::new("Optional".to_string(), vec![ty]);
+            }
+        }
+        Ok(ty)
     }
 
     fn type_args(&mut self) -> PResult<Vec<TypeRef>> {
@@ -691,6 +704,11 @@ impl Parser<'_> {
                 expr = Expr::new(line, ExprKind::GenericName { name, type_args });
                 continue;
             }
+            if self.is_punct("!") {
+                self.pos += 1;
+                expr = Expr::new(line, ExprKind::Unwrap(Box::new(expr)));
+                continue;
+            }
             if self.eat_punct(".") {
                 let after_super = matches!(expr.kind(), ExprKind::Ident(n) if n == "super");
                 let name = if after_super && self.eat_keyword("init") {
@@ -789,6 +807,7 @@ impl Parser<'_> {
             Some(Token::Str(s)) => ExprKind::Str(s.clone()),
             Some(Token::Ident(s)) if s == "true" => ExprKind::Bool(true),
             Some(Token::Ident(s)) if s == "false" => ExprKind::Bool(false),
+            Some(Token::Ident(s)) if s == "nil" => ExprKind::Nil,
             Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => ExprKind::Ident(s.clone()),
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;

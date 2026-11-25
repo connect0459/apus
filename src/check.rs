@@ -5,7 +5,9 @@ use crate::ast::{
     UnaryOp,
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
-use crate::sigs::{CResult, EnumSig, FieldSig, FuncSig, PRINT, ParamSig, scope_of};
+use crate::sigs::{
+    CResult, EnumSig, FieldSig, FuncSig, NONE_CASE, PRINT, ParamSig, SOME_CASE, scope_of,
+};
 use crate::tir::{LocalId, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
@@ -231,6 +233,52 @@ impl FnCx<'_> {
                 ),
             ))
         }
+    }
+
+    fn convertible(&self, expected: Ty, found: Ty) -> bool {
+        expected == found
+            || self.sigs.is_subclass(found, expected)
+            || self
+                .sigs
+                .unwrapped(expected)
+                .is_some_and(|inner| self.convertible(inner, found))
+    }
+
+    fn coerce(&self, line: u32, expected: Ty, value: TExpr) -> CResult<TExpr> {
+        let found = value.ty();
+        if expected == found || self.sigs.is_subclass(found, expected) {
+            return Ok(value);
+        }
+        if let Some(inner) = self.sigs.unwrapped(expected)
+            && self.convertible(inner, found)
+        {
+            let payload = self.coerce(line, inner, value)?;
+            return Ok(TExpr::StructInit {
+                ty: expected,
+                args: vec![TExpr::Int(SOME_CASE as i64), payload],
+            });
+        }
+        self.expect(line, expected, found)?;
+        Ok(value)
+    }
+
+    fn none_of(&self, ty: Ty) -> TExpr {
+        let inner = self.sigs.unwrapped(ty).unwrap_or(Ty::Int);
+        TExpr::StructInit {
+            ty,
+            args: vec![TExpr::Int(NONE_CASE as i64), TExpr::Zero(inner)],
+        }
+    }
+
+    fn pad_payload(&self, ty: Ty, mut args: Vec<TExpr>) -> Vec<TExpr> {
+        if let Ty::Struct(id) = ty
+            && let Some(layout) = self.sigs.struct_sig(id)
+        {
+            for field in layout.fields().iter().skip(args.len()) {
+                args.push(TExpr::Zero(field.ty()));
+            }
+        }
+        args
     }
 
     fn declare(&mut self, line: u32, name: &str, ty: Ty, mutable: bool) -> CResult<LocalId> {
@@ -523,9 +571,9 @@ impl FnCx<'_> {
                     None => None,
                 };
                 self.expected = annotated;
-                let value = self.value(init)?;
+                let mut value = self.value(init)?;
                 if let Some(annotated) = annotated {
-                    self.expect(line, annotated, value.ty())?;
+                    value = self.coerce(line, annotated, value)?;
                 }
                 let local = self.declare(line, name, value.ty(), *mutable)?;
                 Ok(TStmt::Let { local, init: value })
@@ -606,6 +654,7 @@ impl FnCx<'_> {
                 format!("cannot assign to '{name}': it is a constant"),
             ));
         }
+        self.expected = Some(binding.ty);
         let rhs = self.value(value)?;
         let current = TExpr::Local(binding.local, binding.ty);
         let new_value = self.assigned_value(line, binding.ty, current, op, rhs)?;
@@ -663,6 +712,7 @@ impl FnCx<'_> {
             ));
         }
         let field_ty = field.ty();
+        self.expected = Some(field_ty);
         let rhs = self.value(value)?;
         let current = TExpr::Field {
             base: Box::new(TExpr::Local(binding.local, binding.ty)),
@@ -686,10 +736,7 @@ impl FnCx<'_> {
         rhs: TExpr,
     ) -> CResult<TExpr> {
         match op {
-            None => {
-                self.expect(line, target_ty, rhs.ty())?;
-                Ok(rhs)
-            }
+            None => self.coerce(line, target_ty, rhs),
             Some(op) => {
                 self.expect(line, Ty::Int, target_ty)?;
                 self.expect(line, Ty::Int, rhs.ty())?;
@@ -747,7 +794,7 @@ impl FnCx<'_> {
             (Some(expr), ret) => {
                 self.expected = Some(ret);
                 let value = self.value(expr)?;
-                self.expect(line, ret, value.ty())?;
+                let value = self.coerce(line, ret, value)?;
                 Ok(TStmt::Return(Some(value)))
             }
         }
@@ -772,7 +819,7 @@ impl FnCx<'_> {
             (Some(expr), ret) => {
                 self.expected = Some(ret);
                 let value = self.value(expr)?;
-                self.expect(line, ret, value.ty())?;
+                let value = self.coerce(line, ret, value)?;
                 let local = LocalId::new(self.locals.len());
                 self.locals.push(ret);
                 body.push(TStmt::Let { local, init: value });
@@ -882,6 +929,40 @@ impl FnCx<'_> {
         let line = expr.line();
         let expected = self.expected.take();
         match expr.kind() {
+            ExprKind::Nil => match expected {
+                Some(ty) if self.sigs.unwrapped(ty).is_some() => Ok(self.none_of(ty)),
+                Some(ty) => Err(CheckError::at(
+                    line,
+                    format!("nil cannot be a value of type {}", self.name_of(ty)),
+                )),
+                None => Err(CheckError::at(
+                    line,
+                    "nil needs a type from its context, such as 'let x: Int? = nil'",
+                )),
+            },
+            ExprKind::Unwrap(inner) => {
+                let base = self.value(inner)?;
+                let ty = self.sigs.unwrapped(base.ty()).ok_or_else(|| {
+                    CheckError::at(
+                        line,
+                        format!(
+                            "'!' needs an optional, but found {}",
+                            self.name_of(base.ty())
+                        ),
+                    )
+                })?;
+                Ok(TExpr::Unwrap {
+                    base: Box::new(base),
+                    ty,
+                })
+            }
+            ExprKind::Binary { op, lhs, rhs }
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && (matches!(lhs.kind(), ExprKind::Nil)
+                        || matches!(rhs.kind(), ExprKind::Nil)) =>
+            {
+                self.nil_comparison(line, *op, lhs, rhs)
+            }
             ExprKind::Int(n) => Ok(TExpr::Int(*n)),
             ExprKind::Bool(b) => Ok(TExpr::Bool(*b)),
             ExprKind::Str(text) if text.contains('\0') => Err(CheckError::at(
@@ -1019,6 +1100,9 @@ impl FnCx<'_> {
         let mut checked = vec![receiver];
         for (arg, param) in args.iter().zip(params) {
             self.expect_label(line, arg, param.label())?;
+            if !sigs.has_param(param.ty()) {
+                self.expected = Some(param.ty());
+            }
             checked.push(self.value(arg.value())?);
         }
         let call = self.finish_call(line, &qualified, sig, checked, expected, None)?;
@@ -1221,7 +1305,24 @@ impl FnCx<'_> {
         }
         let callee_scope = scope_of(generics);
         for (pattern, value) in patterns.iter().zip(values) {
-            if !self.sigs.unify(*pattern, value.ty(), &mut bound) {
+            if !self.sigs.has_param(*pattern) {
+                continue;
+            }
+            let mut candidate = *pattern;
+            let mut unified = false;
+            loop {
+                let mut attempt = bound.clone();
+                if self.sigs.unify(candidate, value.ty(), &mut attempt) {
+                    bound = attempt;
+                    unified = true;
+                    break;
+                }
+                match self.sigs.unwrapped(candidate) {
+                    Some(inner) => candidate = inner,
+                    None => break,
+                }
+            }
+            if !unified {
                 let wanted = match pattern {
                     Ty::Param(index) => bound.get(*index).copied().flatten().unwrap_or(*pattern),
                     other => *other,
@@ -1305,7 +1406,7 @@ impl FnCx<'_> {
         if sig.has_payload() {
             Ok(TExpr::StructInit {
                 ty,
-                args: vec![TExpr::Int(index as i64)],
+                args: self.pad_payload(ty, vec![TExpr::Int(index as i64)]),
             })
         } else {
             Ok(TExpr::EnumCase { ty, index })
@@ -1357,9 +1458,12 @@ impl FnCx<'_> {
             ));
         }
         let mut values = Vec::with_capacity(args.len());
-        for arg in args {
+        for (arg, wanted) in args.iter().zip(&payload) {
             if arg.label().is_some() {
                 return Err(CheckError::at(line, "a payload value cannot be labeled"));
+            }
+            if !inferring {
+                self.expected = Some(*wanted);
             }
             values.push(self.value(arg.value())?);
         }
@@ -1368,16 +1472,49 @@ impl FnCx<'_> {
             let type_args = self.infer(line, &base_name, generics, &payload, &values, context)?;
             sigs.instantiate_enum(def, type_args, &self.scope, line)?
         } else {
-            for (value, expected) in values.iter().zip(&payload) {
-                self.expect(line, *expected, value.ty())?;
+            let mut coerced = Vec::with_capacity(values.len());
+            for (value, expected) in values.into_iter().zip(&payload) {
+                coerced.push(self.coerce(line, *expected, value)?);
             }
+            values = coerced;
             pattern_id
         };
         let mut slots = vec![TExpr::Int(index as i64)];
         slots.extend(values);
+        let ty = sigs.enum_ty(id);
         Ok(TExpr::StructInit {
-            ty: sigs.enum_ty(id),
-            args: slots,
+            ty,
+            args: self.pad_payload(ty, slots),
+        })
+    }
+
+    fn nil_comparison(&mut self, line: u32, op: BinOp, lhs: &Expr, rhs: &Expr) -> CResult<TExpr> {
+        let subject = if matches!(rhs.kind(), ExprKind::Nil) {
+            lhs
+        } else {
+            rhs
+        };
+        if matches!(subject.kind(), ExprKind::Nil) {
+            return Err(CheckError::at(line, "nil cannot be compared with nil"));
+        }
+        let value = self.value(subject)?;
+        if self.sigs.unwrapped(value.ty()).is_none() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "a value of type {} is not an optional, so it cannot be compared with nil",
+                    self.name_of(value.ty())
+                ),
+            ));
+        }
+        Ok(TExpr::Binary {
+            op,
+            lhs: Box::new(TExpr::Field {
+                base: Box::new(value),
+                index: 0,
+                ty: Ty::Int,
+            }),
+            rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
         })
     }
 
@@ -1478,6 +1615,9 @@ impl FnCx<'_> {
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(sig.params()) {
             self.expect_label(line, arg, param.label())?;
+            if !sigs.has_param(param.ty()) {
+                self.expected = Some(param.ty());
+            }
             checked.push(self.value(arg.value())?);
         }
         let explicit = match explicit {
@@ -1524,25 +1664,18 @@ impl FnCx<'_> {
             given
         } else {
             let context = expected.map(|e| (sig.ret(), e));
-            let inferred =
-                self.infer(line, callee, sig.generics(), &patterns, &checked, context)?;
-            let ret = sigs.subst(sig.ret(), &inferred, &self.scope, line)?;
-            return Ok(TExpr::Call {
-                callee: callee.to_string(),
-                type_args: inferred,
-                args: checked,
-                ret,
-            });
+            self.infer(line, callee, sig.generics(), &patterns, &checked, context)?
         };
-        for (pattern, value) in patterns.iter().zip(&checked) {
+        let mut args = Vec::with_capacity(checked.len());
+        for (pattern, value) in patterns.iter().zip(checked) {
             let wanted = sigs.subst(*pattern, &type_args, &self.scope, line)?;
-            self.expect(line, wanted, value.ty())?;
+            args.push(self.coerce(line, wanted, value)?);
         }
         let ret = sigs.subst(sig.ret(), &type_args, &self.scope, line)?;
         Ok(TExpr::Call {
             callee: callee.to_string(),
             type_args,
-            args: checked,
+            args,
             ret,
         })
     }
@@ -1620,9 +1753,12 @@ impl FnCx<'_> {
                     ),
                 ));
             }
-            let value = self.value(arg.value())?;
             if !inferring {
-                self.expect(line, field.ty(), value.ty())?;
+                self.expected = Some(field.ty());
+            }
+            let mut value = self.value(arg.value())?;
+            if !inferring {
+                value = self.coerce(line, field.ty(), value)?;
             }
             values.push(value);
         }
@@ -2144,10 +2280,18 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_cannot_be_a_struct_or_an_enum_that_carries_values() {
-        assert!(check_all("struct P { var x: Int }\nenum E { case a(P) }").is_err());
-        assert!(check_all("enum A { case x(Int) }\nenum B { case y(A) }").is_err());
+    fn a_payload_can_be_a_struct_or_an_enum_that_carries_values() {
+        assert!(check_all("struct P { var x: Int }\nenum E { case a(P) }").is_ok());
+        assert!(check_all("enum A { case x(Int) }\nenum B { case y(A) }").is_ok());
         assert!(check_all("enum E { case a(Missing) }").is_err());
+    }
+
+    #[test]
+    fn payloads_at_the_same_position_must_agree_when_they_are_structs_or_classes() {
+        let source = "struct P { var x: Int }\nstruct Q { var y: Int }\nenum E { case a(P)\n case b(Q) }\nfunc f(_ e: E) { }";
+        assert!(check_all(source).is_err());
+        let same = "struct P { var x: Int }\nenum E { case a(P)\n case b(P) }\nfunc f(_ e: E) { }";
+        assert!(check_all(same).is_ok());
     }
 
     #[test]

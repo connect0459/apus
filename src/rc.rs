@@ -555,6 +555,10 @@ impl Pass<'_> {
                 lhs: Box::new(self.borrowed(lhs)),
                 rhs: Box::new(self.borrowed(rhs)),
             },
+            TExpr::Unwrap { base, ty } => TExpr::Unwrap {
+                base: Box::new(self.borrowed(base)),
+                ty: *ty,
+            },
             TExpr::Moved(inner) => TExpr::Moved(Box::new(match &**inner {
                 TExpr::Field { base, index, ty } => TExpr::Field {
                     base: Box::new(self.borrowed(base)),

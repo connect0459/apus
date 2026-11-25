@@ -188,6 +188,10 @@ pub enum TExpr {
         init: Box<TExpr>,
     },
     FuncAddr(String),
+    Unwrap {
+        base: Box<TExpr>,
+        ty: Ty,
+    },
     RetainUnowned(Box<TExpr>),
     LoadUnowned(Box<TExpr>),
 }
@@ -211,6 +215,7 @@ impl TExpr {
             | TExpr::LoadUnowned(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::FuncAddr(_) => Ty::Int,
+            TExpr::Unwrap { ty, .. } => *ty,
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
             | TExpr::Field { ty, .. }
@@ -387,6 +392,10 @@ impl<E> Rewriter<'_, E> {
                 init: Box::new(self.expr(init)?),
             },
             TExpr::FuncAddr(_) => expr.clone(),
+            TExpr::Unwrap { base, ty } => TExpr::Unwrap {
+                base: Box::new(self.expr(base)?),
+                ty: (self.ty)(*ty)?,
+            },
             TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner)?)),
             TExpr::LoadUnowned(inner) => TExpr::LoadUnowned(Box::new(self.expr(inner)?)),
         })
