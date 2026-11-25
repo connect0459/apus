@@ -186,6 +186,7 @@ impl EnumSig {
 enum Origin {
     Struct { def: usize, args: Vec<Ty> },
     EnumLayout(EnumId),
+    EnumCell(EnumId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +206,8 @@ struct Instances {
     enum_index: HashMap<(usize, Vec<Ty>), EnumId>,
     enum_pending: HashSet<(usize, Vec<Ty>)>,
     layout_owner: HashMap<StructId, EnumId>,
+    cell_owner: HashMap<StructId, EnumId>,
+    cell_index: HashMap<EnumId, StructId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -328,7 +331,11 @@ impl Signatures {
         };
         let scope = scope_of(&generics);
         let receiver = owner_ty.filter(|_| !func.is_init());
-        let mut params: Vec<ParamSig> = receiver
+        let receiver_param = receiver.map(|ty| match ty {
+            Ty::Enum(id) if func.is_mutating() => self.enum_cell(id),
+            other => other,
+        });
+        let mut params: Vec<ParamSig> = receiver_param
             .map(|ty| ParamSig { label: None, ty })
             .into_iter()
             .collect();
@@ -377,15 +384,6 @@ impl Signatures {
             return Err(CheckError::at(
                 line,
                 format!("a method of the class '{owner}' cannot be mutating"),
-            ));
-        }
-        if func.is_mutating() && matches!(ty, Ty::Enum(_)) {
-            return Err(CheckError::at(
-                line,
-                format!(
-                    "'{}' cannot be mutating: only an enum with payloads can have mutating methods yet",
-                    func.name()
-                ),
             ));
         }
         Ok((ty, generics))
@@ -675,6 +673,33 @@ impl Signatures {
         }
     }
 
+    fn enum_cell(&mut self, id: EnumId) -> Ty {
+        let mut instances = self.instances.borrow_mut();
+        if let Some(cell) = instances.cell_index.get(&id) {
+            return Ty::Struct(*cell);
+        }
+        let name = format!("{}.self", instances.enums[id.index()].name);
+        let cell = StructId::new(instances.structs.len());
+        instances.structs.push(Rc::new(StructSig {
+            name,
+            fields: vec![FieldSig {
+                name: "value".to_string(),
+                ty: Ty::Int,
+                mutable: true,
+            }],
+        }));
+        instances.struct_origin.push(Origin::EnumCell(id));
+        instances.cell_owner.insert(cell, id);
+        instances.cell_index.insert(id, cell);
+        Ty::Struct(cell)
+    }
+
+    pub fn cell_enum(&self, ty: Ty) -> Option<Ty> {
+        let Ty::Struct(cell) = ty else { return None };
+        let id = self.instances.borrow().cell_owner.get(&cell).copied()?;
+        Some(Ty::Enum(id))
+    }
+
     pub fn enum_of(&self, ty: Ty) -> Option<Rc<EnumSig>> {
         let instances = self.instances.borrow();
         match ty {
@@ -751,7 +776,7 @@ impl Signatures {
         match ty {
             Ty::Struct(id) | Ty::Class(id) => match instances.struct_origin.get(id.index())? {
                 Origin::Struct { def, args } => Some((Kind::Struct, *def, args.clone())),
-                Origin::EnumLayout(owner) => {
+                Origin::EnumLayout(owner) | Origin::EnumCell(owner) => {
                     let (def, args) = instances.enum_origin.get(owner.index())?;
                     Some((Kind::Enum, *def, args.clone()))
                 }

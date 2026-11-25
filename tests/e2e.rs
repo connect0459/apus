@@ -727,10 +727,78 @@ fn a_class_method_cannot_be_mutating() {
     assert!(build_error(source).contains("class"));
 }
 
+const LIGHT: &str = "enum Light {\n  case red, green, blue\n  mutating func next() {\n    switch self {\n    case .red: self = Light.green\n    case .green: self = Light.blue\n    case .blue: self = Light.red\n    }\n  }\n}\n";
+
 #[test]
-fn a_mutating_method_of_an_enum_without_payloads_is_rejected() {
-    let source = "enum E { case a, b\n  mutating func flip() { self = E.b } }\nfunc main() { }";
-    assert!(build_error(source).contains("payload"));
+fn a_mutating_method_of_an_enum_without_payloads_replaces_the_variable() {
+    let source = format!(
+        "{LIGHT}func main() {{\n  var l = Light.red\n  l.next()\n  print(l == Light.green)\n  l.next()\n  l.next()\n  print(l == Light.red)\n}}"
+    );
+    assert_eq!(run(&source), "true\ntrue\n");
+}
+
+#[test]
+fn a_mutating_enum_method_does_not_change_a_copy_made_before_the_call() {
+    let source = format!(
+        "{LIGHT}func main() {{\n  var l = Light.red\n  let before = l\n  l.next()\n  print(before == Light.red)\n}}"
+    );
+    assert_eq!(run(&source), "true\n");
+}
+
+#[test]
+fn a_mutating_enum_method_may_call_another_on_self() {
+    let source = "enum Light {\n  case red, green, blue\n  mutating func next() {\n    switch self {\n    case .red: self = Light.green\n    case .green: self = Light.blue\n    case .blue: self = Light.red\n    }\n  }\n  mutating func skip() {\n    self.next()\n    next()\n  }\n}\n\
+         func main() {\n  var l = Light.red\n  l.skip()\n  print(l == Light.blue)\n}";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn a_mutating_enum_method_writes_back_when_it_returns_early() {
+    let source = "enum Flag {\n  case off, on\n  mutating func turnOn(force: Bool) {\n    self = Flag.on\n    if force { return }\n    self = Flag.off\n  }\n}\n\
+         func main() {\n  var f = Flag.off\n  f.turnOn(force: true)\n  print(f == Flag.on)\n  f.turnOn(force: false)\n  print(f == Flag.on)\n}";
+    assert_eq!(run(source), "true\nfalse\n");
+}
+
+#[test]
+fn a_mutating_enum_method_may_take_arguments_and_leave_a_result_unused() {
+    let source = "enum Flag {\n  case off, on\n  mutating func set(to value: Bool) -> Int {\n    if value { self = Flag.on } else { self = Flag.off }\n    return 7\n  }\n}\n\
+         func main() {\n  var f = Flag.off\n  f.set(to: true)\n  print(f == Flag.on)\n}";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn a_mutating_enum_method_works_on_a_variable_in_a_nested_block() {
+    let source = format!(
+        "{LIGHT}func main() {{\n  var l = Light.red\n  var i = 0\n  while i < 3 {{\n    l.next()\n    i += 1\n  }}\n  print(l == Light.red)\n}}"
+    );
+    assert_eq!(run(&source), "true\n");
+}
+
+#[test]
+fn a_mutating_enum_method_without_a_result_cannot_return_a_value() {
+    let source =
+        "enum Flag {\n  case off, on\n  mutating func f() { return 1 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("does not return a value"));
+}
+
+#[test]
+fn a_mutating_enum_method_with_a_result_cannot_return_nothing() {
+    let source =
+        "enum Flag {\n  case off, on\n  mutating func f() -> Int { return }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("must return a value"));
+}
+
+#[test]
+fn a_mutating_enum_method_cannot_be_called_on_a_constant() {
+    let source = format!("{LIGHT}func main() {{\n  let l = Light.red\n  l.next()\n}}");
+    assert!(build_error(&source).contains("mutating"));
+}
+
+#[test]
+fn the_result_of_a_mutating_enum_method_cannot_be_used_in_an_expression() {
+    let source = "enum Flag {\n  case off, on\n  mutating func flip() -> Int {\n    self = Flag.on\n    return 1\n  }\n}\n\
+         func main() {\n  var f = Flag.off\n  let n = f.flip()\n  print(n)\n}";
+    assert!(build_error(source).contains("statement"));
 }
 
 #[test]

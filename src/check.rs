@@ -26,10 +26,21 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         locals: Vec::new(),
         scopes: vec![HashMap::new()],
         init_self: None,
+        cell_self: None,
+        cell_call: CellCall::default(),
     };
     let receiver = sig.has_receiver();
+    let mut cell_enum = None;
     if let Some(self_sig) = sig.params().first().filter(|_| receiver) {
-        cx.declare(func.line(), "self", self_sig.ty(), sig.is_mutating())?;
+        match cx.sigs.cell_enum(self_sig.ty()) {
+            Some(enum_ty) => {
+                let cell = cx.declare(func.line(), "self$cell", self_sig.ty(), false)?;
+                cell_enum = Some((cell, enum_ty));
+            }
+            None => {
+                cx.declare(func.line(), "self", self_sig.ty(), sig.is_mutating())?;
+            }
+        }
     }
     for (param, param_sig) in func
         .params()
@@ -40,11 +51,29 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     }
     let prelude = if func.is_init() {
         init_prelude(&mut cx, func, sig.ret())?
+    } else if let Some((cell, enum_ty)) = cell_enum {
+        let value = cx.declare(func.line(), "self", enum_ty, true)?;
+        cx.cell_self = Some(CellSelf {
+            cell,
+            value,
+            ty: enum_ty,
+        });
+        vec![TStmt::Let {
+            local: value,
+            init: TExpr::Field {
+                base: Box::new(TExpr::Local(cell, cx.locals[cell.index()])),
+                index: 0,
+                ty: enum_ty,
+            },
+        }]
     } else {
         Vec::new()
     };
     let mut body = cx.block(func.body())?;
-    if let Some(local) = cx.init_self {
+    if let Some(cell_self) = cx.cell_self {
+        body.splice(0..0, prelude);
+        body.push(cell_self.write_back());
+    } else if let Some(local) = cx.init_self {
         body.splice(0..0, prelude);
         body.push(TStmt::Return(Some(TExpr::Local(local, sig.ret()))));
     }
@@ -64,6 +93,16 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         cx.locals,
         body,
     ))
+}
+
+impl CellSelf {
+    fn write_back(self) -> TStmt {
+        TStmt::AssignField {
+            local: self.cell,
+            index: 0,
+            value: TExpr::Local(self.value, self.ty),
+        }
+    }
 }
 
 fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
@@ -144,6 +183,21 @@ struct FnCx<'a> {
     locals: Vec<Ty>,
     scopes: Vec<HashMap<String, Binding>>,
     init_self: Option<LocalId>,
+    cell_self: Option<CellSelf>,
+    cell_call: CellCall,
+}
+
+#[derive(Clone, Copy)]
+struct CellSelf {
+    cell: LocalId,
+    value: LocalId,
+    ty: Ty,
+}
+
+#[derive(Default)]
+struct CellCall {
+    allowed: bool,
+    pending: Option<(TStmt, TStmt)>,
 }
 
 impl FnCx<'_> {
@@ -208,6 +262,17 @@ impl FnCx<'_> {
         match stmt.kind() {
             StmtKind::Switch { subject, cases } => {
                 self.switch_stmt(stmt.line(), subject, cases, out)
+            }
+            StmtKind::Expr(_) => {
+                self.cell_call.allowed = true;
+                let checked = self.stmt(stmt);
+                self.cell_call.allowed = false;
+                let checked = checked?;
+                let pending = self.cell_call.pending.take();
+                out.extend(pending.as_ref().map(|(before, _)| before.clone()));
+                out.push(checked);
+                out.extend(pending.map(|(_, after)| after));
+                Ok(())
             }
             _ => {
                 out.push(self.stmt(stmt)?);
@@ -653,6 +718,9 @@ impl FnCx<'_> {
                 )),
             };
         }
+        if let Some(cell_self) = self.cell_self {
+            return self.return_writing_back(line, value, cell_self);
+        }
         match (value, self.ret) {
             (None, Ty::Void) => Ok(TStmt::Return(None)),
             (None, _) => Err(CheckError::at(line, "this function must return a value")),
@@ -667,6 +735,41 @@ impl FnCx<'_> {
                 Ok(TStmt::Return(Some(value)))
             }
         }
+    }
+
+    fn return_writing_back(
+        &mut self,
+        line: u32,
+        value: Option<&Expr>,
+        cell_self: CellSelf,
+    ) -> CResult<TStmt> {
+        let mut body = Vec::new();
+        let result = match (value, self.ret) {
+            (None, Ty::Void) => None,
+            (None, _) => return Err(CheckError::at(line, "this function must return a value")),
+            (Some(_), Ty::Void) => {
+                return Err(CheckError::at(
+                    line,
+                    "this function does not return a value",
+                ));
+            }
+            (Some(expr), ret) => {
+                self.expected = Some(ret);
+                let value = self.value(expr)?;
+                self.expect(line, ret, value.ty())?;
+                let local = LocalId::new(self.locals.len());
+                self.locals.push(ret);
+                body.push(TStmt::Let { local, init: value });
+                Some(TExpr::Local(local, ret))
+            }
+        };
+        body.push(cell_self.write_back());
+        body.push(TStmt::Return(result));
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: body,
+            else_body: Vec::new(),
+        })
     }
 
     fn for_stmt(&mut self, line: u32, var: &str, iter: &Expr, body: &[Stmt]) -> CResult<TStmt> {
@@ -874,6 +977,13 @@ impl FnCx<'_> {
                 ),
             ));
         }
+        let cell = sigs
+            .cell_enum(sig.params()[0].ty())
+            .map(|_| sig.params()[0].ty());
+        let receiver = match cell {
+            Some(cell_ty) => self.enum_cell_receiver(line, base, receiver, cell_ty)?,
+            None => receiver,
+        };
         let params = &sig.params()[1..];
         if args.len() != params.len() {
             return Err(CheckError::at(
@@ -891,6 +1001,47 @@ impl FnCx<'_> {
             checked.push(self.value(arg.value())?);
         }
         self.finish_call(line, &qualified, sig, checked, expected, None)
+    }
+
+    fn enum_cell_receiver(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        receiver: TExpr,
+        cell_ty: Ty,
+    ) -> CResult<TExpr> {
+        let ExprKind::Ident(name) = base.kind() else {
+            return Err(CheckError::at(
+                line,
+                "internal error: a cell needs a variable",
+            ));
+        };
+        if !self.cell_call.allowed || self.cell_call.pending.is_some() {
+            return Err(CheckError::at(
+                line,
+                "a mutating method of an enum must be called as a statement of its own, once per statement",
+            ));
+        }
+        let binding = self.lookup(name, line)?;
+        let cell = LocalId::new(self.locals.len());
+        self.locals.push(cell_ty);
+        let before = TStmt::Let {
+            local: cell,
+            init: TExpr::StructInit {
+                ty: cell_ty,
+                args: vec![receiver],
+            },
+        };
+        let after = TStmt::Assign {
+            local: binding.local,
+            value: TExpr::Field {
+                base: Box::new(TExpr::Local(cell, cell_ty)),
+                index: 0,
+                ty: binding.ty,
+            },
+        };
+        self.cell_call.pending = Some((before, after));
+        Ok(TExpr::Local(cell, cell_ty))
     }
 
     fn is_mutable_variable(&self, base: &Expr) -> bool {
