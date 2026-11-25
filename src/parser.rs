@@ -19,10 +19,10 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 29] = [
+const KEYWORDS: [&str; 30] = [
     "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "weak",
     "nil", "guard", "as", "is", "case", "switch", "default", "var", "let", "if", "else", "while",
-    "for", "in", "return", "break", "continue", "true", "false",
+    "for", "in", "return", "break", "continue", "protocol", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -220,20 +220,88 @@ impl Parser<'_> {
         Ok(args)
     }
 
-    fn generic_params(&mut self) -> PResult<Vec<String>> {
+    fn generic_params(&mut self) -> PResult<(Vec<String>, Vec<Vec<String>>)> {
         if !self.eat_punct("<") {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
-        let mut names = vec![self.name()?];
-        while self.eat_punct(",") {
+        let mut names = Vec::new();
+        let mut bounds = Vec::new();
+        loop {
             let name = self.name()?;
             if names.contains(&name) {
                 return self.fail("duplicate generic parameter");
             }
             names.push(name);
+            let mut bound = Vec::new();
+            if self.eat_punct(":") {
+                bound.push(self.name()?);
+                while self.eat_punct("&") {
+                    bound.push(self.name()?);
+                }
+            }
+            bounds.push(bound);
+            if !self.eat_punct(",") {
+                break;
+            }
         }
         self.expect_punct(">")?;
+        Ok((names, bounds))
+    }
+
+    fn conformance_list(&mut self) -> PResult<Vec<String>> {
+        let mut names = Vec::new();
+        if self.eat_punct(":") {
+            names.push(self.name()?);
+            while self.eat_punct(",") {
+                names.push(self.name()?);
+            }
+        }
         Ok(names)
+    }
+
+    fn protocol_decl(&mut self, line: u32) -> PResult<ProtocolDecl> {
+        let name = self.name()?;
+        self.expect_punct("{")?;
+        let mut requirements = Vec::new();
+        loop {
+            while self.eat_punct(";") {}
+            if self.eat_punct("}") {
+                break;
+            }
+            let requirement_line = self.line();
+            let mutating = self.eat_keyword("mutating");
+            self.expect_keyword("func")?;
+            let requirement = self.requirement(requirement_line)?;
+            requirements.push(if mutating {
+                requirement.as_mutating()
+            } else {
+                requirement
+            });
+            self.end_of_statement()?;
+        }
+        Ok(ProtocolDecl::new(line, name, requirements))
+    }
+
+    fn requirement(&mut self, line: u32) -> PResult<FuncDecl> {
+        let name = self.name()?;
+        self.expect_punct("(")?;
+        let mut params = Vec::new();
+        while !self.is_punct(")") {
+            if !params.is_empty() {
+                self.expect_punct(",")?;
+            }
+            params.push(self.param()?);
+        }
+        self.expect_punct(")")?;
+        let ret = if self.eat_punct("->") {
+            Some(self.type_ref()?)
+        } else {
+            None
+        };
+        if self.is_punct("{") {
+            return self.fail("a protocol requirement cannot have a body");
+        }
+        Ok(FuncDecl::new(line, name, params, ret, Vec::new()))
     }
 
     fn decl(&mut self) -> PResult<Decl> {
@@ -256,14 +324,16 @@ impl Parser<'_> {
             self.struct_decl(line, true).map(Decl::Struct)
         } else if self.eat_keyword("enum") {
             self.enum_decl(line).map(Decl::Enum)
+        } else if self.eat_keyword("protocol") {
+            self.protocol_decl(line).map(Decl::Protocol)
         } else {
-            self.fail("expected 'func', 'struct', 'class' or 'enum'")
+            self.fail("expected 'func', 'struct', 'class', 'enum' or 'protocol'")
         }
     }
 
     fn func_decl(&mut self, line: u32) -> PResult<FuncDecl> {
         let name = self.name()?;
-        let generics = self.generic_params()?;
+        let (generics, bounds) = self.generic_params()?;
         self.expect_punct("(")?;
         let mut params = Vec::new();
         while !self.is_punct(")") {
@@ -284,7 +354,9 @@ impl Parser<'_> {
         } else {
             self.block()?
         };
-        Ok(FuncDecl::new(line, name, params, ret, body).with_generics(generics))
+        Ok(FuncDecl::new(line, name, params, ret, body)
+            .with_generics(generics)
+            .with_bounds(bounds))
     }
 
     fn deinit_decl(&mut self, line: u32) -> PResult<FuncDecl> {
@@ -298,7 +370,7 @@ impl Parser<'_> {
     }
 
     fn init_decl(&mut self, line: u32) -> PResult<FuncDecl> {
-        let generics = self.generic_params()?;
+        let (generics, bounds) = self.generic_params()?;
         self.expect_punct("(")?;
         let mut params = Vec::new();
         while !self.is_punct(")") {
@@ -316,6 +388,7 @@ impl Parser<'_> {
         };
         Ok(FuncDecl::new(line, "init".to_string(), params, None, body)
             .with_generics(generics)
+            .with_bounds(bounds)
             .as_init())
     }
 
@@ -339,15 +412,15 @@ impl Parser<'_> {
 
     fn struct_decl(&mut self, line: u32, class: bool) -> PResult<StructDecl> {
         let name = self.name()?;
-        let generics = self.generic_params()?;
-        let superclass = if class && self.eat_punct(":") {
-            let superclass = self.name()?;
-            if self.is_punct("<") {
-                return self.fail(
-                    "a superclass cannot take type arguments: generic classes cannot take part in inheritance yet",
-                );
-            }
-            Some(superclass)
+        let (generics, bounds) = self.generic_params()?;
+        let mut inherited = self.conformance_list()?;
+        if self.is_punct("<") {
+            return self.fail(
+                "a superclass cannot take type arguments: generic classes cannot take part in inheritance yet",
+            );
+        }
+        let superclass = if class && !inherited.is_empty() {
+            Some(inherited.remove(0))
         } else {
             None
         };
@@ -393,7 +466,10 @@ impl Parser<'_> {
             fields.push(if weak { field.as_weak() } else { field });
             self.end_of_statement()?;
         }
-        let decl = StructDecl::new(line, name, fields).with_generics(generics);
+        let decl = StructDecl::new(line, name, fields)
+            .with_generics(generics)
+            .with_bounds(bounds)
+            .with_conformances(inherited);
         let decl = match superclass {
             Some(superclass) => decl.with_superclass(superclass),
             None => decl,
@@ -403,7 +479,8 @@ impl Parser<'_> {
 
     fn enum_decl(&mut self, line: u32) -> PResult<EnumDecl> {
         let name = self.name()?;
-        let generics = self.generic_params()?;
+        let (generics, bounds) = self.generic_params()?;
+        let conformances = self.conformance_list()?;
         self.expect_punct("{")?;
         let mut cases = Vec::new();
         loop {
@@ -418,7 +495,10 @@ impl Parser<'_> {
             }
             self.end_of_statement()?;
         }
-        Ok(EnumDecl::new(line, name, cases).with_generics(generics))
+        Ok(EnumDecl::new(line, name, cases)
+            .with_generics(generics)
+            .with_bounds(bounds)
+            .with_conformances(conformances))
     }
 
     fn enum_case_decl(&mut self) -> PResult<EnumCaseDecl> {
@@ -1249,8 +1329,12 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_cannot_name_a_superclass() {
-        assert!(try_parse("struct S: A { var x: Int }").is_err());
+    fn the_name_after_a_struct_is_a_conformance_and_never_a_superclass() {
+        let Decl::Struct(s) = try_parse("struct S: A { var x: Int }").unwrap() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(s.superclass(), None);
+        assert_eq!(s.conformances(), ["A"]);
     }
 
     #[test]
@@ -1784,6 +1868,75 @@ mod tests {
                 st(StmtKind::Expr(unary(UnaryOp::Neg, int(2)))),
             ]
         );
+    }
+
+    fn protocol(src: &str) -> ProtocolDecl {
+        match try_parse(src).unwrap() {
+            Decl::Protocol(p) => p,
+            other => panic!("expected a protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_protocol_lists_method_requirements_without_bodies() {
+        let p = protocol(
+            "protocol Shape {\n  func area() -> Int\n  mutating func grow(by: Int)\n  func same(_ other: Self) -> Bool\n}",
+        );
+        assert_eq!(p.name(), "Shape");
+        let names: Vec<&str> = p.requirements().iter().map(|r| r.name()).collect();
+        assert_eq!(names, ["area", "grow", "same"]);
+        assert!(!p.requirements()[0].is_mutating());
+        assert!(p.requirements()[1].is_mutating());
+        assert_eq!(p.requirements()[0].ret(), Some(&TypeRef::from("Int")));
+        assert_eq!(p.requirements()[2].params()[0].ty(), &TypeRef::from("Self"));
+    }
+
+    #[test]
+    fn an_empty_protocol_is_allowed() {
+        assert!(protocol("protocol Marker { }").requirements().is_empty());
+    }
+
+    #[test]
+    fn a_protocol_requirement_cannot_have_a_body() {
+        assert!(try_parse("protocol P {\n  func f() { }\n}").is_err());
+    }
+
+    #[test]
+    fn a_type_lists_the_protocols_it_conforms_to() {
+        let Decl::Struct(s) = try_parse("struct S: P, Q { var x: Int }").unwrap() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(s.conformances(), ["P", "Q"]);
+        assert_eq!(s.superclass(), None);
+        let Decl::Enum(e) = try_parse("enum E: P { case a }").unwrap() else {
+            panic!("expected an enum");
+        };
+        assert_eq!(e.conformances(), ["P"]);
+    }
+
+    #[test]
+    fn the_first_name_after_a_class_is_its_superclass_and_the_rest_are_protocols() {
+        let Decl::Struct(c) = try_parse("class C: Base, P { var x: Int }").unwrap() else {
+            panic!("expected a class");
+        };
+        assert_eq!(c.superclass(), Some("Base"));
+        assert_eq!(c.conformances(), ["P"]);
+    }
+
+    #[test]
+    fn type_parameters_may_be_constrained_by_protocols() {
+        let f = func("func f<T: P & Q, U>(_ x: T, _ y: U) { }");
+        assert_eq!(f.generics(), ["T", "U"]);
+        assert_eq!(f.bound(0), ["P", "Q"]);
+        assert!(f.bound(1).is_empty());
+        let Decl::Struct(s) = try_parse("struct Box<T: P> { var v: T }").unwrap() else {
+            panic!("expected a struct");
+        };
+        assert_eq!(s.bound(0), ["P"]);
+        let Decl::Enum(e) = try_parse("enum Opt<T: P> { case none }").unwrap() else {
+            panic!("expected an enum");
+        };
+        assert_eq!(e.bound(0), ["P"]);
     }
 
     #[test]

@@ -388,7 +388,7 @@ mod tests {
             .iter()
             .filter_map(|d| match d {
                 Decl::Func(f) => Some(f),
-                Decl::Struct(_) | Decl::Enum(_) => None,
+                Decl::Struct(_) | Decl::Enum(_) | Decl::Protocol(_) => None,
             })
             .map(|f| {
                 let checked = check_func(f, &sigs).unwrap();

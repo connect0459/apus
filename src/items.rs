@@ -6,6 +6,7 @@ pub enum ItemKind {
     Func,
     Struct,
     Enum,
+    Protocol,
     Method,
 }
 
@@ -82,11 +83,13 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             Token::Ident(k) if k == "func" => ItemKind::Func,
             Token::Ident(k) if k == "struct" || k == "class" => ItemKind::Struct,
             Token::Ident(k) if k == "enum" => ItemKind::Enum,
+            Token::Ident(k) if k == "protocol" => ItemKind::Protocol,
             _ => {
                 return Err(SplitError {
                     line: tokens[i].line(),
-                    message: "expected 'func', 'struct', 'class' or 'enum' at top level"
-                        .to_string(),
+                    message:
+                        "expected 'func', 'struct', 'class', 'enum' or 'protocol' at top level"
+                            .to_string(),
                 });
             }
         };
@@ -140,12 +143,13 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         let members = match kind {
             ItemKind::Func | ItemKind::Method => Vec::new(),
             ItemKind::Struct | ItemKind::Enum => extract_members(&mut slice)?,
+            ItemKind::Protocol => Vec::new(),
         };
         let hash = hash_tokens(&slice);
         let generic = kind == ItemKind::Func
             && matches!(slice.get(2).map(|t| t.token()), Some(Token::Punct(p)) if p == "<");
         let signature_hash = match kind {
-            ItemKind::Struct | ItemKind::Enum => hash,
+            ItemKind::Struct | ItemKind::Enum | ItemKind::Protocol => hash,
             ItemKind::Func if generic => hash,
             ItemKind::Method => hash,
             ItemKind::Func => {
@@ -361,6 +365,24 @@ mod tests {
         let found = items("enum Color { case red, green }\nfunc f() { }");
         assert_eq!(found[0].kind(), ItemKind::Enum);
         assert_eq!(found[0].name(), "Color");
+    }
+
+    #[test]
+    fn a_protocol_is_an_item_whose_requirements_belong_to_the_signature_digest() {
+        let found = items("protocol P {\n  func f() -> Int\n}\nfunc g() { }");
+        assert_eq!(found[0].kind(), ItemKind::Protocol);
+        assert_eq!(found[0].name(), "P");
+        assert_eq!(found.len(), 2);
+        assert_ne!(
+            signature_digest(&items("protocol P {\n  func f() -> Int\n}")),
+            signature_digest(&items("protocol P {\n  func f() -> Bool\n}"))
+        );
+    }
+
+    #[test]
+    fn a_protocol_requirement_is_not_split_into_a_method_item() {
+        let found = items("protocol P {\n  func f()\n  mutating func g()\n}");
+        assert_eq!(found.len(), 1);
     }
 
     #[test]

@@ -275,7 +275,7 @@ impl Signatures {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
                 Decl::Enum(e) => sigs.register_enum_def(e)?,
-                Decl::Func(_) => {}
+                Decl::Func(_) | Decl::Protocol(_) => {}
             }
         }
         for (def, decl) in sigs.enum_defs.clone().iter().enumerate() {

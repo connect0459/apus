@@ -54,6 +54,7 @@ pub enum Decl {
     Func(FuncDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
+    Protocol(ProtocolDecl),
 }
 
 impl Decl {
@@ -62,6 +63,7 @@ impl Decl {
             Decl::Func(f) => f.name(),
             Decl::Struct(s) => s.name(),
             Decl::Enum(e) => e.name(),
+            Decl::Protocol(p) => p.name(),
         }
     }
 }
@@ -71,6 +73,7 @@ pub struct FuncDecl {
     line: u32,
     name: String,
     generics: Vec<String>,
+    bounds: Vec<Vec<String>>,
     params: Vec<Param>,
     ret: Option<TypeName>,
     body: Vec<Stmt>,
@@ -93,6 +96,7 @@ impl FuncDecl {
             line,
             name,
             generics: Vec::new(),
+            bounds: Vec::new(),
             params,
             ret,
             body,
@@ -107,6 +111,15 @@ impl FuncDecl {
     pub fn with_generics(mut self, generics: Vec<String>) -> Self {
         self.generics = generics;
         self
+    }
+
+    pub fn with_bounds(mut self, bounds: Vec<Vec<String>>) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
+    pub fn bound(&self, index: usize) -> &[String] {
+        self.bounds.get(index).map_or(&[], Vec::as_slice)
     }
 
     pub fn as_mutating(mut self) -> Self {
@@ -210,13 +223,44 @@ impl Param {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolDecl {
+    line: u32,
+    name: String,
+    requirements: Vec<FuncDecl>,
+}
+
+impl ProtocolDecl {
+    pub fn new(line: u32, name: String, requirements: Vec<FuncDecl>) -> Self {
+        Self {
+            line,
+            name,
+            requirements,
+        }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn requirements(&self) -> &[FuncDecl] {
+        &self.requirements
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
     line: u32,
     name: String,
     generics: Vec<String>,
+    bounds: Vec<Vec<String>>,
     fields: Vec<Field>,
     class: bool,
     superclass: Option<String>,
+    conformances: Vec<String>,
 }
 
 impl StructDecl {
@@ -225,14 +269,39 @@ impl StructDecl {
             line,
             name,
             generics: Vec::new(),
+            bounds: Vec::new(),
             fields,
             class: false,
             superclass: None,
+            conformances: Vec::new(),
         }
     }
 
     pub fn with_generics(mut self, generics: Vec<String>) -> Self {
         self.generics = generics;
+        self
+    }
+
+    pub fn with_bounds(mut self, bounds: Vec<Vec<String>>) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
+    pub fn bound(&self, index: usize) -> &[String] {
+        self.bounds.get(index).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn with_conformances(mut self, conformances: Vec<String>) -> Self {
+        self.conformances = conformances;
+        self
+    }
+
+    pub fn conformances(&self) -> &[String] {
+        &self.conformances
+    }
+
+    pub fn without_superclass(mut self) -> Self {
+        self.superclass = None;
         self
     }
 
@@ -296,7 +365,9 @@ pub struct EnumDecl {
     line: u32,
     name: String,
     generics: Vec<String>,
+    bounds: Vec<Vec<String>>,
     cases: Vec<EnumCaseDecl>,
+    conformances: Vec<String>,
 }
 
 impl EnumDecl {
@@ -305,7 +376,9 @@ impl EnumDecl {
             line,
             name,
             generics: Vec::new(),
+            bounds: Vec::new(),
             cases,
+            conformances: Vec::new(),
         }
     }
 
@@ -316,6 +389,24 @@ impl EnumDecl {
 
     pub fn generics(&self) -> &[String] {
         &self.generics
+    }
+
+    pub fn with_bounds(mut self, bounds: Vec<Vec<String>>) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
+    pub fn bound(&self, index: usize) -> &[String] {
+        self.bounds.get(index).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn with_conformances(mut self, conformances: Vec<String>) -> Self {
+        self.conformances = conformances;
+        self
+    }
+
+    pub fn conformances(&self) -> &[String] {
+        &self.conformances
     }
 
     pub fn has_payload(&self) -> bool {
