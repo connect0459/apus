@@ -329,6 +329,13 @@ fn exits(stmts: &[Stmt], in_switch: bool, inner_labels: &[String]) -> bool {
     }
 }
 
+struct AssignPath {
+    value: TExpr,
+    root: String,
+    root_mutable: bool,
+    crossed_class: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Binding {
     local: LocalId,
@@ -1640,14 +1647,117 @@ impl FnCx<'_> {
         op: Option<BinOp>,
         value: &Expr,
     ) -> CResult<TStmt> {
-        let ExprKind::Ident(var) = base.kind() else {
+        if let ExprKind::Ident(var) = base.kind()
+            && let Ok(binding) = self.lookup(var, line)
+        {
+            return self.assign_through(line, var, binding, name, op, value);
+        }
+        self.assign_nested(line, base, name, op, value)
+    }
+
+    fn assign_nested(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        name: &str,
+        op: Option<BinOp>,
+        value: &Expr,
+    ) -> CResult<TStmt> {
+        let path = self.assignable_path(line, base)?;
+        let container = path.value.ty();
+        let (index, field) = self.member_of(line, container, name)?;
+        let initializing = path.root == "self" && self.init_self.is_some();
+        if !field.is_mutable() && !initializing {
             return Err(CheckError::at(
                 line,
-                "only a member of a variable can be assigned",
+                format!("cannot assign to '{name}': it is a constant"),
             ));
+        }
+        if !path.crossed_class && !container.is_class() && !path.root_mutable {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "cannot assign to a member of '{}': it is a constant",
+                    path.root
+                ),
+            ));
+        }
+        let field_ty = field.ty();
+        self.expected = Some(field_ty);
+        let rhs = self.value(value)?;
+        let current = TExpr::Field {
+            base: Box::new(path.value.clone()),
+            index,
+            ty: field_ty,
         };
-        let binding = self.lookup(var, line)?;
-        self.assign_through(line, var, binding, name, op, value)
+        let new_value = self.assigned_value(line, field_ty, current, op, rhs)?;
+        Ok(TStmt::AssignPath {
+            base: path.value,
+            index,
+            value: new_value,
+        })
+    }
+
+    fn assignable_path(&mut self, line: u32, expr: &Expr) -> CResult<AssignPath> {
+        match expr.kind() {
+            ExprKind::Ident(name) => match self.lookup(name, line) {
+                Ok(binding) => Ok(AssignPath {
+                    value: TExpr::Local(binding.local, binding.ty),
+                    root: name.clone(),
+                    root_mutable: binding.mutable,
+                    crossed_class: false,
+                }),
+                Err(error) => match self.implicit_member(line, name) {
+                    Some((receiver, _, _)) => {
+                        let root = AssignPath {
+                            value: TExpr::Local(receiver.local, receiver.ty),
+                            root: "self".to_string(),
+                            root_mutable: receiver.mutable,
+                            crossed_class: false,
+                        };
+                        self.hop(line, root, name)
+                    }
+                    None => Err(error),
+                },
+            },
+            ExprKind::Member { base, name } => {
+                let path = self.assignable_path(line, base)?;
+                self.hop(line, path, name)
+            }
+            _ => Err(CheckError::at(
+                line,
+                "only a member of a variable can be assigned",
+            )),
+        }
+    }
+
+    fn hop(&self, line: u32, path: AssignPath, name: &str) -> CResult<AssignPath> {
+        let container = path.value.ty();
+        let (index, field) = self.member_of(line, container, name)?;
+        if field.is_unowned() || field.is_weak() {
+            return Err(CheckError::at(
+                line,
+                format!("cannot assign through the unowned or weak member '{name}'"),
+            ));
+        }
+        let member_ty = field.ty();
+        let initializing = path.root == "self" && self.init_self.is_some();
+        if !member_ty.is_class() && !field.is_mutable() && !initializing {
+            return Err(CheckError::at(
+                line,
+                format!("cannot assign to '{name}': it is a constant"),
+            ));
+        }
+        Ok(AssignPath {
+            value: TExpr::Field {
+                base: Box::new(path.value),
+                index,
+                ty: member_ty,
+            },
+            crossed_class: path.crossed_class || container.is_class(),
+            root: path.root,
+            root_mutable: path.root_mutable,
+        })
     }
 
     fn implicit_member(&self, line: u32, name: &str) -> Option<(Binding, usize, FieldSig)> {

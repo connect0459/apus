@@ -111,6 +111,11 @@ pub enum TStmt {
         index: usize,
         value: TExpr,
     },
+    AssignPath {
+        base: TExpr,
+        index: usize,
+        value: TExpr,
+    },
     Return(Option<TExpr>),
     Break(usize),
     Continue(usize),
@@ -328,6 +333,11 @@ impl<E> Rewriter<'_, E> {
                 value,
             } => TStmt::AssignField {
                 local: *local,
+                index: *index,
+                value: self.expr(value)?,
+            },
+            TStmt::AssignPath { base, index, value } => TStmt::AssignPath {
+                base: self.expr(base)?,
                 index: *index,
                 value: self.expr(value)?,
             },

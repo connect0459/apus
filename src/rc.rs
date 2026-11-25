@@ -125,7 +125,41 @@ struct Pass<'a> {
     created: Vec<StructId>,
 }
 
+enum Holder {
+    Local(LocalId),
+    Path(TExpr),
+}
+
 impl Pass<'_> {
+    fn holder_ty(&self, holder: &Holder) -> Ty {
+        match holder {
+            Holder::Local(local) => self.locals[local.index()],
+            Holder::Path(base) => base.ty(),
+        }
+    }
+
+    fn holder_expr(&self, holder: &Holder) -> TExpr {
+        match holder {
+            Holder::Local(local) => TExpr::Local(*local, self.locals[local.index()]),
+            Holder::Path(base) => base.clone(),
+        }
+    }
+
+    fn store(&self, holder: &Holder, index: usize, value: TExpr) -> TStmt {
+        match holder {
+            Holder::Local(local) => TStmt::AssignField {
+                local: *local,
+                index,
+                value,
+            },
+            Holder::Path(base) => TStmt::AssignPath {
+                base: base.clone(),
+                index,
+                value,
+            },
+        }
+    }
+
     fn needs_rc(&self, ty: Ty) -> bool {
         needs_rc(self.sigs, ty)
     }
@@ -235,7 +269,11 @@ impl Pass<'_> {
                 local,
                 index,
                 value,
-            } => self.assign_field(*local, *index, value, out),
+            } => self.assign_field(&Holder::Local(*local), *index, value, out),
+            TStmt::AssignPath { base, index, value } => {
+                let (base, _) = self.scoped(|p| p.borrowed(base));
+                self.assign_field(&Holder::Path(base), *index, value, out);
+            }
             TStmt::Return(value) => self.return_stmt(value.as_ref(), out),
             TStmt::If {
                 cond,
@@ -404,8 +442,8 @@ impl Pass<'_> {
         });
     }
 
-    fn assign_field(&mut self, local: LocalId, index: usize, value: &TExpr, out: &mut Vec<TStmt>) {
-        let base = self.locals[local.index()];
+    fn assign_field(&mut self, holder: &Holder, index: usize, value: &TExpr, out: &mut Vec<TStmt>) {
+        let base = self.holder_ty(holder);
         let field_ty = match base {
             Ty::Struct(id) | Ty::Class(id) => self
                 .sigs
@@ -415,20 +453,16 @@ impl Pass<'_> {
         }
         .unwrap_or(Ty::Int);
         if self.is_unowned_field(base, index) {
-            self.assign_unowned_field(local, index, value, out);
+            self.assign_unowned_field(holder, index, value, out);
             return;
         }
         if self.is_weak_field(base, index) {
-            self.assign_weak_field(local, index, value, out);
+            self.assign_weak_field(holder, index, value, out);
             return;
         }
         if !self.needs_rc(field_ty) {
             let (value, temps) = self.scoped(|p| p.expr(value));
-            out.push(TStmt::AssignField {
-                local,
-                index,
-                value,
-            });
+            out.push(self.store(holder, index, value));
             out.extend(self.release_temps(&temps));
             return;
         }
@@ -440,25 +474,20 @@ impl Pass<'_> {
         });
         out.extend(self.release_temps(&temps));
         out.push(TStmt::Release(TExpr::Field {
-            base: Box::new(TExpr::Local(local, base)),
+            base: Box::new(self.holder_expr(holder)),
             index,
             ty: field_ty,
         }));
-        out.push(TStmt::AssignField {
-            local,
-            index,
-            value: TExpr::Local(fresh, field_ty),
-        });
+        out.push(self.store(holder, index, TExpr::Local(fresh, field_ty)));
     }
 
     fn assign_weak_field(
         &mut self,
-        local: LocalId,
+        holder: &Holder,
         index: usize,
         value: &TExpr,
         out: &mut Vec<TStmt>,
     ) {
-        let base = self.locals[local.index()];
         let field_ty = value.ty();
         let target = self.sigs.unwrapped(field_ty).unwrap_or(Ty::Int);
         let moved = matches!(value, TExpr::Moved(_));
@@ -478,28 +507,23 @@ impl Pass<'_> {
         out.extend(self.release_temps(&temps));
         out.push(TStmt::ReleaseUnowned(TExpr::Field {
             base: Box::new(TExpr::Field {
-                base: Box::new(TExpr::Local(local, base)),
+                base: Box::new(self.holder_expr(holder)),
                 index,
                 ty: field_ty,
             }),
             index: 1,
             ty: target,
         }));
-        out.push(TStmt::AssignField {
-            local,
-            index,
-            value: TExpr::Local(fresh, field_ty),
-        });
+        out.push(self.store(holder, index, TExpr::Local(fresh, field_ty)));
     }
 
     fn assign_unowned_field(
         &mut self,
-        local: LocalId,
+        holder: &Holder,
         index: usize,
         value: &TExpr,
         out: &mut Vec<TStmt>,
     ) {
-        let base = self.locals[local.index()];
         let field_ty = value.ty();
         let moved = matches!(value, TExpr::Moved(_));
         let (value, temps) = self.scoped(|p| {
@@ -517,15 +541,11 @@ impl Pass<'_> {
         });
         out.extend(self.release_temps(&temps));
         out.push(TStmt::ReleaseUnowned(TExpr::Field {
-            base: Box::new(TExpr::Local(local, base)),
+            base: Box::new(self.holder_expr(holder)),
             index,
             ty: field_ty,
         }));
-        out.push(TStmt::AssignField {
-            local,
-            index,
-            value: TExpr::Local(fresh, field_ty),
-        });
+        out.push(self.store(holder, index, TExpr::Local(fresh, field_ty)));
     }
 
     fn return_stmt(&mut self, value: Option<&TExpr>, out: &mut Vec<TStmt>) {

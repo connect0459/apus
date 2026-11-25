@@ -114,6 +114,12 @@ impl Encoder<'_> {
                 self.usize(*index);
                 self.expr(value);
             }
+            TStmt::AssignPath { base, index, value } => {
+                self.tag(27);
+                self.expr(base);
+                self.usize(*index);
+                self.expr(value);
+            }
             TStmt::Return(value) => {
                 self.tag(13);
                 self.optional_expr(value.as_ref());

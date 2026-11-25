@@ -591,6 +591,14 @@ impl Emitter<'_, '_> {
                 self.store_field(base, owner, *index, value, value_ty)?;
                 Ok(false)
             }
+            TStmt::AssignPath { base, index, value } => {
+                let value_ty = value.ty();
+                let value = self.value(value)?;
+                let owner = base.ty();
+                let address = self.value(base)?;
+                self.store_field(address, owner, *index, value, value_ty)?;
+                Ok(false)
+            }
             TStmt::Return(value) => {
                 self.return_stmt(value.as_ref())?;
                 Ok(true)

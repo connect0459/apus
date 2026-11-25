@@ -3766,3 +3766,107 @@ fn explicit_type_arguments_cannot_be_given_to_a_requirement() {
     let source = "protocol P {\n  func a() -> Int\n}\nfunc f<T: P>(_ x: T) -> Int { return x.a<Int>() }\nfunc main() { }";
     assert!(!build_error(source).is_empty());
 }
+
+const NESTED: &str = "struct Inner {\n  var n: Int\n  var m: Int\n}\nstruct Outer {\n  var head: Int\n  var inner: Inner\n  var tail: Int\n}\n";
+
+#[test]
+fn a_member_of_a_struct_member_can_be_assigned() {
+    let source = format!(
+        "{NESTED}func main() {{\n  var o = Outer(head: 1, inner: Inner(n: 2, m: 3), tail: 4)\n  o.inner.n = 20\n  print(o.head)\n  print(o.inner.n)\n  print(o.inner.m)\n  print(o.tail)\n}}"
+    );
+    assert_eq!(run(&source), "1\n20\n3\n4\n");
+}
+
+#[test]
+fn a_nested_member_supports_compound_assignment() {
+    let source = format!(
+        "{NESTED}func main() {{\n  var o = Outer(head: 1, inner: Inner(n: 2, m: 3), tail: 4)\n  o.inner.m += 10\n  o.inner.m *= 2\n  print(o.inner.m)\n  print(o.inner.n)\n}}"
+    );
+    assert_eq!(run(&source), "26\n2\n");
+}
+
+#[test]
+fn a_member_can_be_assigned_three_levels_deep() {
+    let source = "struct C { var v: Int }\nstruct B { var c: C\n var w: Int }\nstruct A { var b: B\n var x: Int }\nfunc main() {\n  var a = A(b: B(c: C(v: 1), w: 2), x: 3)\n  a.b.c.v = 7\n  print(a.b.c.v)\n  print(a.b.w)\n  print(a.x)\n}";
+    assert_eq!(run(source), "7\n2\n3\n");
+}
+
+#[test]
+fn a_nested_member_of_a_class_instance_can_be_assigned_through_a_constant() {
+    let source = "struct Point {\n  var x: Int\n  var y: Int\n}\nclass Shape {\n  var origin: Point\n  var id: Int\n}\nfunc main() {\n  let s = Shape(origin: Point(x: 1, y: 2), id: 5)\n  s.origin.x = 10\n  s.origin.y += 1\n  print(s.origin.x)\n  print(s.origin.y)\n  print(s.id)\n}";
+    assert_eq!(run(source), "10\n3\n5\n");
+}
+
+#[test]
+fn a_member_of_an_object_reached_through_a_constant_struct_can_be_assigned() {
+    let source = "class Node {\n  var v: Int\n}\nstruct Holder {\n  let node: Node\n}\nfunc main() {\n  let h = Holder(node: Node(v: 1))\n  h.node.v = 9\n  print(h.node.v)\n}";
+    assert_eq!(run(source), "9\n");
+}
+
+#[test]
+fn a_member_of_an_object_reached_through_another_object_can_be_assigned() {
+    let source = "class Leaf {\n  var v: Int\n}\nclass Branch {\n  var leaf: Leaf\n}\nfunc main() {\n  let b = Branch(leaf: Leaf(v: 1))\n  b.leaf.v = 4\n  b.leaf.v += 1\n  print(b.leaf.v)\n}";
+    assert_eq!(run(source), "5\n");
+}
+
+#[test]
+fn nested_members_can_be_assigned_through_the_implicit_self() {
+    let source = "struct Point {\n  var x: Int\n  var y: Int\n}\nclass Shape {\n  var origin: Point\n  func move() {\n    self.origin.x = 3\n    origin.y = 4\n  }\n}\nstruct Pair {\n  var p: Point\n  mutating func reset() {\n    p.x = 0\n    self.p.y = 0\n  }\n}\nfunc main() {\n  let s = Shape(origin: Point(x: 1, y: 2))\n  s.move()\n  print(s.origin.x + s.origin.y)\n  var pair = Pair(p: Point(x: 5, y: 6))\n  pair.reset()\n  print(pair.p.x + pair.p.y)\n}";
+    assert_eq!(run(source), "7\n0\n");
+}
+
+#[test]
+fn an_initializer_may_assign_a_nested_member_once_every_member_is_set() {
+    let source = "struct Inner {\n  var n: Int\n}\nstruct Outer {\n  var inner: Inner\n  var k: Int\n  init(n: Int) {\n    self.inner = Inner(n: 0)\n    self.k = 1\n    self.inner.n = n\n  }\n}\nfunc main() {\n  print(Outer(n: 8).inner.n)\n}";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn assigning_a_nested_class_member_releases_the_old_instance() {
+    let source = tracked(
+        "struct Holder {\n  var t: Tracked\n}\nclass Box {\n  var h: Holder\n}\nfunc main() {\n  let b = Box(h: Holder(t: Tracked(id: 1)))\n  b.h.t = Tracked(id: 2)\n  print(b.h.t.id)\n}",
+    );
+    assert_eq!(run(&source), "-1\n2\n-2\n");
+}
+
+#[test]
+fn a_nested_weak_member_can_be_assigned() {
+    let source = "class Parent {\n  var id: Int\n}\nclass Child {\n  weak var parent: Parent?\n  var id: Int\n}\nstruct Holder {\n  var child: Child\n}\nfunc main() {\n  let p = Parent(id: 3)\n  let h = Holder(child: Child(parent: nil, id: 1))\n  h.child.parent = p\n  if let q = h.child.parent { print(q.id) }\n}";
+    assert_eq!(run(source), "3\n");
+}
+
+#[test]
+fn a_nested_member_cannot_be_assigned_through_a_constant_value() {
+    let source = format!(
+        "{NESTED}func main() {{\n  let o = Outer(head: 1, inner: Inner(n: 2, m: 3), tail: 4)\n  o.inner.n = 5\n}}"
+    );
+    assert!(build_error(&source).contains("constant"));
+}
+
+#[test]
+fn a_nested_member_cannot_be_assigned_through_a_let_member() {
+    let source = "struct Inner {\n  var n: Int\n}\nstruct Outer {\n  let inner: Inner\n}\nfunc main() {\n  var o = Outer(inner: Inner(n: 1))\n  o.inner.n = 2\n}";
+    assert!(build_error(source).contains("constant"));
+    let last = "struct Inner {\n  let n: Int\n}\nstruct Outer {\n  var inner: Inner\n}\nfunc main() {\n  var o = Outer(inner: Inner(n: 1))\n  o.inner.n = 2\n}";
+    assert!(build_error(last).contains("constant"));
+}
+
+#[test]
+fn only_a_member_path_rooted_in_a_variable_can_be_assigned() {
+    let source = "struct Inner {\n  var n: Int\n}\nfunc make() -> Inner { return Inner(n: 1) }\nfunc main() {\n  make().n = 2\n}";
+    assert!(build_error(source).contains("only a member of a variable"));
+}
+
+#[test]
+fn a_nested_assignment_checks_the_type_of_the_member() {
+    let source = format!(
+        "{NESTED}func main() {{\n  var o = Outer(head: 1, inner: Inner(n: 2, m: 3), tail: 4)\n  o.inner.n = true\n}}"
+    );
+    assert!(build_error(&source).contains("expected Int"));
+}
+
+#[test]
+fn a_member_path_through_an_unowned_member_cannot_be_assigned() {
+    let source = "class Leaf {\n  var v: Int\n}\nclass Branch {\n  unowned var leaf: Leaf\n}\nfunc main() {\n  let l = Leaf(v: 1)\n  let b = Branch(leaf: l)\n  b.leaf.v = 2\n}";
+    assert!(build_error(source).contains("unowned"));
+}
