@@ -4383,3 +4383,57 @@ fn a_method_with_type_parameters_of_its_own_cannot_be_overridden() {
     let source = "class Base {\n  func pick<U>(_ x: U) -> U { return x }\n}\nclass Sub: Base {\n  override func pick<U>(_ x: U) -> U { return x }\n}\nfunc main() { }";
     assert!(build_error(source).contains("type parameters of its own"));
 }
+
+const LABELED: &str = "enum Shape {\n  case circle(radius: Int)\n  case rect(width: Int, height: Int)\n  case tag(Int, name: String)\n  case empty\n}\n";
+
+#[test]
+fn a_payload_value_may_carry_a_label_in_the_declaration_and_the_construction() {
+    let source = format!(
+        "{LABELED}func area(_ s: Shape) -> Int {{\n  switch s {{\n  case .circle(let r): return 3 * r * r\n  case .rect(let w, let h): return w * h\n  case .tag(let n, let name): return n + name.count\n  case .empty: return 0\n  }}\n}}\nfunc main() {{\n  print(area(Shape.circle(radius: 2)))\n  print(area(.rect(width: 3, height: 4)))\n  print(area(Shape.tag(1, name: \"abc\")))\n  let s: Shape = .rect(width: 5, height: 5)\n  print(area(s))\n}}"
+    );
+    assert_eq!(run(&source), "12\n12\n4\n25\n");
+}
+
+#[test]
+fn a_pattern_may_repeat_the_labels_or_leave_them_out() {
+    let source = format!(
+        "{LABELED}func main() {{\n  let s: Shape = .rect(width: 2, height: 7)\n  switch s {{\n  case .rect(width: let w, height: let h): print(w * 10 + h)\n  default: print(0)\n  }}\n  switch s {{\n  case .rect(width: _, height: let h): print(h)\n  default: print(0)\n  }}\n  switch s {{\n  case .rect(let w, let h): print(w + h)\n  default: print(0)\n  }}\n  let t: Shape = .tag(4, name: \"x\")\n  switch t {{\n  case .tag(let n, name: let name): print(n + name.count)\n  default: print(0)\n  }}\n}}"
+    );
+    assert_eq!(run(&source), "27\n7\n9\n5\n");
+}
+
+#[test]
+fn the_labels_of_a_generic_payload_are_kept_when_the_arguments_are_inferred() {
+    let source = "enum Pair<T> {\n  case both(first: T, second: T)\n  case none\n}\nfunc sum(_ p: Pair<Int>) -> Int {\n  switch p {\n  case .both(first: let a, second: let b): return a + b\n  case .none: return 0\n  }\n}\nfunc main() {\n  let p = Pair.both(first: 3, second: 4)\n  print(sum(p))\n  print(sum(.both(first: 1, second: 1)))\n  print(sum(.none))\n}";
+    assert_eq!(run(source), "7\n2\n0\n");
+}
+
+#[test]
+fn a_payload_label_must_be_written_where_the_case_declares_it() {
+    let missing = format!("{LABELED}func main() {{\n  let s = Shape.circle(2)\n}}");
+    assert!(build_error(&missing).contains("radius"));
+    let wrong = format!("{LABELED}func main() {{\n  let s = Shape.circle(size: 2)\n}}");
+    assert!(build_error(&wrong).contains("radius"));
+    let swapped = format!("{LABELED}func main() {{\n  let s = Shape.rect(height: 1, width: 2)\n}}");
+    assert!(build_error(&swapped).contains("width"));
+    let implicit = format!("{LABELED}func main() {{\n  let s: Shape = .circle(2)\n}}");
+    assert!(build_error(&implicit).contains("radius"));
+}
+
+#[test]
+fn a_payload_without_a_label_cannot_be_given_one() {
+    let source = "enum E { case a(Int) }\nfunc main() {\n  let e = E.a(value: 1)\n}";
+    assert!(build_error(source).contains("label"));
+    let mixed = format!("{LABELED}func main() {{\n  let s = Shape.tag(num: 1, name: \"x\")\n}}");
+    assert!(build_error(&mixed).contains("label"));
+}
+
+#[test]
+fn a_pattern_cannot_name_a_label_that_the_case_does_not_have() {
+    let wrong = format!(
+        "{LABELED}func main() {{\n  let s: Shape = .empty\n  switch s {{\n  case .circle(size: let r): print(r)\n  default: print(0)\n  }}\n}}"
+    );
+    assert!(build_error(&wrong).contains("radius"));
+    let unlabeled = "enum E { case a(Int) }\nfunc main() {\n  let e = E.a(1)\n  switch e {\n  case .a(value: let v): print(v)\n  }\n}";
+    assert!(build_error(unlabeled).contains("label"));
+}

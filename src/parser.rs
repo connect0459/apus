@@ -604,11 +604,24 @@ impl Parser<'_> {
             .with_aliases(aliases))
     }
 
+    fn payload_label(&mut self) -> PResult<Option<String>> {
+        let labeled = self.peek_name().is_some()
+            && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":");
+        if !labeled {
+            return Ok(None);
+        }
+        let label = self.name()?;
+        self.expect_punct(":")?;
+        Ok(Some(label))
+    }
+
     fn enum_case_decl(&mut self) -> PResult<EnumCaseDecl> {
         let name = self.name()?;
         let mut payload = Vec::new();
+        let mut labels = Vec::new();
         if self.eat_punct("(") {
             loop {
+                labels.push(self.payload_label()?);
                 payload.push(self.type_ref()?);
                 if !self.eat_punct(",") {
                     break;
@@ -616,7 +629,7 @@ impl Parser<'_> {
             }
             self.expect_punct(")")?;
         }
-        Ok(EnumCaseDecl::new(name, payload))
+        Ok(EnumCaseDecl::new(name, payload).with_labels(labels))
     }
 
     fn switch_kind(&mut self) -> PResult<StmtKind> {
@@ -694,9 +707,11 @@ impl Parser<'_> {
         };
         self.expect_punct(".")?;
         let case = self.name()?;
+        let mut labels = Vec::new();
         let bindings = if self.eat_punct("(") {
             let mut bindings = Vec::new();
             loop {
+                labels.push(self.payload_label()?);
                 bindings.push(self.binding()?);
                 if !self.eat_punct(",") {
                     break;
@@ -707,7 +722,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        Ok(Pattern::new(type_name, case, bindings))
+        Ok(Pattern::new(type_name, case, bindings).with_labels(labels))
     }
 
     fn binding(&mut self) -> PResult<Option<String>> {
@@ -2423,6 +2438,51 @@ mod tests {
                 vec![TypeRef::from("Int")]
             ))
         );
+    }
+
+    #[test]
+    fn an_enum_case_may_label_its_payload_values() {
+        let Decl::Enum(e) =
+            try_parse("enum S { case rect(width: Int, height: Int)\ncase tag(Int, name: String)\ncase plain(Int) }")
+                .unwrap()
+        else {
+            panic!("expected an enum");
+        };
+        assert_eq!(
+            e.cases()[0].labels(),
+            [Some("width".to_string()), Some("height".to_string())]
+        );
+        assert_eq!(e.cases()[1].labels(), [None, Some("name".to_string())]);
+        assert_eq!(e.cases()[2].labels(), [None]);
+        assert_eq!(
+            e.cases()[1].payload(),
+            [TypeRef::from("Int"), TypeRef::from("String")]
+        );
+    }
+
+    #[test]
+    fn a_pattern_may_repeat_the_labels_of_the_payload() {
+        let stmts = body(
+            "switch s {\ncase .rect(width: let w, height: _):\nprint(1)\ncase .tag(let a, let b):\nprint(2)\ndefault:\nprint(3)\n}",
+        );
+        let StmtKind::Switch { cases, .. } = stmts[0].kind() else {
+            panic!("expected a switch");
+        };
+        let CaseLabel::Patterns(first) = cases[0].label() else {
+            panic!("expected patterns");
+        };
+        assert_eq!(
+            first[0].labels(),
+            [Some("width".to_string()), Some("height".to_string())]
+        );
+        assert_eq!(
+            first[0].bindings(),
+            Some(&[Some("w".to_string()), None][..])
+        );
+        let CaseLabel::Patterns(second) = cases[1].label() else {
+            panic!("expected patterns");
+        };
+        assert_eq!(second[0].labels(), [None, None]);
     }
 
     #[test]

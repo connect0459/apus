@@ -298,9 +298,14 @@ pub struct CaseSig {
     name: String,
     payload: Vec<Ty>,
     slots: Vec<usize>,
+    labels: Vec<Option<String>>,
 }
 
 impl CaseSig {
+    pub fn labels(&self) -> &[Option<String>] {
+        &self.labels
+    }
+
     pub fn slots(&self) -> &[usize] {
         &self.slots
     }
@@ -2025,6 +2030,7 @@ impl Signatures {
                 name: case.name().to_string(),
                 payload,
                 slots,
+                labels: case.labels().to_vec(),
             });
         }
         Ok(cases)

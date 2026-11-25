@@ -1442,7 +1442,7 @@ impl FnCx<'_> {
                     sig,
                     index,
                     (temporary, subject_ty),
-                    bindings,
+                    (bindings, pattern.labels()),
                     prelude,
                 )?;
             }
@@ -1486,10 +1486,26 @@ impl FnCx<'_> {
         sig: &EnumSig,
         index: usize,
         subject: (LocalId, Ty),
-        bindings: &[Option<String>],
+        pattern: (&[Option<String>], &[Option<String>]),
         prelude: &mut Vec<TStmt>,
     ) -> CResult<()> {
+        let (bindings, given) = pattern;
         let case = &sig.cases()[index];
+        for (position, label) in given.iter().enumerate() {
+            let declared = case.labels().get(position).and_then(|l| l.as_deref());
+            if label.is_some() && label.as_deref() != declared {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "the label {:?} of the pattern does not match the label {:?} of '{}.{}'",
+                        label,
+                        declared,
+                        sig.name(),
+                        case.name()
+                    ),
+                ));
+            }
+        }
         if bindings.len() != case.payload().len() {
             return Err(CheckError::at(
                 line,
@@ -2955,11 +2971,10 @@ impl FnCx<'_> {
                 ),
             ));
         }
+        let labels = pattern_sig.cases()[index].labels().to_vec();
         let mut values = Vec::with_capacity(args.len());
-        for (arg, wanted) in args.iter().zip(&payload) {
-            if arg.label().is_some() {
-                return Err(CheckError::at(line, "a payload value cannot be labeled"));
-            }
+        for ((arg, wanted), label) in args.iter().zip(&payload).zip(&labels) {
+            self.expect_label(line, arg, label.as_deref())?;
             if !inferring {
                 self.expected = Some(*wanted);
             }

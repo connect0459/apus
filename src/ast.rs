@@ -375,11 +375,26 @@ impl StructDecl {
 pub struct EnumCaseDecl {
     name: String,
     payload: Vec<TypeRef>,
+    labels: Vec<Option<String>>,
 }
 
 impl EnumCaseDecl {
     pub fn new(name: String, payload: Vec<TypeRef>) -> Self {
-        Self { name, payload }
+        let labels = vec![None; payload.len()];
+        Self {
+            name,
+            payload,
+            labels,
+        }
+    }
+
+    pub fn with_labels(mut self, labels: Vec<Option<String>>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    pub fn labels(&self) -> &[Option<String>] {
+        &self.labels
     }
 
     pub fn name(&self) -> &str {
@@ -646,6 +661,7 @@ pub struct Pattern {
     type_name: Option<String>,
     case: String,
     bindings: Option<Vec<Option<String>>>,
+    labels: Vec<Option<String>>,
 }
 
 impl Pattern {
@@ -654,11 +670,22 @@ impl Pattern {
         case: String,
         bindings: Option<Vec<Option<String>>>,
     ) -> Self {
+        let labels = vec![None; bindings.as_ref().map_or(0, Vec::len)];
         Self {
             type_name,
             case,
             bindings,
+            labels,
         }
+    }
+
+    pub fn with_labels(mut self, labels: Vec<Option<String>>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    pub fn labels(&self) -> &[Option<String>] {
+        &self.labels
     }
 
     pub fn bindings(&self) -> Option<&[Option<String>]> {
