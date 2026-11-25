@@ -3,7 +3,7 @@
 ## Milestones
 
 - [x] M0: benchmark generator (`bench/gen.py`) and baseline against `swiftc -Onone`
-- [ ] M1: front end
+- [x] M1: front end
   - [x] Lexer
   - [x] Item splitting and hashing
   - [x] Parser (func, struct, Int/Bool/String literals, if/while/for, calls, member access)
@@ -19,7 +19,7 @@
   - [x] `ld` called directly with the SDK location cached, falling back to `cc`
   - [x] Parallel compilation of the functions that missed the cache
   - [x] Skip parsing and checking of unchanged items, keyed by a signature digest and an item memo
-- [ ] M4: enum, generics (monomorphization), simple class
+- [x] M4: enum, generics (monomorphization), simple class
   - [x] Enum without payloads: `enum`, `Enum.case`, `==`/`!=`, enum struct fields, exhaustive `switch`
   - [x] Enum with payloads: `Shape.circle(5)`, `case .circle(let r)`, `_` to skip a value
   - [x] Generics by monomorphization: generic functions, structs and enums, inferred type arguments
