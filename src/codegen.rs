@@ -1008,6 +1008,32 @@ impl Emitter<'_, '_> {
                 value
             }
             TExpr::Moved(inner) => return self.expr(inner),
+            TExpr::Select {
+                cond,
+                then,
+                otherwise,
+                ty,
+            } => {
+                let clif = clif_type(*ty).ok_or_else(|| {
+                    CodegenError::from("a selected value has no representable type")
+                })?;
+                let condition = self.value(cond)?;
+                let then_block = self.builder.create_block();
+                let else_block = self.builder.create_block();
+                let merge = self.builder.create_block();
+                self.builder.append_block_param(merge, clif);
+                self.builder
+                    .ins()
+                    .brif(condition, then_block, &[], else_block, &[]);
+                self.builder.switch_to_block(then_block);
+                let chosen = self.value(then)?;
+                self.builder.ins().jump(merge, &[BlockArg::Value(chosen)]);
+                self.builder.switch_to_block(else_block);
+                let other = self.value(otherwise)?;
+                self.builder.ins().jump(merge, &[BlockArg::Value(other)]);
+                self.builder.switch_to_block(merge);
+                self.builder.block_params(merge)[0]
+            }
             TExpr::Unwrap { base, ty } => {
                 let owner = base.ty();
                 let base = self.value(base)?;
@@ -1034,7 +1060,12 @@ impl Emitter<'_, '_> {
                 value
             }
             TExpr::Bind { local, init } => {
-                let value = self.value(init)?;
+                let mut value = self.value(init)?;
+                if init.ty().is_struct() {
+                    let copy = self.alloc_struct(init.ty())?;
+                    self.copy_struct(copy, value, init.ty())?;
+                    value = copy;
+                }
                 self.builder.def_var(self.vars[local.index()], value);
                 value
             }

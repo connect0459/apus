@@ -175,6 +175,11 @@ fn always_returns(stmts: &[Stmt]) -> bool {
             else_body: Some(else_body),
             ..
         }) => always_returns(then_body) && always_returns(else_body),
+        Some(StmtKind::IfLet {
+            then_body,
+            else_body: Some(else_body),
+            ..
+        }) => always_returns(then_body) && always_returns(else_body),
         Some(StmtKind::Switch { cases, .. }) => {
             !cases.is_empty() && cases.iter().all(|case| always_returns(case.body()))
         }
@@ -242,6 +247,126 @@ impl FnCx<'_> {
                 .sigs
                 .unwrapped(expected)
                 .is_some_and(|inner| self.convertible(inner, found))
+    }
+
+    fn temp(&mut self, ty: Ty) -> LocalId {
+        let local = LocalId::new(self.locals.len());
+        self.locals.push(ty);
+        local
+    }
+
+    fn field_of(&self, line: u32, base: TExpr, name: &str) -> CResult<TExpr> {
+        let (index, field) = self.member_of(line, base.ty(), name)?;
+        let ty = field.ty();
+        Ok(TExpr::Field {
+            base: Box::new(base),
+            index,
+            ty,
+        })
+    }
+
+    fn optional_chain(&mut self, line: u32, base: &Expr) -> CResult<(TExpr, TExpr)> {
+        let value = self.value(base)?;
+        let optional = value.ty();
+        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'?.' needs an optional, but found {}",
+                    self.name_of(optional)
+                ),
+            )
+        })?;
+        let held = self.temp(optional);
+        Ok((
+            Self::is_some(held, value),
+            TExpr::Field {
+                base: Box::new(TExpr::Local(held, optional)),
+                index: 1,
+                ty: inner,
+            },
+        ))
+    }
+
+    fn is_some(held: LocalId, value: TExpr) -> TExpr {
+        TExpr::Binary {
+            op: BinOp::Ne,
+            lhs: Box::new(TExpr::Field {
+                base: Box::new(TExpr::Bind {
+                    local: held,
+                    init: Box::new(value),
+                }),
+                index: 0,
+                ty: Ty::Int,
+            }),
+            rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+        }
+    }
+
+    fn chain_result(&self, condition: TExpr, access: TExpr) -> CResult<TExpr> {
+        let result = access.ty();
+        let (ty, then) = if self.sigs.unwrapped(result).is_some() {
+            (result, access)
+        } else {
+            let optional = self.sigs.optional_of(result)?;
+            (
+                optional,
+                TExpr::StructInit {
+                    ty: optional,
+                    args: vec![TExpr::Int(SOME_CASE as i64), access],
+                },
+            )
+        };
+        Ok(TExpr::Select {
+            cond: Box::new(condition),
+            then: Box::new(then),
+            otherwise: Box::new(self.none_of(ty)),
+            ty,
+        })
+    }
+
+    fn coalesce(&mut self, line: u32, lhs: &Expr, rhs: &Expr) -> CResult<TExpr> {
+        let value = self.value(lhs)?;
+        let optional = value.ty();
+        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'??' needs an optional on its left, but found {}",
+                    self.name_of(optional)
+                ),
+            )
+        })?;
+        self.expected = Some(if matches!(rhs.kind(), ExprKind::Nil) {
+            optional
+        } else {
+            inner
+        });
+        let fallback = self.value(rhs)?;
+        let held = self.temp(optional);
+        let condition = Self::is_some(held, value);
+        let (ty, then) = if self.convertible(inner, fallback.ty()) {
+            (
+                inner,
+                TExpr::Field {
+                    base: Box::new(TExpr::Local(held, optional)),
+                    index: 1,
+                    ty: inner,
+                },
+            )
+        } else if self.convertible(optional, fallback.ty()) {
+            (optional, TExpr::Local(held, optional))
+        } else {
+            self.expect(line, inner, fallback.ty())?;
+            (inner, TExpr::Local(held, optional))
+        };
+        let otherwise = self.coerce(line, ty, fallback)?;
+        Ok(TExpr::Select {
+            cond: Box::new(condition),
+            then: Box::new(then),
+            otherwise: Box::new(otherwise),
+            ty,
+        })
     }
 
     fn coerce(&self, line: u32, expected: Ty, value: TExpr) -> CResult<TExpr> {
@@ -324,6 +449,9 @@ impl FnCx<'_> {
             StmtKind::Switch { subject, cases } => {
                 self.switch_stmt(stmt.line(), subject, cases, out)
             }
+            StmtKind::Expr(expr) if matches!(expr.kind(), ExprKind::OptMemberCall { .. }) => {
+                self.optional_call_stmt(stmt.line(), expr, out)
+            }
             StmtKind::Expr(expr) if self.is_super_init(expr) => {
                 self.super_init(stmt.line(), expr, out)
             }
@@ -343,6 +471,120 @@ impl FnCx<'_> {
                 Ok(())
             }
         }
+    }
+
+    fn if_let(
+        &mut self,
+        line: u32,
+        name: &str,
+        value: &Expr,
+        then_body: &[Stmt],
+        else_body: Option<&[Stmt]>,
+    ) -> CResult<TStmt> {
+        let value = self.value(value)?;
+        let optional = value.ty();
+        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'if let' needs an optional, but found {}",
+                    self.name_of(optional)
+                ),
+            )
+        })?;
+        let held = self.temp(optional);
+        self.scopes.push(HashMap::new());
+        let bound = self.declare(line, name, inner, false);
+        let body = bound.and_then(|local| {
+            let mut body = vec![TStmt::Let {
+                local,
+                init: TExpr::Field {
+                    base: Box::new(TExpr::Local(held, optional)),
+                    index: 1,
+                    ty: inner,
+                },
+            }];
+            body.extend(self.block(then_body)?);
+            Ok(body)
+        });
+        self.scopes.pop();
+        let body = body?;
+        let otherwise = match else_body {
+            Some(stmts) => self.block(stmts)?,
+            None => Vec::new(),
+        };
+        let test = TStmt::If {
+            cond: TExpr::Binary {
+                op: BinOp::Ne,
+                lhs: Box::new(TExpr::Field {
+                    base: Box::new(TExpr::Local(held, optional)),
+                    index: 0,
+                    ty: Ty::Int,
+                }),
+                rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+            },
+            then_body: body,
+            else_body: otherwise,
+        };
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: vec![
+                TStmt::Let {
+                    local: held,
+                    init: value,
+                },
+                test,
+            ],
+            else_body: Vec::new(),
+        })
+    }
+
+    fn optional_call_stmt(&mut self, line: u32, expr: &Expr, out: &mut Vec<TStmt>) -> CResult<()> {
+        let ExprKind::OptMemberCall { base, name, args } = expr.kind() else {
+            return Err(CheckError::at(line, "internal error: not an optional call"));
+        };
+        let value = self.value(base)?;
+        let optional = value.ty();
+        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'?.' needs an optional, but found {}",
+                    self.name_of(optional)
+                ),
+            )
+        })?;
+        let held = self.temp(optional);
+        let payload = TExpr::Field {
+            base: Box::new(TExpr::Local(held, optional)),
+            index: 1,
+            ty: inner,
+        };
+        let call = self.method_call_on(line, base, Some(payload), name, args, None)?;
+        out.push(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: vec![
+                TStmt::Let {
+                    local: held,
+                    init: value,
+                },
+                TStmt::If {
+                    cond: TExpr::Binary {
+                        op: BinOp::Ne,
+                        lhs: Box::new(TExpr::Field {
+                            base: Box::new(TExpr::Local(held, optional)),
+                            index: 0,
+                            ty: Ty::Int,
+                        }),
+                        rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+                    },
+                    then_body: vec![TStmt::Eval(call)],
+                    else_body: Vec::new(),
+                },
+            ],
+            else_body: Vec::new(),
+        });
+        Ok(())
     }
 
     fn switch_stmt(
@@ -597,6 +839,12 @@ impl FnCx<'_> {
                     else_body,
                 })
             }
+            StmtKind::IfLet {
+                name,
+                value,
+                then_body,
+                else_body,
+            } => self.if_let(line, name, value, then_body, else_body.as_deref()),
             StmtKind::While { cond, body } => {
                 let cond = self.condition(cond)?;
                 Ok(TStmt::While {
@@ -1027,13 +1275,24 @@ impl FnCx<'_> {
             }
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
-                let (index, field) = self.member_of(line, base.ty(), name)?;
-                let ty = field.ty();
-                Ok(TExpr::Field {
-                    base: Box::new(base),
-                    index,
-                    ty,
-                })
+                self.field_of(line, base, name)
+            }
+            ExprKind::Coalesce { lhs, rhs } => self.coalesce(line, lhs, rhs),
+            ExprKind::OptMember { base, name } => {
+                let (condition, payload) = self.optional_chain(line, base)?;
+                let access = self.field_of(line, payload, name)?;
+                self.chain_result(condition, access)
+            }
+            ExprKind::OptMemberCall { base, name, args } => {
+                let (condition, payload) = self.optional_chain(line, base)?;
+                let call = self.method_call_on(line, base, Some(payload), name, args, None)?;
+                if call.ty() == Ty::Void {
+                    return Err(CheckError::at(
+                        line,
+                        "this call does not produce a value, so it cannot be chained into an expression",
+                    ));
+                }
+                self.chain_result(condition, call)
             }
             ExprKind::Range { .. } => Err(CheckError::at(
                 line,
@@ -1050,8 +1309,24 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
+        self.method_call_on(line, base, None, name, args, expected)
+    }
+
+    fn method_call_on(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        preset: Option<TExpr>,
+        name: &str,
+        args: &[Arg],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
         let sigs = self.sigs;
-        let (receiver, lookup_ty, dispatching) = if self.is_super(base) {
+        let chained = preset.is_some();
+        let (receiver, lookup_ty, dispatching) = if let Some(receiver) = preset {
+            let ty = receiver.ty();
+            (receiver, ty, true)
+        } else if self.is_super(base) {
             let (receiver, parent) = self.super_receiver(line)?;
             (receiver, parent, false)
         } else {
@@ -1071,7 +1346,7 @@ impl FnCx<'_> {
         let sig = sigs
             .func(&qualified)
             .ok_or_else(|| CheckError::at(line, format!("'{owner}' has no method '{name}'")))?;
-        if sig.is_mutating() && !self.is_mutable_variable(base) {
+        if sig.is_mutating() && (chained || !self.is_mutable_variable(base)) {
             return Err(CheckError::at(
                 line,
                 format!(

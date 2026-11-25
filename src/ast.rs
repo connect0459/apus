@@ -420,6 +420,12 @@ pub enum StmtKind {
         then_body: Vec<Stmt>,
         else_body: Option<Vec<Stmt>>,
     },
+    IfLet {
+        name: String,
+        value: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+    },
     While {
         cond: Expr,
         body: Vec<Stmt>,
@@ -530,6 +536,19 @@ impl PartialEq for Expr {
 pub enum ExprKind {
     Nil,
     Unwrap(Box<Expr>),
+    Coalesce {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    OptMember {
+        base: Box<Expr>,
+        name: String,
+    },
+    OptMemberCall {
+        base: Box<Expr>,
+        name: String,
+        args: Vec<Arg>,
+    },
     Int(i64),
     Bool(bool),
     Str(String),

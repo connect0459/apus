@@ -2199,3 +2199,141 @@ fn a_subclass_instance_is_promoted_to_an_optional_superclass() {
     let source = "class A { var x: Int }\nclass B: A { var y: Int }\nfunc main() {\n  let a: A? = B(x: 1, y: 2)\n  print(a!.x)\n}";
     assert_eq!(run(source), "1\n");
 }
+
+#[test]
+fn nil_coalescing_takes_the_value_or_the_default() {
+    let source = "func main() {\n  let a: Int? = 4\n  let b: Int? = nil\n  print(a ?? 0)\n  print(b ?? 9)\n  print((b ?? 1) + (a ?? 1))\n}";
+    assert_eq!(run(source), "4\n9\n5\n");
+}
+
+#[test]
+fn nil_coalescing_does_not_evaluate_the_default_when_there_is_a_value() {
+    let source = "func noisy() -> Int {\n  print(100)\n  return 1\n}\nfunc main() {\n  let a: Int? = 4\n  print(a ?? noisy())\n  let b: Int? = nil\n  print(b ?? noisy())\n}";
+    assert_eq!(run(source), "4\n100\n1\n");
+}
+
+#[test]
+fn nil_coalescing_may_yield_an_optional() {
+    let source = "func main() {\n  let a: Int? = nil\n  let b: Int? = 6\n  let c: Int? = a ?? b\n  let d: Int? = a ?? nil\n  print(c!)\n  print(d == nil)\n}";
+    assert_eq!(run(source), "6\ntrue\n");
+}
+
+#[test]
+fn nil_coalescing_chains_to_the_right() {
+    let source = "func main() {\n  let a: Int? = nil\n  let b: Int? = nil\n  print(a ?? b ?? 3)\n}";
+    assert_eq!(run(source), "3\n");
+}
+
+#[test]
+fn nil_coalescing_binds_tighter_than_comparison() {
+    let source = "func main() {\n  let a: Int? = nil\n  print(a ?? 5 == 5)\n}";
+    assert_eq!(run(source), "true\n");
+}
+
+#[test]
+fn nil_coalescing_retains_an_instance_it_returns() {
+    let source = tracked(
+        "func main() {\n  let a: Tracked? = Tracked(id: 1)\n  let t = a ?? Tracked(id: 2)\n  print(t.id)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n");
+}
+
+#[test]
+fn nil_coalescing_releases_the_default_it_did_not_use() {
+    let source = tracked(
+        "func main() {\n  let a: Tracked? = nil\n  let t = a ?? Tracked(id: 2)\n  print(t.id)\n}",
+    );
+    assert_eq!(run(&source), "2\n-2\n");
+}
+
+#[test]
+fn nil_coalescing_needs_an_optional_on_the_left() {
+    assert!(build_error("func main() {\n  let a = 1\n  print(a ?? 2)\n}").contains("optional"));
+}
+
+#[test]
+fn if_let_binds_the_value_when_there_is_one() {
+    let source = "func show(_ x: Int?) {\n  if let v = x {\n    print(v)\n  } else {\n    print(0 - 1)\n  }\n}\nfunc main() {\n  show(5)\n  show(nil)\n}";
+    assert_eq!(run(source), "5\n-1\n");
+}
+
+#[test]
+fn if_let_without_else_skips_the_body_for_nil() {
+    let source = "func main() {\n  let x: Int? = nil\n  if let v = x { print(v) }\n  print(1)\n}";
+    assert_eq!(run(source), "1\n");
+}
+
+#[test]
+fn if_let_chains_through_else_if() {
+    let source = "func pick(_ a: Int?, _ b: Int?) -> Int {\n  if let x = a {\n    return x\n  } else if let y = b {\n    return y + 100\n  } else {\n    return 0\n  }\n}\nfunc main() {\n  print(pick(1, 2))\n  print(pick(nil, 2))\n  print(pick(nil, nil))\n}";
+    assert_eq!(run(source), "1\n102\n0\n");
+}
+
+#[test]
+fn if_let_binding_is_scoped_to_its_body() {
+    let source =
+        "func main() {\n  let x: Int? = 3\n  if let v = x { print(v) }\n  let v = 8\n  print(v)\n}";
+    assert_eq!(run(source), "3\n8\n");
+}
+
+#[test]
+fn if_let_binds_an_instance_for_the_length_of_the_body() {
+    let source = tracked(
+        "func main() {\n  var a: Tracked? = Tracked(id: 1)\n  if let t = a {\n    a = nil\n    print(t.id)\n  }\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n10\n");
+}
+
+#[test]
+fn if_let_evaluates_a_temporary_once() {
+    let source = tracked(
+        "func make() -> Tracked? { return Tracked(id: 1) }\nfunc main() {\n  if let t = make() {\n    print(t.id)\n  }\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n10\n");
+}
+
+#[test]
+fn if_let_needs_an_optional() {
+    assert!(
+        build_error("func main() {\n  let a = 1\n  if let v = a { print(v) }\n}")
+            .contains("optional")
+    );
+}
+
+#[test]
+fn optional_chaining_reads_a_member_through_an_optional() {
+    let source = "class Node {\n  var value: Int\n  var next: Node?\n}\nfunc main() {\n  let b = Node(value: 2, next: nil)\n  let a = Node(value: 1, next: b)\n  print(a.next?.value ?? 0)\n  print(b.next?.value ?? 0)\n  let c: Node? = a\n  print(c?.value ?? 0)\n}";
+    assert_eq!(run(source), "2\n0\n1\n");
+}
+
+#[test]
+fn optional_chaining_flattens_an_optional_member() {
+    let source = "class Node {\n  var value: Int\n  var next: Node?\n}\nfunc main() {\n  let c = Node(value: 3, next: nil)\n  let b = Node(value: 2, next: c)\n  let a = Node(value: 1, next: b)\n  print(a.next?.next?.value ?? 0)\n  print(c.next?.next?.value ?? 0)\n  print(a.next?.next == nil)\n}";
+    assert_eq!(run(source), "3\n0\nfalse\n");
+}
+
+#[test]
+fn optional_chaining_calls_a_method() {
+    let source = "class Counter {\n  var n: Int\n  func doubled() -> Int { return self.n * 2 }\n  func bump() { self.n += 1 }\n}\nfunc main() {\n  let a: Counter? = Counter(n: 4)\n  let b: Counter? = nil\n  print(a?.doubled() ?? 0)\n  print(b?.doubled() ?? 0)\n  a?.bump()\n  b?.bump()\n  print(a!.n)\n}";
+    assert_eq!(run(source), "8\n0\n5\n");
+}
+
+#[test]
+fn optional_chaining_skips_the_call_for_nil() {
+    let source = "func noisy() -> Int {\n  print(100)\n  return 1\n}\nclass C {\n  var n: Int\n  func add(_ k: Int) -> Int { return self.n + k }\n}\nfunc main() {\n  let b: C? = nil\n  print(b?.add(noisy()) ?? 0)\n}";
+    assert_eq!(run(source), "0\n");
+}
+
+#[test]
+fn optional_chaining_releases_the_instances_it_touches() {
+    let source = tracked(
+        "class Holder {\n  var item: Tracked?\n}\nfunc make() -> Holder? { return Holder(item: Tracked(id: 1)) }\nfunc main() {\n  print(make()?.item?.id ?? 0)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n10\n");
+}
+
+#[test]
+fn optional_chaining_needs_an_optional() {
+    let source = "class C { var n: Int }\nfunc main() {\n  let c = C(n: 1)\n  print(c?.n ?? 0)\n}";
+    assert!(build_error(source).contains("optional"));
+}

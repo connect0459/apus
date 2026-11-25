@@ -296,6 +296,18 @@ impl Encoder<'_> {
                 self.tag(46);
                 self.str(name);
             }
+            TExpr::Select {
+                cond,
+                then,
+                otherwise,
+                ty,
+            } => {
+                self.tag(50);
+                self.expr(cond);
+                self.expr(then);
+                self.expr(otherwise);
+                self.ty(*ty);
+            }
             TExpr::Unwrap { base, ty } => {
                 self.tag(49);
                 self.expr(base);

@@ -26,10 +26,11 @@ const KEYWORDS: [&str; 23] = [
 ];
 
 const LEVEL_OR: usize = 0;
-const LEVEL_RANGE: usize = 3;
-const LEVEL_UNARY: usize = 6;
+const LEVEL_COALESCE: usize = 3;
+const LEVEL_RANGE: usize = 4;
+const LEVEL_UNARY: usize = 7;
 
-const BINARY_LEVELS: [&[(&str, BinOp)]; 6] = [
+const BINARY_LEVELS: [&[(&str, BinOp)]; 7] = [
     &[("||", BinOp::Or)],
     &[("&&", BinOp::And)],
     &[
@@ -42,6 +43,7 @@ const BINARY_LEVELS: [&[(&str, BinOp)]; 6] = [
         ("<", BinOp::Lt),
         (">", BinOp::Gt),
     ],
+    &[],
     &[],
     &[("+", BinOp::Add), ("-", BinOp::Sub)],
     &[("*", BinOp::Mul), ("/", BinOp::Div), ("%", BinOp::Rem)],
@@ -568,7 +570,17 @@ impl Parser<'_> {
     }
 
     fn if_kind(&mut self) -> PResult<StmtKind> {
-        let cond = self.expr()?;
+        let binding = if self.eat_keyword("let") {
+            let name = self.name()?;
+            self.expect_punct("=")?;
+            Some((name, self.expr()?))
+        } else {
+            None
+        };
+        let cond = match &binding {
+            Some(_) => None,
+            None => Some(self.expr()?),
+        };
         let then_body = self.block()?;
         let else_body = if self.eat_keyword("else") {
             let line = self.line();
@@ -580,10 +592,19 @@ impl Parser<'_> {
         } else {
             None
         };
-        Ok(StmtKind::If {
-            cond,
-            then_body,
-            else_body,
+        Ok(match (binding, cond) {
+            (Some((name, value)), _) => StmtKind::IfLet {
+                name,
+                value,
+                then_body,
+                else_body,
+            },
+            (None, Some(cond)) => StmtKind::If {
+                cond,
+                then_body,
+                else_body,
+            },
+            (None, None) => return self.fail("expected a condition"),
         })
     }
 
@@ -615,6 +636,9 @@ impl Parser<'_> {
         if level == LEVEL_UNARY {
             return self.unary();
         }
+        if level == LEVEL_COALESCE {
+            return self.coalesce();
+        }
         if level == LEVEL_RANGE {
             return self.range();
         }
@@ -643,6 +667,23 @@ impl Parser<'_> {
             .iter()
             .find(|(p, _)| self.is_punct(p))
             .map(|(_, op)| *op)
+    }
+
+    fn coalesce(&mut self) -> PResult<Expr> {
+        let lhs = self.binary(LEVEL_COALESCE + 1)?;
+        if self.on_same_line() && self.is_punct("??") {
+            self.pos += 1;
+            let rhs = self.coalesce()?;
+            let line = lhs.line();
+            return Ok(Expr::new(
+                line,
+                ExprKind::Coalesce {
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+            ));
+        }
+        Ok(lhs)
     }
 
     fn range(&mut self) -> PResult<Expr> {
@@ -707,6 +748,29 @@ impl Parser<'_> {
             if self.is_punct("!") {
                 self.pos += 1;
                 expr = Expr::new(line, ExprKind::Unwrap(Box::new(expr)));
+                continue;
+            }
+            if self.is_punct("?")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(Spanned::token),
+                    Some(Token::Punct(p)) if p == "."
+                )
+            {
+                self.pos += 2;
+                let name = self.name()?;
+                let base = Box::new(expr);
+                expr = if self.is_punct("(") {
+                    Expr::new(
+                        line,
+                        ExprKind::OptMemberCall {
+                            base,
+                            name,
+                            args: self.args()?,
+                        },
+                    )
+                } else {
+                    Expr::new(line, ExprKind::OptMember { base, name })
+                };
                 continue;
             }
             if self.eat_punct(".") {
@@ -859,6 +923,76 @@ mod tests {
 
     fn int(n: i64) -> Expr {
         ex(ExprKind::Int(n))
+    }
+
+    #[test]
+    fn nil_coalescing_binds_looser_than_addition_and_tighter_than_comparison() {
+        assert_eq!(
+            expr("a ?? b + 1 == c"),
+            bin(
+                BinOp::Eq,
+                ex(ExprKind::Coalesce {
+                    lhs: Box::new(id("a")),
+                    rhs: Box::new(bin(BinOp::Add, id("b"), int(1))),
+                }),
+                id("c")
+            )
+        );
+    }
+
+    #[test]
+    fn nil_coalescing_associates_to_the_right() {
+        let e = expr("a ?? b ?? c");
+        let ExprKind::Coalesce { lhs, rhs } = e.kind() else {
+            panic!("expected a coalescing");
+        };
+        assert_eq!(lhs.kind(), &ExprKind::Ident("a".to_string()));
+        assert!(matches!(rhs.kind(), ExprKind::Coalesce { .. }));
+    }
+
+    #[test]
+    fn a_question_mark_before_a_dot_chains_through_an_optional() {
+        let e = expr("a?.b?.m(1)");
+        let ExprKind::OptMemberCall { base, name, args } = e.kind() else {
+            panic!("expected an optional call");
+        };
+        assert_eq!(name, "m");
+        assert_eq!(args.len(), 1);
+        assert!(matches!(base.kind(), ExprKind::OptMember { .. }));
+    }
+
+    #[test]
+    fn an_exclamation_mark_after_a_value_unwraps_it() {
+        assert_eq!(expr("a!"), ex(ExprKind::Unwrap(Box::new(id("a")))));
+    }
+
+    #[test]
+    fn nil_is_a_literal_and_not_a_name() {
+        assert_eq!(expr("nil"), ex(ExprKind::Nil));
+        assert!(try_parse("func f() { let nil = 1 }").is_err());
+    }
+
+    #[test]
+    fn a_question_mark_after_a_type_makes_it_optional() {
+        let f = func("func f(_ x: Int??) -> Node? { }");
+        let param = &f.params()[0];
+        assert_eq!(param.ty().name(), "Optional");
+        assert_eq!(param.ty().args()[0].name(), "Optional");
+        assert_eq!(f.ret().map(|t| t.name()), Some("Optional"));
+    }
+
+    #[test]
+    fn if_let_binds_a_name_to_an_expression() {
+        let stmts = body("if let v = x {\n print(v)\n} else if let w = y {\n print(w)\n}");
+        let StmtKind::IfLet {
+            name, else_body, ..
+        } = stmts[0].kind()
+        else {
+            panic!("expected an if let");
+        };
+        assert_eq!(name, "v");
+        let chained = else_body.as_ref().expect("an else branch");
+        assert!(matches!(chained[0].kind(), StmtKind::IfLet { .. }));
     }
 
     #[test]

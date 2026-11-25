@@ -188,6 +188,12 @@ pub enum TExpr {
         init: Box<TExpr>,
     },
     FuncAddr(String),
+    Select {
+        cond: Box<TExpr>,
+        then: Box<TExpr>,
+        otherwise: Box<TExpr>,
+        ty: Ty,
+    },
     Unwrap {
         base: Box<TExpr>,
         ty: Ty,
@@ -215,7 +221,7 @@ impl TExpr {
             | TExpr::LoadUnowned(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::FuncAddr(_) => Ty::Int,
-            TExpr::Unwrap { ty, .. } => *ty,
+            TExpr::Unwrap { ty, .. } | TExpr::Select { ty, .. } => *ty,
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
             | TExpr::Field { ty, .. }
@@ -392,6 +398,17 @@ impl<E> Rewriter<'_, E> {
                 init: Box::new(self.expr(init)?),
             },
             TExpr::FuncAddr(_) => expr.clone(),
+            TExpr::Select {
+                cond,
+                then,
+                otherwise,
+                ty,
+            } => TExpr::Select {
+                cond: Box::new(self.expr(cond)?),
+                then: Box::new(self.expr(then)?),
+                otherwise: Box::new(self.expr(otherwise)?),
+                ty: (self.ty)(*ty)?,
+            },
             TExpr::Unwrap { base, ty } => TExpr::Unwrap {
                 base: Box::new(self.expr(base)?),
                 ty: (self.ty)(*ty)?,

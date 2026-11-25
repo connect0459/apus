@@ -448,6 +448,7 @@ impl Pass<'_> {
                 | TExpr::Moved(_)
                 | TExpr::LoadUnowned(_)
                 | TExpr::RetainUnowned(_)
+                | TExpr::Select { .. }
         )
     }
 
@@ -555,6 +556,17 @@ impl Pass<'_> {
                 lhs: Box::new(self.borrowed(lhs)),
                 rhs: Box::new(self.borrowed(rhs)),
             },
+            TExpr::Select {
+                cond,
+                then,
+                otherwise,
+                ty,
+            } => TExpr::Select {
+                cond: Box::new(self.expr(cond)),
+                then: Box::new(self.owned_value(then)),
+                otherwise: Box::new(self.owned_value(otherwise)),
+                ty: *ty,
+            },
             TExpr::Unwrap { base, ty } => TExpr::Unwrap {
                 base: Box::new(self.borrowed(base)),
                 ty: *ty,
@@ -570,10 +582,15 @@ impl Pass<'_> {
             TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner))),
             TExpr::LoadUnowned(inner) => TExpr::LoadUnowned(Box::new(self.expr(inner))),
             TExpr::Retain(inner) => TExpr::Retain(Box::new(self.expr(inner))),
-            TExpr::Bind { local, init } => TExpr::Bind {
-                local: *local,
-                init: Box::new(self.expr(init)),
-            },
+            TExpr::Bind { local, init } => {
+                if self.needs_rc(init.ty()) && self.is_owned(init) {
+                    self.temps.push(*local);
+                }
+                TExpr::Bind {
+                    local: *local,
+                    init: Box::new(self.expr(init)),
+                }
+            }
             TExpr::Int(_)
             | TExpr::Bool(_)
             | TExpr::Str(_)

@@ -264,6 +264,22 @@ impl Scan<'_> {
                 }
                 used
             }
+            StmtKind::IfLet {
+                name,
+                value,
+                then_body,
+                else_body,
+            } => {
+                let mut used = self.expr_uses_self(value);
+                self.locals.push(HashSet::new());
+                self.declare(name);
+                used |= self.stmts_use_self(then_body);
+                self.locals.pop();
+                if let Some(body) = else_body {
+                    used |= self.block_uses_self(body);
+                }
+                used
+            }
             StmtKind::While { cond, body } => {
                 let used = self.expr_uses_self(cond);
                 used | self.block_uses_self(body)
@@ -303,6 +319,11 @@ impl Scan<'_> {
         match expr.kind() {
             ExprKind::Ident(name) => name == SELF || self.is_member(name),
             ExprKind::Unwrap(inner) => self.expr_uses_self(inner),
+            ExprKind::Coalesce { lhs, rhs } => self.expr_uses_self(lhs) || self.expr_uses_self(rhs),
+            ExprKind::OptMember { base, .. } => self.expr_uses_self(base),
+            ExprKind::OptMemberCall { base, args, .. } => {
+                self.expr_uses_self(base) || args.iter().any(|a| self.expr_uses_self(a.value()))
+            }
             ExprKind::Nil
             | ExprKind::Int(_)
             | ExprKind::Bool(_)
@@ -333,6 +354,11 @@ fn returns(stmt: &Stmt) -> bool {
     match stmt.kind() {
         StmtKind::Return(_) => true,
         StmtKind::If {
+            then_body,
+            else_body,
+            ..
+        } => any_returns(then_body) || else_body.as_deref().is_some_and(any_returns),
+        StmtKind::IfLet {
             then_body,
             else_body,
             ..
