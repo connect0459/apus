@@ -6,19 +6,23 @@ pub enum StrOp {
     Concat,
     Count,
     IsEmpty,
+    FromInt,
+    HasPrefix,
+    HasSuffix,
+    Contains,
 }
 
 impl StrOp {
     pub fn result(self) -> Ty {
         match self {
-            StrOp::Concat => Ty::Str,
+            StrOp::Concat | StrOp::FromInt => Ty::Str,
             StrOp::Count => Ty::Int,
-            StrOp::IsEmpty => Ty::Bool,
+            StrOp::IsEmpty | StrOp::HasPrefix | StrOp::HasSuffix | StrOp::Contains => Ty::Bool,
         }
     }
 
     pub fn allocates(self) -> bool {
-        matches!(self, StrOp::Concat)
+        matches!(self, StrOp::Concat | StrOp::FromInt)
     }
 
     pub fn code(self) -> u8 {
@@ -26,6 +30,10 @@ impl StrOp {
             StrOp::Concat => 1,
             StrOp::Count => 2,
             StrOp::IsEmpty => 3,
+            StrOp::FromInt => 4,
+            StrOp::HasPrefix => 5,
+            StrOp::HasSuffix => 6,
+            StrOp::Contains => 7,
         }
     }
 }

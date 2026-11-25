@@ -2028,6 +2028,111 @@ impl FnCx<'_> {
         Ok(TStmt::Fatal(text))
     }
 
+    fn string_conversion(&mut self, line: u32, args: &[Arg]) -> CResult<TExpr> {
+        let usage = "String takes exactly one unlabeled argument";
+        let [arg] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if arg.label().is_some() {
+            return Err(CheckError::at(line, usage));
+        }
+        let value = self.value(arg.value())?;
+        match value.ty() {
+            Ty::Str => Ok(value),
+            Ty::Int => Ok(TExpr::StrOp {
+                op: StrOp::FromInt,
+                args: vec![value],
+            }),
+            Ty::Bool => Ok(TExpr::Select {
+                cond: Box::new(value),
+                then: Box::new(TExpr::Str("true".to_string())),
+                otherwise: Box::new(TExpr::Str("false".to_string())),
+                ty: Ty::Str,
+            }),
+            Ty::Enum(_) => Ok(self.enum_name(value)),
+            other => Err(CheckError::at(
+                line,
+                format!(
+                    "cannot convert a value of type {} to String",
+                    self.name_of(other)
+                ),
+            )),
+        }
+    }
+
+    fn enum_name(&mut self, value: TExpr) -> TExpr {
+        let ty = value.ty();
+        let names: Vec<String> = self
+            .sigs
+            .enum_of(ty)
+            .map(|sig| sig.cases().iter().map(|c| c.name().to_string()).collect())
+            .unwrap_or_default();
+        let held = self.temp(ty);
+        let mut subject = Some(value);
+        let mut conditions: Vec<(TExpr, String)> = Vec::new();
+        for (index, name) in names.iter().enumerate().take(names.len().saturating_sub(1)) {
+            let lhs = match subject.take() {
+                Some(value) => TExpr::Bind {
+                    local: held,
+                    init: Box::new(value),
+                },
+                None => TExpr::Local(held, ty),
+            };
+            conditions.push((
+                TExpr::Binary {
+                    op: BinOp::Eq,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(TExpr::EnumCase { ty, index }),
+                },
+                name.clone(),
+            ));
+        }
+        let mut result = TExpr::Str(names.last().cloned().unwrap_or_default());
+        for (condition, name) in conditions.into_iter().rev() {
+            result = TExpr::Select {
+                cond: Box::new(condition),
+                then: Box::new(TExpr::Str(name)),
+                otherwise: Box::new(result),
+                ty: Ty::Str,
+            };
+        }
+        result
+    }
+
+    fn string_method(
+        &mut self,
+        line: u32,
+        receiver: TExpr,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let op = match name {
+            "hasPrefix" => StrOp::HasPrefix,
+            "hasSuffix" => StrOp::HasSuffix,
+            "contains" => StrOp::Contains,
+            _ => {
+                return Err(CheckError::at(
+                    line,
+                    format!("String has no method '{name}'"),
+                ));
+            }
+        };
+        let usage = format!("'{name}' takes exactly one unlabeled argument");
+        let [arg] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if arg.label().is_some() {
+            return Err(CheckError::at(line, usage));
+        }
+        self.expected = Some(Ty::Str);
+        let value = self.value(arg.value())?;
+        self.expect(line, Ty::Str, value.ty())?;
+        Ok(TExpr::StrOp {
+            op,
+            args: vec![receiver, value],
+        })
+    }
+
     fn print_enum(&mut self, value: TExpr) -> TStmt {
         let ty = value.ty();
         let names: Vec<String> = self
@@ -2286,6 +2391,15 @@ impl FnCx<'_> {
         } else {
             let receiver = self.value(base)?;
             let ty = receiver.ty();
+            if ty == Ty::Str {
+                if explicit.is_some() {
+                    return Err(CheckError::at(
+                        line,
+                        "a method of String takes no explicit type arguments",
+                    ));
+                }
+                return self.string_method(line, receiver, name, args);
+            }
             let requirement_call =
                 matches!(ty, Ty::Param(_)) || sigs.existential_protocol(ty).is_some();
             if requirement_call && explicit.is_some() {
@@ -3118,6 +3232,9 @@ impl FnCx<'_> {
         expected: Option<Ty>,
         explicit: Option<&[TypeRef]>,
     ) -> CResult<TExpr> {
+        if callee == "String" {
+            return self.string_conversion(line, args);
+        }
         let sigs = self.sigs;
         if let Some(receiver) = self.lookup("self", line).ok()
             && sigs.resolve_method(receiver.ty, callee).is_some()

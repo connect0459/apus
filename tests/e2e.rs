@@ -4102,3 +4102,47 @@ fn ordering_a_string_with_another_type_is_rejected() {
     assert!(build_error("func main() { print(\"a\" < 1) }").contains("expected String"));
     assert!(build_error("func main() { print(1 < \"a\") }").contains("expected Int"));
 }
+
+#[test]
+fn a_string_can_be_made_from_an_integer_a_boolean_or_a_string() {
+    let source = "func main() {\n  print(String(42))\n  print(String(0))\n  print(String(-7))\n  print(String(9223372036854775807))\n  print(String(-9223372036854775807 - 1))\n  print(String(true))\n  print(String(false))\n  print(String(\"same\"))\n  print(String(1 + 2) + \"!\")\n  print(\"n=\" + String(5))\n  print(String(12345).count)\n}";
+    assert_eq!(
+        run(source),
+        "42\n0\n-7\n9223372036854775807\n-9223372036854775808\ntrue\nfalse\nsame\n3!\nn=5\n5\n"
+    );
+}
+
+#[test]
+fn a_string_can_be_made_from_an_enum_without_payloads() {
+    let source = "enum Color { case red, green, blue }\nfunc name(_ c: Color) -> String { return String(c) }\nfunc main() {\n  print(String(Color.green))\n  print(name(Color.blue) + \"/\" + name(Color.red))\n}";
+    assert_eq!(run(source), "green\nblue/red\n");
+}
+
+#[test]
+fn converting_strings_in_a_loop_does_not_leak() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    total += String(i).count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "88890\n");
+}
+
+#[test]
+fn a_string_can_be_tested_for_a_prefix_a_suffix_and_a_substring() {
+    let source = "func main() {\n  let s = \"hello world\"\n  print(s.hasPrefix(\"hello\"))\n  print(s.hasPrefix(\"world\"))\n  print(s.hasSuffix(\"world\"))\n  print(s.hasSuffix(\"hello\"))\n  print(s.contains(\"o w\"))\n  print(s.contains(\"xyz\"))\n  print(s.hasPrefix(\"\"))\n  print(s.hasSuffix(\"\"))\n  print(s.contains(\"\"))\n  print(s.hasPrefix(s))\n  print(s.hasPrefix(s + \"!\"))\n  print(s.hasSuffix(s + \"!\"))\n  print(s.contains(s + \"!\"))\n  print(\"\".hasPrefix(\"a\"))\n  print(\"\".contains(\"\"))\n  print((\"ab\" + \"cd\").hasSuffix(\"cd\"))\n  print(\"é!\".hasPrefix(\"é\"))\n  print(\"abc\".contains(\"c\"))\n}";
+    assert_eq!(
+        run(source),
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn string_conversions_and_searches_are_rejected_when_misused() {
+    assert!(
+        build_error("struct P { var x: Int }\nfunc main() { print(String(P(x: 1))) }")
+            .contains("cannot convert")
+    );
+    assert!(build_error("func main() { print(String()) }").contains("String"));
+    assert!(build_error("func main() { print(String(1, 2)) }").contains("String"));
+    assert!(build_error("func main() { print(String(value: 1)) }").contains("String"));
+    assert!(build_error("func main() { print(\"a\".hasPrefix(1)) }").contains("expected String"));
+    assert!(build_error("func main() { print(\"a\".hasPrefix()) }").contains("hasPrefix"));
+    assert!(build_error("func main() { print(\"a\".shout()) }").contains("shout"));
+}

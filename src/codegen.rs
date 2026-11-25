@@ -39,10 +39,14 @@ const STRING_RC: i32 = -16;
 const STRING_LEN: i32 = -8;
 const IMMORTAL: i64 = i64::MIN;
 const RUNTIME_FORMAT_INT: &str = "apus_format_int";
+const RUNTIME_FORMAT_PLAIN: &str = "apus_format_plain";
+const INT_BUFFER: i64 = 32;
+const SNPRINTF_PADDING: usize = 5;
 const RUNTIME_TRUE: &str = "apus_true";
 const RUNTIME_FALSE: &str = "apus_false";
-const RUNTIME_DATA: [(&str, &[u8]); 3] = [
+const RUNTIME_DATA: [(&str, &[u8]); 4] = [
     (RUNTIME_FORMAT_INT, b"%ld\n\0"),
+    (RUNTIME_FORMAT_PLAIN, b"%ld\0"),
     (RUNTIME_TRUE, b"true\0"),
     (RUNTIME_FALSE, b"false\0"),
 ];
@@ -181,7 +185,8 @@ impl Backend {
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
         for name in [
-            "printf", "puts", "malloc", "free", "fflush", "write", "memcpy", "memcmp",
+            "printf", "puts", "malloc", "free", "fflush", "write", "memcpy", "memcmp", "memmem",
+            "snprintf",
         ] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
@@ -845,10 +850,105 @@ impl Emitter<'_, '_> {
                     .load(types::I64, flags, *text, STRING_LEN);
                 Ok(self.builder.ins().icmp_imm_s(IntCC::Equal, len, 0))
             }
+            (StrOp::FromInt, [number]) => Ok(self.int_to_string(*number)),
+            (StrOp::HasPrefix, [text, prefix]) => Ok(self.string_edge(*text, *prefix, false)),
+            (StrOp::HasSuffix, [text, suffix]) => Ok(self.string_edge(*text, *suffix, true)),
+            (StrOp::Contains, [text, needle]) => {
+                let text_len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let needle_len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *needle, STRING_LEN);
+                let mut sig = Signature::new(self.call_conv);
+                for _ in 0..4 {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                sig.returns.push(AbiParam::new(types::I64));
+                let memmem = self.import_func("memmem", sig, false);
+                let call = self
+                    .builder
+                    .ins()
+                    .call(memmem, &[*text, text_len, *needle, needle_len]);
+                let found = self.builder.inst_results(call)[0];
+                let present = self.builder.ins().icmp_imm_s(IntCC::NotEqual, found, 0);
+                let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, needle_len, 0);
+                Ok(self.builder.ins().bor(present, empty))
+            }
             _ => Err(CodegenError::from(
                 "a string operation has the wrong operands",
             )),
         }
+    }
+
+    fn memcmp(&mut self, left: Value, right: Value, len: Value) -> Value {
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..3 {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I32));
+        let memcmp = self.import_func("memcmp", sig, false);
+        let call = self.builder.ins().call(memcmp, &[left, right, len]);
+        let result = self.builder.inst_results(call)[0];
+        self.builder.ins().sextend(types::I64, result)
+    }
+
+    fn string_edge(&mut self, text: Value, edge: Value, at_end: bool) -> Value {
+        let flags = MemFlagsData::trusted();
+        let text_len = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let edge_len = self.builder.ins().load(types::I64, flags, edge, STRING_LEN);
+        let fits = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, text_len, edge_len);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let compared = self.builder.ins().select(fits, edge_len, zero);
+        let start = if at_end {
+            let offset = self.builder.ins().isub(text_len, edge_len);
+            let safe = self.builder.ins().select(fits, offset, zero);
+            self.builder.ins().iadd(text, safe)
+        } else {
+            text
+        };
+        let order = self.memcmp(start, edge, compared);
+        let same = self.builder.ins().icmp_imm_s(IntCC::Equal, order, 0);
+        self.builder.ins().band(fits, same)
+    }
+
+    fn int_to_string(&mut self, number: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let size = self
+            .builder
+            .ins()
+            .iconst(types::I64, STRING_HEADER as i64 + INT_BUFFER);
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let malloc = self.import_func("malloc", sig, false);
+        let call = self.builder.ins().call(malloc, &[size]);
+        let block = self.builder.inst_results(call)[0];
+        let one = self.builder.ins().iconst(types::I64, 1);
+        self.builder.ins().store(flags, one, block, 0);
+        let bytes = self.builder.ins().iadd_imm_s(block, STRING_HEADER as i64);
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..(3 + SNPRINTF_PADDING + 1) {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I32));
+        let snprintf = self.import_func("snprintf", sig, false);
+        let capacity = self.builder.ins().iconst(types::I64, INT_BUFFER);
+        let format = self.data_address(RUNTIME_FORMAT_PLAIN);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let mut args = vec![bytes, capacity, format];
+        args.extend(std::iter::repeat_n(zero, SNPRINTF_PADDING));
+        args.push(number);
+        let call = self.builder.ins().call(snprintf, &args);
+        let written = self.builder.inst_results(call)[0];
+        let written = self.builder.ins().sextend(types::I64, written);
+        self.builder.ins().store(flags, written, block, 8);
+        bytes
     }
 
     fn string_order(&mut self, left: Value, right: Value) -> Value {
@@ -859,15 +959,7 @@ impl Emitter<'_, '_> {
             .ins()
             .load(types::I64, flags, right, STRING_LEN);
         let shortest = self.builder.ins().smin(left_len, right_len);
-        let mut sig = Signature::new(self.call_conv);
-        for _ in 0..3 {
-            sig.params.push(AbiParam::new(types::I64));
-        }
-        sig.returns.push(AbiParam::new(types::I32));
-        let memcmp = self.import_func("memcmp", sig, false);
-        let call = self.builder.ins().call(memcmp, &[left, right, shortest]);
-        let bytes = self.builder.inst_results(call)[0];
-        let bytes = self.builder.ins().sextend(types::I64, bytes);
+        let bytes = self.memcmp(left, right, shortest);
         let lengths = self.builder.ins().isub(left_len, right_len);
         let differ = self.builder.ins().icmp_imm_s(IntCC::NotEqual, bytes, 0);
         self.builder.ins().select(differ, bytes, lengths)
