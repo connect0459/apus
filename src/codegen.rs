@@ -1064,6 +1064,18 @@ impl Emitter<'_, '_> {
                 lhs,
                 rhs,
             } => return self.short_circuit(false, lhs, rhs),
+            TExpr::Binary { op, lhs, rhs }
+                if lhs.ty() == Ty::Str && matches!(op, BinOp::Eq | BinOp::Ne) =>
+            {
+                let lhs = self.value(lhs)?;
+                let rhs = self.value(rhs)?;
+                let same = self.string_equals(lhs, rhs);
+                if *op == BinOp::Ne {
+                    self.builder.ins().bxor_imm_u(same, 1)
+                } else {
+                    same
+                }
+            }
             TExpr::Binary { op, lhs, rhs } => {
                 let lhs = self.value(lhs)?;
                 let rhs = self.value(rhs)?;
@@ -1249,6 +1261,40 @@ impl Emitter<'_, '_> {
             .ins()
             .trapnz(overflow, TrapCode::INTEGER_OVERFLOW);
         result
+    }
+
+    fn string_equals(&mut self, lhs: Value, rhs: Value) -> Value {
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        let advance = self.builder.create_block();
+        let compare_end = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I8);
+        let start = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().jump(header, &[BlockArg::Value(start)]);
+        self.builder.switch_to_block(header);
+        let offset = self.builder.block_params(header)[0];
+        let flags = MemFlagsData::trusted();
+        let left_address = self.builder.ins().iadd(lhs, offset);
+        let right_address = self.builder.ins().iadd(rhs, offset);
+        let left = self.builder.ins().load(types::I8, flags, left_address, 0);
+        let right = self.builder.ins().load(types::I8, flags, right_address, 0);
+        let differ = self.builder.ins().icmp(IntCC::NotEqual, left, right);
+        let no = self.builder.ins().iconst(types::I8, 0);
+        self.builder
+            .ins()
+            .brif(differ, done, &[BlockArg::Value(no)], compare_end, &[]);
+        self.builder.switch_to_block(compare_end);
+        let at_end = self.builder.ins().icmp_imm_s(IntCC::Equal, left, 0);
+        let yes = self.builder.ins().iconst(types::I8, 1);
+        self.builder
+            .ins()
+            .brif(at_end, done, &[BlockArg::Value(yes)], advance, &[]);
+        self.builder.switch_to_block(advance);
+        let next = self.builder.ins().iadd_imm_s(offset, 1);
+        self.builder.ins().jump(header, &[BlockArg::Value(next)]);
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
     }
 
     fn short_circuit(&mut self, is_and: bool, lhs: &TExpr, rhs: &TExpr) -> GResult<Option<Value>> {

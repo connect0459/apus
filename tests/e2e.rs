@@ -2934,3 +2934,75 @@ fn a_label_name_cannot_be_reused_by_a_nested_statement() {
         "func main() {\n  a: while true {\n    a: while true { break a }\n    break a\n  }\n}";
     assert!(build_error(source).contains("label"));
 }
+
+#[test]
+fn strings_with_the_same_text_are_equal() {
+    let source = "func main() {\n  let a = \"hello\"\n  let b = \"hel\"\n  print(a == \"hello\")\n  print(a == b)\n  print(a != b)\n  print(\"\" == \"\")\n  print(\"ab\" == \"abc\")\n  print(\"abc\" == \"ab\")\n  print(\"abc\" == \"abd\")\n}";
+    assert_eq!(
+        run(source),
+        "true\nfalse\ntrue\ntrue\nfalse\nfalse\nfalse\n"
+    );
+}
+
+#[test]
+fn strings_are_compared_by_content_and_not_by_address() {
+    let source = "func same(_ a: String, _ b: String) -> Bool { return a == b }\nfunc main() {\n  let x = \"abc\"\n  print(same(x, \"abc\"))\n  print(same(x, \"abd\"))\n}";
+    assert_eq!(run(source), "true\nfalse\n");
+}
+
+#[test]
+fn a_string_cannot_be_compared_with_another_type() {
+    assert!(build_error("func main() { print(\"a\" == 1) }").contains("expected"));
+}
+
+const POINT_DECL: &str = "struct Point {\n  var x: Int\n  var y: Int\n}\n";
+
+#[test]
+fn structs_with_equal_members_are_equal() {
+    let source = format!(
+        "{POINT_DECL}func main() {{\n  let a = Point(x: 1, y: 2)\n  let b = Point(x: 1, y: 2)\n  let c = Point(x: 1, y: 3)\n  print(a == b)\n  print(a == c)\n  print(a != c)\n  print(a != b)\n}}"
+    );
+    assert_eq!(run(&source), "true\nfalse\ntrue\nfalse\n");
+}
+
+#[test]
+fn struct_equality_compares_nested_structs_strings_and_enums() {
+    let source = "enum Color { case red, green }\nstruct Inner {\n  var n: Int\n  var ok: Bool\n}\nstruct Outer {\n  var name: String\n  var color: Color\n  var inner: Inner\n}\nfunc main() {\n  let a = Outer(name: \"a\", color: Color.red, inner: Inner(n: 1, ok: true))\n  let b = Outer(name: \"a\", color: Color.red, inner: Inner(n: 1, ok: true))\n  let c = Outer(name: \"b\", color: Color.red, inner: Inner(n: 1, ok: true))\n  let d = Outer(name: \"a\", color: Color.green, inner: Inner(n: 1, ok: true))\n  let e = Outer(name: \"a\", color: Color.red, inner: Inner(n: 2, ok: true))\n  print(a == b)\n  print(a == c)\n  print(a == d)\n  print(a == e)\n}";
+    assert_eq!(run(source), "true\nfalse\nfalse\nfalse\n");
+}
+
+#[test]
+fn struct_equality_evaluates_each_operand_once() {
+    let source = format!(
+        "{POINT_DECL}func make(_ n: Int) -> Point {{\n  print(n)\n  return Point(x: 1, y: 2)\n}}\nfunc main() {{\n  print(make(1) == make(2))\n}}"
+    );
+    assert_eq!(run(&source), "1\n2\ntrue\n");
+}
+
+#[test]
+fn struct_equality_works_in_conditions_and_on_mutated_values() {
+    let source = format!(
+        "{POINT_DECL}func main() {{\n  var p = Point(x: 0, y: 0)\n  let goal = Point(x: 2, y: 0)\n  while p != goal {{\n    p.x += 1\n  }}\n  print(p == goal)\n}}"
+    );
+    assert_eq!(run(&source), "true\n");
+}
+
+#[test]
+fn a_struct_with_a_class_member_cannot_be_compared() {
+    let source = "class Box { var v: Int }\nstruct Holder {\n  var b: Box\n}\nfunc main() {\n  let a = Holder(b: Box(v: 1))\n  print(a == a)\n}";
+    assert!(build_error(source).contains("equality is not supported"));
+}
+
+#[test]
+fn a_struct_with_a_payload_enum_member_cannot_be_compared() {
+    let source = "enum Shape { case circle(Int), empty }\nstruct Holder {\n  var s: Shape\n}\nfunc main() {\n  let a = Holder(s: Shape.empty)\n  print(a == a)\n}";
+    assert!(build_error(source).contains("equality is not supported"));
+}
+
+#[test]
+fn structs_of_different_types_cannot_be_compared() {
+    let source = format!(
+        "{POINT_DECL}struct Other {{\n  var x: Int\n  var y: Int\n}}\nfunc main() {{\n  print(Point(x: 1, y: 2) == Other(x: 1, y: 2))\n}}"
+    );
+    assert!(build_error(&source).contains("expected"));
+}

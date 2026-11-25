@@ -1679,6 +1679,9 @@ impl FnCx<'_> {
                 let lhs = self.value(lhs)?;
                 let rhs = self.value(rhs)?;
                 self.operands(line, *op, lhs.ty(), rhs.ty())?;
+                if matches!(op, BinOp::Eq | BinOp::Ne) && lhs.ty().is_struct() {
+                    return self.struct_equality(line, *op, lhs, rhs);
+                }
                 Ok(TExpr::Binary {
                     op: *op,
                     lhs: Box::new(lhs),
@@ -2214,6 +2217,99 @@ impl FnCx<'_> {
         })
     }
 
+    fn equality_leaves(
+        &self,
+        line: u32,
+        ty: Ty,
+        path: &mut Vec<(usize, Ty)>,
+        leaves: &mut Vec<Vec<(usize, Ty)>>,
+    ) -> CResult<()> {
+        let Ty::Struct(id) = ty else {
+            return Ok(());
+        };
+        let sig = self
+            .sigs
+            .struct_sig(id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
+        for (index, field) in sig.members() {
+            let member = field.ty();
+            path.push((index, member));
+            match member {
+                Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => leaves.push(path.clone()),
+                Ty::Struct(_) if self.sigs.enum_of(member).is_none() => {
+                    self.equality_leaves(line, member, path, leaves)?;
+                }
+                _ => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "equality is not supported for {}: member '{}' has type {}",
+                            self.name_of(ty),
+                            field.name(),
+                            self.name_of(member)
+                        ),
+                    ));
+                }
+            }
+            path.pop();
+        }
+        Ok(())
+    }
+
+    fn struct_equality(&mut self, line: u32, op: BinOp, lhs: TExpr, rhs: TExpr) -> CResult<TExpr> {
+        let ty = lhs.ty();
+        let mut leaves = Vec::new();
+        self.equality_leaves(line, ty, &mut Vec::new(), &mut leaves)?;
+        let left = self.temp(ty);
+        let right = self.temp(ty);
+        let mut operands = Some((lhs, rhs));
+        let mut all: Option<TExpr> = None;
+        for path in &leaves {
+            let (left_root, right_root) = match operands.take() {
+                Some((lhs, rhs)) => (
+                    TExpr::Bind {
+                        local: left,
+                        init: Box::new(lhs),
+                    },
+                    TExpr::Bind {
+                        local: right,
+                        init: Box::new(rhs),
+                    },
+                ),
+                None => (TExpr::Local(left, ty), TExpr::Local(right, ty)),
+            };
+            let reach = |root: TExpr| {
+                path.iter().fold(root, |base, (index, ty)| TExpr::Field {
+                    base: Box::new(base),
+                    index: *index,
+                    ty: *ty,
+                })
+            };
+            let same = TExpr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(reach(left_root)),
+                rhs: Box::new(reach(right_root)),
+            };
+            all = Some(match all {
+                None => same,
+                Some(before) => TExpr::Binary {
+                    op: BinOp::And,
+                    lhs: Box::new(before),
+                    rhs: Box::new(same),
+                },
+            });
+        }
+        let all = all.unwrap_or(TExpr::Bool(true));
+        Ok(if op == BinOp::Ne {
+            TExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(all),
+            }
+        } else {
+            all
+        })
+    }
+
     fn operands(&self, line: u32, op: BinOp, lhs: Ty, rhs: Ty) -> CResult<()> {
         match op {
             BinOp::Add
@@ -2230,7 +2326,9 @@ impl FnCx<'_> {
             }
             BinOp::Eq | BinOp::Ne => {
                 self.expect(line, lhs, rhs)?;
-                if matches!(lhs, Ty::Int | Ty::Bool | Ty::Enum(_)) {
+                let comparable = matches!(lhs, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_))
+                    || (lhs.is_struct() && self.sigs.enum_of(lhs).is_none());
+                if comparable {
                     Ok(())
                 } else {
                     Err(CheckError::at(
@@ -2653,8 +2751,10 @@ mod tests {
     }
 
     #[test]
-    fn strings_cannot_be_compared_or_combined_yet() {
-        assert!(check_main("print(\"a\" == \"b\")").is_err());
+    fn strings_can_be_compared_but_not_combined_yet() {
+        assert!(check_main("print(\"a\" == \"b\")").is_ok());
+        assert!(check_main("print(\"a\" != \"b\")").is_ok());
+        assert!(check_main("print(\"a\" < \"b\")").is_err());
         assert!(check_main("print(\"a\" + \"b\")").is_err());
     }
 
@@ -2723,8 +2823,8 @@ mod tests {
     }
 
     #[test]
-    fn structs_cannot_be_compared_or_printed_as_a_whole() {
-        assert!(check_with_point("let a = P(x: 1, tag: 2)\nprint(a == a)").is_err());
+    fn structs_can_be_compared_but_not_printed_as_a_whole() {
+        assert!(check_with_point("let a = P(x: 1, tag: 2)\nprint(a == a)").is_ok());
         assert!(check_with_point("print(P(x: 1, tag: 2))").is_err());
     }
 
