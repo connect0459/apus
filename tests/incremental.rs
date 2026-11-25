@@ -449,3 +449,21 @@ fn editing_the_body_of_a_generic_method_recompiles_its_instances() {
     assert!(report.compiled() >= 1);
     assert_eq!(project.run(), "42\n");
 }
+
+fn tagger_program(offset: i64) -> String {
+    format!(
+        "struct Tagger {{\n  var n: Int\n  func echo<T>(_ x: T) -> T {{ return x }}\n}}\n\
+         func plain() -> Int {{ return {offset} }}\n\
+         func main() {{\n  let t = Tagger(n: 1)\n  print(t.echo(40) + plain())\n}}\n"
+    )
+}
+
+#[test]
+fn editing_a_caller_of_a_generic_method_of_a_plain_type_reuses_the_instance() {
+    let project = Project::new();
+    project.build(&tagger_program(2));
+    assert_eq!(project.run(), "42\n");
+    let report = project.build(&tagger_program(3));
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "43\n");
+}

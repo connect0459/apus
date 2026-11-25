@@ -309,7 +309,21 @@ impl Signatures {
         };
         let owner_ty = owner.as_ref().map(|(ty, _)| *ty);
         let generics = match &owner {
-            Some((_, generics)) => generics.clone(),
+            Some((_, generics)) => {
+                if func.is_init() && !func.generics().is_empty() {
+                    return Err(CheckError::at(
+                        func.line(),
+                        "an initializer cannot declare type parameters",
+                    ));
+                }
+                if let Some(name) = func.generics().iter().find(|g| generics.contains(g)) {
+                    return Err(CheckError::at(
+                        func.line(),
+                        format!("'{name}' is already a type parameter of the enclosing type"),
+                    ));
+                }
+                generics.iter().chain(func.generics()).cloned().collect()
+            }
             None => func.generics().to_vec(),
         };
         let scope = scope_of(&generics);
@@ -347,12 +361,6 @@ impl Signatures {
 
     fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<(Ty, Vec<String>)> {
         let line = func.line();
-        if !func.generics().is_empty() {
-            return Err(CheckError::at(
-                line,
-                format!("generic methods are not supported yet: '{}'", func.name()),
-            ));
-        }
         let (ty, generics) = if let Some(def) = self.struct_def_ids.get(owner).copied() {
             let generics = self.struct_defs[def].generics().to_vec();
             let id =

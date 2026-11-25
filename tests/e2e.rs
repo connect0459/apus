@@ -775,9 +775,43 @@ fn a_method_cannot_be_declared_twice() {
 }
 
 #[test]
-fn a_generic_method_is_not_supported_yet() {
-    let source = "struct C { var n: Int\n  func id<T>(_ x: T) -> T { return x } }\nfunc main() { }";
-    assert!(build_error(source).contains("generic"));
+fn a_method_may_declare_type_parameters_of_its_own() {
+    let source = "struct C { var n: Int\n  func id<T>(_ x: T) -> T { return x } }\n\
+         func main() {\n  let c = C(n: 1)\n  print(c.id(5))\n  print(c.id(true))\n  print(c.id(\"s\"))\n}";
+    assert_eq!(run(source), "5\ntrue\ns\n");
+}
+
+#[test]
+fn a_method_of_a_class_may_declare_type_parameters_of_its_own() {
+    let source = "class C { var n: Int\n  func pick<T>(_ a: T, _ b: T, _ first: Bool) -> T { if first { return a } return b } }\n\
+         func main() {\n  let c = C(n: 1)\n  print(c.pick(3, 4, false))\n}";
+    assert_eq!(run(source), "4\n");
+}
+
+#[test]
+fn a_generic_method_may_use_the_members_of_self() {
+    let source = "struct C { var n: Int\n  func first<T>(_ x: T) -> Int { return n } }\n\
+         func main() {\n  let c = C(n: 8)\n  print(c.first(true))\n}";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn a_method_type_parameter_cannot_repeat_a_type_parameter_of_its_owner() {
+    let source = "struct Box<T> {\n  var value: T\n  func map<T>(_ x: T) -> T { return x }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("already"));
+}
+
+#[test]
+fn a_method_type_parameter_that_no_argument_fixes_cannot_be_inferred() {
+    let source = "struct C { var n: Int\n  func mk<T>() -> Int { return self.n } }\n\
+         func main() {\n  let c = C(n: 1)\n  print(c.mk())\n}";
+    assert!(build_error(source).contains("cannot infer"));
+}
+
+#[test]
+fn an_initializer_cannot_declare_type_parameters() {
+    let source = "struct C { var n: Int\n  init<T>(_ x: T) { self.n = 1 } }\nfunc main() { }";
+    assert!(build_error(source).contains("initializer"));
 }
 
 #[test]
@@ -994,9 +1028,18 @@ fn a_method_of_a_generic_type_cannot_use_an_operator_on_the_type_parameter() {
 }
 
 #[test]
-fn a_generic_method_of_a_generic_type_is_still_not_supported() {
-    let source = "struct Box<T> {\n  var value: T\n  func map<U>(_ x: U) -> U { return x }\n}\nfunc main() { }";
-    assert!(build_error(source).contains("generic method"));
+fn a_generic_method_of_a_generic_type_infers_both_groups_of_type_arguments() {
+    let source = String::from(
+        "struct Pair<T> {\n  var a: T\n  func with<U>(_ b: U) -> U { return b }\n  func keep<U>(_ b: U) -> T { return self.a }\n}\n\
+         func main() {\n  let p = Pair(a: 1)\n  print(p.with(true))\n  print(p.keep(\"s\"))\n}",
+    );
+    assert_eq!(run(&source), "true\n1\n");
+}
+
+#[test]
+fn a_generic_method_of_a_generic_type_checks_its_body_once() {
+    let source = "struct Box<T> {\n  var value: T\n  func map<U>(_ x: U) -> U { return x + x }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("expected Int"));
 }
 
 #[test]

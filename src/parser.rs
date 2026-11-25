@@ -263,6 +263,7 @@ impl Parser<'_> {
     }
 
     fn init_decl(&mut self, line: u32) -> PResult<FuncDecl> {
+        let generics = self.generic_params()?;
         self.expect_punct("(")?;
         let mut params = Vec::new();
         while !self.is_punct(")") {
@@ -278,7 +279,9 @@ impl Parser<'_> {
         } else {
             self.block()?
         };
-        Ok(FuncDecl::new(line, "init".to_string(), params, None, body).as_init())
+        Ok(FuncDecl::new(line, "init".to_string(), params, None, body)
+            .with_generics(generics)
+            .as_init())
     }
 
     fn param(&mut self) -> PResult<Param> {
@@ -912,6 +915,11 @@ mod tests {
         assert_eq!(f.params().len(), 2);
         assert_eq!(f.ret(), None);
         assert_eq!(f.body().len(), 1);
+    }
+
+    #[test]
+    fn an_initializer_records_the_type_parameters_it_declares() {
+        assert_eq!(func("init<T>(x: T) { }").generics(), ["T"]);
     }
 
     #[test]

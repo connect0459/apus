@@ -232,6 +232,15 @@ fn extract_members(slice: &mut Vec<Spanned>) -> Result<Vec<Vec<Spanned>>, SplitE
     Ok(members)
 }
 
+fn has_type_parameters(member: &[Spanned]) -> bool {
+    let name_at = if matches!(member[0].token(), Token::Ident(k) if k == "mutating") {
+        2
+    } else {
+        1
+    };
+    matches!(member.get(name_at + 1).map(Spanned::token), Some(Token::Punct(p)) if p == "<")
+}
+
 fn member_name(tokens: &[Spanned]) -> Result<String, SplitError> {
     let mut at = 0;
     if matches!(tokens[at].token(), Token::Ident(k) if k == "mutating") {
@@ -262,6 +271,7 @@ fn member_item(owner: &str, tokens: Vec<Spanned>, generic: bool) -> Result<Item,
         .iter()
         .position(|t| matches!(t.token(), Token::Punct(p) if p == "{"))
         .unwrap_or(tokens.len());
+    let generic = generic || has_type_parameters(&tokens);
     let signed = if generic { tokens.len() } else { header_end };
     let mut signature = Fnv1a::new();
     signature.write(owner.as_bytes());
@@ -555,6 +565,24 @@ mod tests {
         assert_ne!(
             digest_of("struct Box<T> { var v: T\n func get() -> T { return self.v } }"),
             digest_of("struct Box<T> { var v: T\n func get() -> T { let x = self.v\n return x } }")
+        );
+    }
+
+    #[test]
+    fn a_method_with_type_parameters_is_a_generic_item_even_in_a_plain_type() {
+        let found = items(
+            "struct P { var x: Int\n func id<T>(_ v: T) -> T { return v }\n mutating func f() { }\n mutating func g<T>(_ v: T) { } }",
+        );
+        assert!(found[1].is_generic());
+        assert!(!found[2].is_generic());
+        assert!(found[3].is_generic());
+    }
+
+    #[test]
+    fn editing_a_generic_method_body_of_a_plain_type_changes_the_signature_digest() {
+        assert_ne!(
+            digest_of("struct P { var x: Int\n func id<T>(_ v: T) -> T { return v } }"),
+            digest_of("struct P { var x: Int\n func id<T>(_ v: T) -> T { let w = v\n return w } }")
         );
     }
 }
