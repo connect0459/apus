@@ -26,10 +26,10 @@
   - [x] Simple class: reference semantics, memberwise init, mutable members, generic classes
   - [x] Reference counting for classes, with `deinit` and `unowned` members (see the reference counting decision)
   - [x] Optionals (`T?`, `nil`, `== nil`, `!`, `??`, `if let`, `?.`), structs as members of structs and classes, and `weak` class members (see the optional decision)
-  - [ ] Optional chaining that continues past the first `?.` (`a?.b.c`, `a?.b.m()`, `a?.b!`): Swift short-circuits the rest of the postfix chain and wraps the result once
-  - [ ] `if var`, `while let` and `guard let` (a binding that stays in scope after the `guard`; the `else` body must leave the scope)
-  - [ ] Patterns on optionals in `switch` (`case .some(let v)`, `case .none`): they already work through the enum machinery, so this needs tests and a note, not code
-  - [ ] Downcasts: `as?`, `as!` and `is` on class references, by comparing the class tag with the target class and its subclasses
+  - [x] Optional chaining that continues past the first `?.` (`a?.b.c`, `a?.b.m()`, `a?.b!`): the rest of the postfix chain short-circuits and the result is wrapped once
+  - [x] `if var`, `while let`, `while var`, `guard let`, `guard var` and `guard` (the binding stays in scope after the `guard`; the `else` body must end every path with `return`)
+  - [x] Patterns on optionals in `switch` (`case .some(let v)`, `case .none`), through the enum machinery
+  - [x] Downcasts: `as?`, `as!` and `is` on class references, by comparing the class tag with the target class and its subclasses
   - [x] Methods and `mutating` methods on structs, classes and enums; `init` on structs and classes with definite initialization
   - [x] Methods and initializers in generic types
   - [x] Implicit `self` for member reads, member assignments and method calls
@@ -214,4 +214,14 @@ An `unowned` member does not retain: assigning it counts an unowned reference, r
 
 A `weak` member has the type `Optional<Class>`, must be a `var`, and counts through the same unowned count slot as `unowned`: assigning counts a reference to the new target and releases the old one, reading yields an owned optional that is nil when the strong count is 0, and the drop function releases it as a weak reference. The memory of a dead target is kept until its last weak or unowned reference goes.
 
-**Consequences.** An optional of a class costs two slots, not one. Chaining stops at the first `?.` of a chain, so `a?.b.c` must be written `a?.b?.c`. `guard let`, `while let`, `if var`, patterns on `.some` and `.none`, and `as?` are not implemented. A member of a member cannot be assigned in place. A function that reads a weak member holds a strong reference for the statement. A cycle that does not use `weak` or `unowned` still leaks.
+**Consequences.** An optional of a class costs two slots, not one. A member of a member cannot be assigned in place. A function that reads a weak member holds a strong reference for the statement. A cycle that does not use `weak` or `unowned` still leaks.
+
+### An optional chain is a subject and a link, and a cast tests the class tag (2026-11-25)
+
+**Problem.** `a?.b.c` must short-circuit as a whole and produce one optional, a `guard let` binding must outlive the statement, and a downcast needs a runtime test that works with the reference counting.
+
+**Options.** For chains: give each `?.` its own optional result (`a?.b?.c` is then required); parse the rest of the postfix expression as one link whose base is a placeholder. For casts: store the class name in each object; compare the class tag that dispatch already uses.
+
+**Decision.** `ExprKind::OptionalChain` holds the subject and a link whose base is `ChainValue`; a nested `?.` inside the link starts a nested chain. The checker evaluates the subject once with `Bind`, pushes the unwrapped value for `ChainValue`, checks the link, and wraps the result once (an optional result is not wrapped again), through `Select`. As a statement, a chain becomes an `if` on the tag, so a call that returns nothing can be chained. `guard let` lowers to a hidden holder, an `if` on the tag whose body is the `else` body, and a binding declared in the current scope; `require_exit` accepts the `else` body only when every path returns. `while let` keeps a flag and re-evaluates its subject at the top of every iteration. A `switch` is lowered inside its own block, so its subject is released where the `switch` ends. `is`, `as?` and `as!` bind the operand once and compare its class tag with the tags of the target class and of every subclass (`Signatures::class_tags`); a cast between unrelated classes is rejected. `as?` yields `Optional<Target>`, `as!` unwraps it and traps on nil, an optional operand is looked through, and casts bind tighter than `??` and looser than ranges. A local declared with a type annotation now has the annotated type, which a subclass instance assigned to a superclass annotation needs for casts to see the declared type.
+
+**Consequences.** A cast costs one comparison per class in the family of the target. Casts work on class references only: no protocols, no `Any`, no casts of values. A mutating call inside a chain is rejected because the unwrapped value is a copy. `guard` accepts only `return` as a way out; `break`, `continue` and `fatalError` do not exist yet.
