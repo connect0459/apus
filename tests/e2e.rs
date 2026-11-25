@@ -2531,3 +2531,77 @@ fn while_let_needs_an_optional() {
             .contains("optional")
     );
 }
+
+const CHAIN: &str = "class Engine {\n  var power: Int\n  func boost(_ n: Int) -> Int { return self.power + n }\n  func idle() { print(0) }\n}\nclass Car {\n  var engine: Engine\n  var spare: Engine?\n  var name: Int\n}\n";
+
+fn chain(body: &str) -> String {
+    format!("{CHAIN}{body}")
+}
+
+#[test]
+fn an_optional_chain_continues_past_the_first_question_mark() {
+    let source = chain(
+        "func main() {\n  let car: Car? = Car(engine: Engine(power: 7), spare: nil, name: 1)\n  let none: Car? = nil\n  print(car?.engine.power ?? 0)\n  print(none?.engine.power ?? 0 - 1)\n}",
+    );
+    assert_eq!(run(&source), "7\n-1\n");
+}
+
+#[test]
+fn an_optional_chain_continues_into_a_method_call() {
+    let source = chain(
+        "func main() {\n  let car: Car? = Car(engine: Engine(power: 7), spare: nil, name: 1)\n  print(car?.engine.boost(3) ?? 0)\n  car?.engine.idle()\n  let none: Car? = nil\n  none?.engine.idle()\n  print(none?.engine.boost(3) ?? 0 - 1)\n}",
+    );
+    assert_eq!(run(&source), "10\n0\n-1\n");
+}
+
+#[test]
+fn an_optional_chain_may_pass_through_a_second_question_mark() {
+    let source = chain(
+        "func main() {\n  let car: Car? = Car(engine: Engine(power: 7), spare: Engine(power: 2), name: 1)\n  let bare: Car? = Car(engine: Engine(power: 7), spare: nil, name: 1)\n  print(car?.spare?.power ?? 0 - 1)\n  print(bare?.spare?.power ?? 0 - 1)\n  print(car?.spare?.boost(1) ?? 0 - 1)\n}",
+    );
+    assert_eq!(run(&source), "2\n-1\n3\n");
+}
+
+#[test]
+fn an_optional_chain_flattens_an_optional_result() {
+    let source = chain(
+        "func main() {\n  let car: Car? = Car(engine: Engine(power: 7), spare: nil, name: 1)\n  print(car?.spare == nil)\n  let other: Car? = nil\n  print(other?.spare == nil)\n}",
+    );
+    assert_eq!(run(&source), "true\ntrue\n");
+}
+
+#[test]
+fn an_optional_chain_may_unwrap_in_the_middle() {
+    let source = chain(
+        "func main() {\n  let car: Car? = Car(engine: Engine(power: 7), spare: Engine(power: 5), name: 1)\n  print(car?.spare!.power ?? 0)\n}",
+    );
+    assert_eq!(run(&source), "5\n");
+}
+
+#[test]
+fn an_optional_chain_evaluates_its_subject_once_and_skips_the_rest_for_nil() {
+    let source = "func noisy() -> Int {\n  print(100)\n  return 1\n}\nclass C {\n  var d: D\n}\nclass D {\n  var n: Int\n  func add(_ k: Int) -> Int { return self.n + k }\n}\nfunc make() -> C? {\n  print(50)\n  return C(d: D(n: 4))\n}\nfunc nothing() -> C? { return nil }\nfunc main() {\n  print(make()?.d.add(noisy()) ?? 0)\n  print(nothing()?.d.add(noisy()) ?? 0)\n}";
+    assert_eq!(run(source), "50\n100\n5\n0\n");
+}
+
+#[test]
+fn an_optional_chain_releases_what_it_creates() {
+    let source = tracked(
+        "class Box {\n  var item: Tracked\n}\nfunc make() -> Box? { return Box(item: Tracked(id: 1)) }\nfunc main() {\n  print(make()?.item.id ?? 0)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n10\n");
+}
+
+#[test]
+fn a_chain_without_an_optional_before_the_first_link_is_rejected() {
+    let source = chain(
+        "func main() {\n  let car = Car(engine: Engine(power: 1), spare: nil, name: 1)\n  print(car?.engine.power ?? 0)\n}",
+    );
+    assert!(build_error(&source).contains("optional"));
+}
+
+#[test]
+fn a_mutating_call_inside_an_optional_chain_is_rejected() {
+    let source = "struct S {\n  var n: Int\n  mutating func bump() { self.n += 1 }\n}\nclass C {\n  var s: S\n}\nfunc main() {\n  let c: C? = C(s: S(n: 1))\n  c?.s.bump()\n}";
+    assert!(build_error(source).contains("mutating"));
+}

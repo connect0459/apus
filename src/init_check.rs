@@ -331,10 +331,10 @@ impl Scan<'_> {
             ExprKind::Ident(name) => name == SELF || self.is_member(name),
             ExprKind::Unwrap(inner) => self.expr_uses_self(inner),
             ExprKind::Coalesce { lhs, rhs } => self.expr_uses_self(lhs) || self.expr_uses_self(rhs),
-            ExprKind::OptMember { base, .. } => self.expr_uses_self(base),
-            ExprKind::OptMemberCall { base, args, .. } => {
-                self.expr_uses_self(base) || args.iter().any(|a| self.expr_uses_self(a.value()))
+            ExprKind::OptionalChain { subject, link } => {
+                self.expr_uses_self(subject) || self.expr_uses_self(link)
             }
+            ExprKind::ChainValue => false,
             ExprKind::Nil
             | ExprKind::Int(_)
             | ExprKind::Bool(_)

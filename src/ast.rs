@@ -558,15 +558,11 @@ pub enum ExprKind {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
-    OptMember {
-        base: Box<Expr>,
-        name: String,
+    OptionalChain {
+        subject: Box<Expr>,
+        link: Box<Expr>,
     },
-    OptMemberCall {
-        base: Box<Expr>,
-        name: String,
-        args: Vec<Arg>,
-    },
+    ChainValue,
     Int(i64),
     Bool(bool),
     Str(String),

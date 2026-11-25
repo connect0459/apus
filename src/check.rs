@@ -33,6 +33,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         cell_self: None,
         cell_call: CellCall::default(),
         super_initialized: false,
+        chain_values: Vec::new(),
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -205,6 +206,7 @@ struct FnCx<'a> {
     cell_self: Option<CellSelf>,
     cell_call: CellCall,
     super_initialized: bool,
+    chain_values: Vec<TExpr>,
 }
 
 #[derive(Clone, Copy)]
@@ -265,8 +267,8 @@ impl FnCx<'_> {
         })
     }
 
-    fn optional_chain(&mut self, line: u32, base: &Expr) -> CResult<(TExpr, TExpr)> {
-        let value = self.value(base)?;
+    fn optional_chain(&mut self, line: u32, subject: &Expr) -> CResult<(LocalId, TExpr, TExpr)> {
+        let value = self.value(subject)?;
         let optional = value.ty();
         let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
             CheckError::at(
@@ -278,14 +280,12 @@ impl FnCx<'_> {
             )
         })?;
         let held = self.temp(optional);
-        Ok((
-            Self::is_some(held, value),
-            TExpr::Field {
-                base: Box::new(TExpr::Local(held, optional)),
-                index: 1,
-                ty: inner,
-            },
-        ))
+        let payload = TExpr::Field {
+            base: Box::new(TExpr::Local(held, optional)),
+            index: 1,
+            ty: inner,
+        };
+        Ok((held, value, payload))
     }
 
     fn is_some(held: LocalId, value: TExpr) -> TExpr {
@@ -462,8 +462,11 @@ impl FnCx<'_> {
                 value,
                 body,
             } => self.while_let(stmt.line(), name, *mutable, value, body, out),
-            StmtKind::Expr(expr) if matches!(expr.kind(), ExprKind::OptMemberCall { .. }) => {
-                self.optional_call_stmt(stmt.line(), expr, out)
+            StmtKind::Expr(expr) if matches!(expr.kind(), ExprKind::OptionalChain { .. }) => {
+                let ExprKind::OptionalChain { subject, link } = expr.kind() else {
+                    return Ok(());
+                };
+                self.chain_statements(stmt.line(), subject, link, out)
             }
             StmtKind::Expr(expr) if self.is_super_init(expr) => {
                 self.super_init(stmt.line(), expr, out)
@@ -628,28 +631,26 @@ impl FnCx<'_> {
         Ok(())
     }
 
-    fn optional_call_stmt(&mut self, line: u32, expr: &Expr, out: &mut Vec<TStmt>) -> CResult<()> {
-        let ExprKind::OptMemberCall { base, name, args } = expr.kind() else {
-            return Err(CheckError::at(line, "internal error: not an optional call"));
-        };
-        let value = self.value(base)?;
+    fn chain_statements(
+        &mut self,
+        line: u32,
+        subject: &Expr,
+        link: &Expr,
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let (held, value, payload) = self.optional_chain(line, subject)?;
         let optional = value.ty();
-        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
-            CheckError::at(
-                line,
-                format!(
-                    "'?.' needs an optional, but found {}",
-                    self.name_of(optional)
-                ),
-            )
-        })?;
-        let held = self.temp(optional);
-        let payload = TExpr::Field {
-            base: Box::new(TExpr::Local(held, optional)),
-            index: 1,
-            ty: inner,
+        self.chain_values.push(payload);
+        let mut body = Vec::new();
+        let checked = match link.kind() {
+            ExprKind::OptionalChain {
+                subject: next,
+                link: rest,
+            } => self.chain_statements(line, next, rest, &mut body),
+            _ => self.expr(link).map(|call| body.push(TStmt::Eval(call))),
         };
-        let call = self.method_call_on(line, base, Some(payload), name, args, None)?;
+        self.chain_values.pop();
+        checked?;
         out.push(TStmt::If {
             cond: TExpr::Bool(true),
             then_body: vec![
@@ -667,7 +668,7 @@ impl FnCx<'_> {
                         }),
                         rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
                     },
-                    then_body: vec![TStmt::Eval(call)],
+                    then_body: body,
                     else_body: Vec::new(),
                 },
             ],
@@ -1368,21 +1369,18 @@ impl FnCx<'_> {
                 self.field_of(line, base, name)
             }
             ExprKind::Coalesce { lhs, rhs } => self.coalesce(line, lhs, rhs),
-            ExprKind::OptMember { base, name } => {
-                let (condition, payload) = self.optional_chain(line, base)?;
-                let access = self.field_of(line, payload, name)?;
-                self.chain_result(condition, access)
+            ExprKind::OptionalChain { subject, link } => {
+                let (held, value, payload) = self.optional_chain(line, subject)?;
+                let condition = Self::is_some(held, value);
+                self.chain_values.push(payload);
+                let access = self.value(link);
+                self.chain_values.pop();
+                self.chain_result(condition, access?)
             }
-            ExprKind::OptMemberCall { base, name, args } => {
-                let (condition, payload) = self.optional_chain(line, base)?;
-                let call = self.method_call_on(line, base, Some(payload), name, args, None)?;
-                if call.ty() == Ty::Void {
-                    return Err(CheckError::at(
-                        line,
-                        "this call does not produce a value, so it cannot be chained into an expression",
-                    ));
-                }
-                self.chain_result(condition, call)
+            ExprKind::ChainValue => {
+                self.chain_values.last().cloned().ok_or_else(|| {
+                    CheckError::at(line, "internal error: no optional chain is open")
+                })
             }
             ExprKind::Range { .. } => Err(CheckError::at(
                 line,
@@ -1399,24 +1397,8 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
-        self.method_call_on(line, base, None, name, args, expected)
-    }
-
-    fn method_call_on(
-        &mut self,
-        line: u32,
-        base: &Expr,
-        preset: Option<TExpr>,
-        name: &str,
-        args: &[Arg],
-        expected: Option<Ty>,
-    ) -> CResult<TExpr> {
         let sigs = self.sigs;
-        let chained = preset.is_some();
-        let (receiver, lookup_ty, dispatching) = if let Some(receiver) = preset {
-            let ty = receiver.ty();
-            (receiver, ty, true)
-        } else if self.is_super(base) {
+        let (receiver, lookup_ty, dispatching) = if self.is_super(base) {
             let (receiver, parent) = self.super_receiver(line)?;
             (receiver, parent, false)
         } else {
@@ -1436,7 +1418,7 @@ impl FnCx<'_> {
         let sig = sigs
             .func(&qualified)
             .ok_or_else(|| CheckError::at(line, format!("'{owner}' has no method '{name}'")))?;
-        if sig.is_mutating() && (chained || !self.is_mutable_variable(base)) {
+        if sig.is_mutating() && !self.is_mutable_variable(base) {
             return Err(CheckError::at(
                 line,
                 format!(

@@ -771,7 +771,11 @@ impl Parser<'_> {
     }
 
     fn postfix(&mut self) -> PResult<Expr> {
-        let mut expr = self.primary()?;
+        let expr = self.primary()?;
+        self.postfix_rest(expr)
+    }
+
+    fn postfix_rest(&mut self, mut expr: Expr) -> PResult<Expr> {
         while self.on_same_line() {
             let line = expr.line();
             if let ExprKind::Ident(name) = expr.kind().clone()
@@ -791,22 +795,15 @@ impl Parser<'_> {
                     Some(Token::Punct(p)) if p == "."
                 )
             {
-                self.pos += 2;
-                let name = self.name()?;
-                let base = Box::new(expr);
-                expr = if self.is_punct("(") {
-                    Expr::new(
-                        line,
-                        ExprKind::OptMemberCall {
-                            base,
-                            name,
-                            args: self.args()?,
-                        },
-                    )
-                } else {
-                    Expr::new(line, ExprKind::OptMember { base, name })
-                };
-                continue;
+                self.pos += 1;
+                let link = self.postfix_rest(Expr::new(line, ExprKind::ChainValue))?;
+                return Ok(Expr::new(
+                    line,
+                    ExprKind::OptionalChain {
+                        subject: Box::new(expr),
+                        link: Box::new(link),
+                    },
+                ));
             }
             if self.eat_punct(".") {
                 let after_super = matches!(expr.kind(), ExprKind::Ident(n) if n == "super");
@@ -986,14 +983,21 @@ mod tests {
     }
 
     #[test]
-    fn a_question_mark_before_a_dot_chains_through_an_optional() {
-        let e = expr("a?.b?.m(1)");
-        let ExprKind::OptMemberCall { base, name, args } = e.kind() else {
-            panic!("expected an optional call");
+    fn a_question_mark_before_a_dot_starts_a_chain_that_runs_to_the_end_of_the_postfix() {
+        let e = expr("a?.b?.m(1).c");
+        let ExprKind::OptionalChain { subject, link } = e.kind() else {
+            panic!("expected an optional chain");
         };
-        assert_eq!(name, "m");
-        assert_eq!(args.len(), 1);
-        assert!(matches!(base.kind(), ExprKind::OptMember { .. }));
+        assert_eq!(subject.kind(), &ExprKind::Ident("a".to_string()));
+        let ExprKind::OptionalChain { subject, link } = link.kind() else {
+            panic!("expected a nested chain");
+        };
+        assert!(matches!(subject.kind(), ExprKind::Member { .. }));
+        let ExprKind::Member { base, name } = link.kind() else {
+            panic!("expected a member read after the call");
+        };
+        assert_eq!(name, "c");
+        assert!(matches!(base.kind(), ExprKind::MemberCall { .. }));
     }
 
     #[test]
