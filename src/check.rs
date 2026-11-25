@@ -331,6 +331,12 @@ fn exits(stmts: &[Stmt], in_switch: bool, inner_labels: &[String]) -> bool {
     }
 }
 
+struct EnumTarget<'e> {
+    def: usize,
+    explicit: Option<&'e [TypeRef]>,
+    name: String,
+}
+
 struct AssignPath {
     value: TExpr,
     root: String,
@@ -2284,8 +2290,19 @@ impl FnCx<'_> {
                 })
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let lhs = self.value(lhs)?;
-                let rhs = self.value(rhs)?;
+                let implicit = |e: &Expr| matches!(e.kind(), ExprKind::ImplicitMember { .. });
+                let comparing = matches!(op, BinOp::Eq | BinOp::Ne);
+                let (lhs, rhs) = if comparing && implicit(lhs) && !implicit(rhs) {
+                    let rhs = self.value(rhs)?;
+                    self.expected = Some(rhs.ty());
+                    (self.value(lhs)?, rhs)
+                } else {
+                    let lhs = self.value(lhs)?;
+                    if comparing && implicit(rhs) {
+                        self.expected = Some(lhs.ty());
+                    }
+                    (lhs, self.value(rhs)?)
+                };
                 if let (Ty::Param(index), true) = (
                     lhs.ty(),
                     matches!(
@@ -2329,6 +2346,9 @@ impl FnCx<'_> {
                 line,
                 format!("'{name}' with type arguments is not a value"),
             )),
+            ExprKind::ImplicitMember { name, args } => {
+                self.implicit_member_value(line, name, args.as_deref(), expected)
+            }
             ExprKind::Member { base, name } if self.enum_target(base).is_some() => {
                 self.enum_case(line, base, name, expected)
             }
@@ -2678,15 +2698,22 @@ impl FnCx<'_> {
         }
     }
 
-    fn enum_target<'e>(&self, base: &'e Expr) -> Option<(usize, Option<&'e [TypeRef]>)> {
+    fn enum_target<'e>(&self, base: &'e Expr) -> Option<EnumTarget<'e>> {
         match base.kind() {
             ExprKind::Ident(name) if self.lookup(name, base.line()).is_err() => {
-                self.sigs.enum_def(name).map(|def| (def, None))
+                self.sigs.enum_def(name).map(|def| EnumTarget {
+                    def,
+                    explicit: None,
+                    name: name.clone(),
+                })
             }
-            ExprKind::GenericName { name, type_args } => self
-                .sigs
-                .enum_def(name)
-                .map(|def| (def, Some(type_args.as_slice()))),
+            ExprKind::GenericName { name, type_args } => {
+                self.sigs.enum_def(name).map(|def| EnumTarget {
+                    def,
+                    explicit: Some(type_args.as_slice()),
+                    name: name.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -2778,6 +2805,56 @@ impl FnCx<'_> {
             .collect()
     }
 
+    fn implicit_member_value(
+        &mut self,
+        line: u32,
+        name: &str,
+        args: Option<&[Arg]>,
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let Some(context) = expected else {
+            return Err(CheckError::at(
+                line,
+                format!("'.{name}' needs a type from its context"),
+            ));
+        };
+        let inner = sigs.unwrapped(context);
+        let enum_ty = inner.unwrap_or(context);
+        let wrapped_case = sigs
+            .enum_of(enum_ty)
+            .filter(|sig| inner.is_none() || sig.case_index(name).is_some());
+        let Some(sig) = wrapped_case else {
+            return match (inner, name, args) {
+                (Some(_), "none", None) => Ok(self.none_of(context)),
+                (Some(payload), "some", Some([arg])) if arg.label().is_none() => {
+                    self.expected = Some(payload);
+                    let value = self.value(arg.value())?;
+                    self.coerce(line, context, value)
+                }
+                _ => Err(CheckError::at(
+                    line,
+                    format!(
+                        "'.{name}' needs an enum type from its context, but found {}",
+                        self.name_of(context)
+                    ),
+                )),
+            };
+        };
+        let target = EnumTarget {
+            def: sigs
+                .enum_def(sig.base_name())
+                .ok_or_else(|| CheckError::at(line, "internal error: an enum has no definition"))?,
+            explicit: None,
+            name: sig.base_name().to_string(),
+        };
+        let built = match args {
+            Some(args) => self.enum_construct_of(line, target, name, args, Some(enum_ty))?,
+            None => self.enum_case_of(line, target, name, Some(enum_ty))?,
+        };
+        self.coerce(line, context, built)
+    }
+
     fn enum_case(
         &self,
         line: u32,
@@ -2785,15 +2862,26 @@ impl FnCx<'_> {
         name: &str,
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
-        let Some((def, explicit)) = self.enum_target(base) else {
+        let Some(target) = self.enum_target(base) else {
             return Err(CheckError::at(line, "internal error: not an enum name"));
         };
+        self.enum_case_of(line, target, name, expected)
+    }
+
+    fn enum_case_of(
+        &self,
+        line: u32,
+        target: EnumTarget<'_>,
+        name: &str,
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let EnumTarget {
+            def,
+            explicit,
+            name: base_name,
+        } = target;
         let sigs = self.sigs;
         let generics = sigs.enum_generics(def);
-        let base_name = match base.kind() {
-            ExprKind::Ident(n) | ExprKind::GenericName { name: n, .. } => n.clone(),
-            _ => String::new(),
-        };
         let args = match (generics.is_empty(), explicit) {
             (true, None) => Vec::new(),
             (_, Some(given)) => self.explicit_args(line, &base_name, generics.len(), given)?,
@@ -2847,15 +2935,27 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
-        let Some((def, explicit)) = self.enum_target(base) else {
+        let Some(target) = self.enum_target(base) else {
             return Err(CheckError::at(line, "internal error: not an enum name"));
         };
+        self.enum_construct_of(line, target, name, args, expected)
+    }
+
+    fn enum_construct_of(
+        &mut self,
+        line: u32,
+        target: EnumTarget<'_>,
+        name: &str,
+        args: &[Arg],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let EnumTarget {
+            def,
+            explicit,
+            name: base_name,
+        } = target;
         let sigs = self.sigs;
         let generics = sigs.enum_generics(def);
-        let base_name = match base.kind() {
-            ExprKind::Ident(n) | ExprKind::GenericName { name: n, .. } => n.clone(),
-            _ => String::new(),
-        };
         let inferring = !generics.is_empty() && explicit.is_none();
         let pattern_id = if inferring {
             let identity: Vec<Ty> = (0..generics.len()).map(Ty::Param).collect();

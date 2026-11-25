@@ -478,6 +478,9 @@ impl Scan<'_> {
             ExprKind::GenericCall { args, .. } => {
                 args.iter().any(|a| self.expr_uses_self(a.value()))
             }
+            ExprKind::ImplicitMember { args, .. } => args
+                .as_deref()
+                .is_some_and(|a| a.iter().any(|a| self.expr_uses_self(a.value()))),
             ExprKind::Member { base, .. } => self.expr_uses_self(base),
             ExprKind::MemberCall { base, args, .. }
             | ExprKind::GenericMemberCall { base, args, .. } => {

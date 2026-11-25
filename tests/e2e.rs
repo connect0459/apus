@@ -4193,3 +4193,71 @@ fn a_malformed_interpolation_is_an_error() {
     assert!(build_error("func main() { print(\"a\\(1\") }").contains("interpolation"));
     assert!(!build_error("func main() { print(\"a\\(1 +)\") }").is_empty());
 }
+
+const SHAPES_ENUM: &str = "enum Color { case red, green }\nenum Shape {\n  case circle(Int)\n  case rect(Int, Int)\n  case tinted(Color)\n  case empty\n}\nfunc area(_ s: Shape) -> Int {\n  switch s {\n  case .circle(let r): return 3 * r * r\n  case .rect(let w, let h): return w * h\n  case .tinted(let c):\n    if c == Color.red { return 1 }\n    return 2\n  case .empty: return 0\n  }\n}\n";
+
+#[test]
+fn an_enum_case_may_omit_the_type_name_where_the_type_is_known() {
+    let source = "enum Color { case red, green }\nenum Shape {\n  case circle(Int)\n  case rect(Int, Int)\n  case empty\n}\nfunc area(_ s: Shape) -> Int {\n  switch s {\n  case .circle(let r): return 3 * r * r\n  case .rect(let w, let h): return w * h\n  case .empty: return 0\n  }\n}\nfunc make(_ n: Int) -> Shape {\n  if n == 0 { return .empty }\n  return .circle(n)\n}\nfunc main() {\n  let a: Shape = .circle(2)\n  let b: Shape = .rect(3, 4)\n  var c: Shape = .empty\n  print(area(a))\n  print(area(b))\n  print(area(c))\n  c = .rect(1, 5)\n  print(area(c))\n  print(area(.circle(1)))\n  print(area(make(0)))\n  print(area(make(3)))\n  let g: Color = .green\n  print(g == Color.green)\n}";
+    assert_eq!(run(source), "12\n12\n0\n5\n3\n0\n27\ntrue\n");
+}
+
+#[test]
+fn an_implicit_case_works_as_a_member_value_a_payload_and_an_operand() {
+    let source = "enum Color { case red, green }\nenum Mark {\n  case tint(Color)\n  case none\n}\nstruct Pixel {\n  var color: Color\n  var mark: Mark\n}\nfunc main() {\n  let p = Pixel(color: .green, mark: .tint(.red))\n  print(p.color == .green)\n  print(.green == p.color)\n  print(p.color != .red)\n  switch p.mark {\n  case .tint(let c): print(c == .red)\n  case .none: print(false)\n  }\n  var q = p\n  q.color = .red\n  print(q.color == Color.red)\n}";
+    assert_eq!(run(source), "true\ntrue\ntrue\ntrue\ntrue\n");
+}
+
+#[test]
+fn an_implicit_case_sees_through_an_optional() {
+    let source = "enum Color { case red, green }\nfunc show(_ c: Color?) {\n  if let v = c { print(v == .red) } else { print(0) }\n}\nfunc main() {\n  let a: Color? = .red\n  let b: Color? = .none\n  let n: Int? = .some(4)\n  let m: Int? = .none\n  show(a)\n  show(b)\n  show(.green)\n  if let v = n { print(v) }\n  if m == nil { print(9) }\n}";
+    assert_eq!(run(source), "true\n0\nfalse\n4\n9\n");
+}
+
+#[test]
+fn an_implicit_case_of_a_generic_enum_takes_its_arguments_from_the_context() {
+    let source = "enum Maybe<T> {\n  case some(T)\n  case nothing\n}\nfunc unwrap(_ m: Maybe<Int>, or d: Int) -> Int {\n  switch m {\n  case .some(let v): return v\n  case .nothing: return d\n  }\n}\nfunc main() {\n  let a: Maybe<Int> = .some(7)\n  let b: Maybe<Int> = .nothing\n  print(unwrap(a, or: 0))\n  print(unwrap(b, or: 5))\n  print(unwrap(.some(1), or: 0))\n}";
+    assert_eq!(run(source), "7\n5\n1\n");
+}
+
+#[test]
+fn an_implicit_case_is_checked_against_the_enum_of_the_context() {
+    let source = format!(
+        "{SHAPES_ENUM}func main() {{\n  let s: Shape = .tinted(.green)\n  print(area(s))\n  print(area(.tinted(.red)))\n}}"
+    );
+    assert_eq!(run(&source), "2\n1\n");
+}
+
+#[test]
+fn an_implicit_case_without_a_context_is_rejected() {
+    assert!(build_error("enum E { case a }\nfunc main() {\n  let x = .a\n}").contains("context"));
+    assert!(build_error("enum E { case a }\nfunc main() {\n  print(.a)\n}").contains("context"));
+}
+
+#[test]
+fn an_implicit_case_needs_an_enum_context_that_has_the_case() {
+    let not_enum = "func main() {\n  let n: Int = .a\n}";
+    assert!(build_error(not_enum).contains("enum"));
+    let unknown = "enum E { case a }\nfunc main() {\n  let e: E = .b\n}";
+    assert!(build_error(unknown).contains("'b'"));
+    let optional_of_int = "func main() {\n  let n: Int? = .a\n}";
+    assert!(!build_error(optional_of_int).is_empty());
+}
+
+#[test]
+fn an_implicit_case_with_values_follows_the_rules_of_a_qualified_one() {
+    let missing = "enum E { case a(Int) }\nfunc main() {\n  let e: E = .a\n}";
+    assert!(build_error(missing).contains("carries values"));
+    let count = "enum E { case a(Int) }\nfunc main() {\n  let e: E = .a(1, 2)\n}";
+    assert!(build_error(count).contains("takes 1 value"));
+    let wrong = "enum E { case a(Int) }\nfunc main() {\n  let e: E = .a(true)\n}";
+    assert!(build_error(wrong).contains("expected Int"));
+    let extra = "enum E { case a }\nfunc main() {\n  let e: E = .a(1)\n}";
+    assert!(!build_error(extra).is_empty());
+}
+
+#[test]
+fn a_local_named_like_the_enum_does_not_hide_an_implicit_case() {
+    let source = "enum Color { case red, green }\nfunc main() {\n  let Color = 5\n  let c: Color = .red\n  print(c == .red)\n  print(Color)\n}";
+    assert_eq!(run(source), "true\n5\n");
+}

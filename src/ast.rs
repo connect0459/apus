@@ -691,6 +691,7 @@ fn depth_of(kind: &ExprKind) -> u32 {
         | ExprKind::Str(_)
         | ExprKind::Ident(_)
         | ExprKind::GenericName { .. } => 0,
+        ExprKind::ImplicitMember { args, .. } => args.as_deref().map_or(0, deepest),
         ExprKind::Unwrap(expr)
         | ExprKind::Unary { expr, .. }
         | ExprKind::Cast { expr, .. }
@@ -784,6 +785,10 @@ pub enum ExprKind {
         base: Box<Expr>,
         name: String,
         args: Vec<Arg>,
+    },
+    ImplicitMember {
+        name: String,
+        args: Option<Vec<Arg>>,
     },
     GenericMemberCall {
         base: Box<Expr>,

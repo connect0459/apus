@@ -1281,6 +1281,16 @@ impl Parser<'_> {
             Some(Token::Ident(s)) if s == "false" => ExprKind::Bool(false),
             Some(Token::Ident(s)) if s == "nil" => ExprKind::Nil,
             Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => ExprKind::Ident(s.clone()),
+            Some(Token::Punct(p)) if p == "." => {
+                self.pos += 1;
+                let name = self.name()?;
+                let args = if self.is_punct("(") && self.on_same_line() {
+                    Some(self.args()?)
+                } else {
+                    None
+                };
+                return Ok(Expr::new(line, ExprKind::ImplicitMember { name, args }));
+            }
             Some(Token::Interp(pieces)) => {
                 let pieces = pieces.clone();
                 self.pos += 1;
@@ -2334,6 +2344,55 @@ mod tests {
         assert_eq!(
             expr("\"\\(1 + 2)\""),
             conversion(bin(BinOp::Add, int(1), int(2)))
+        );
+    }
+
+    #[test]
+    fn a_leading_dot_names_an_enum_case_whose_type_comes_from_the_context() {
+        assert_eq!(
+            expr(".red"),
+            ex(ExprKind::ImplicitMember {
+                name: "red".to_string(),
+                args: None,
+            })
+        );
+        assert_eq!(
+            expr(".circle(5)"),
+            ex(ExprKind::ImplicitMember {
+                name: "circle".to_string(),
+                args: Some(vec![Arg::new(None, int(5))]),
+            })
+        );
+        assert_eq!(
+            expr(".rect(.red, 2)"),
+            ex(ExprKind::ImplicitMember {
+                name: "rect".to_string(),
+                args: Some(vec![
+                    Arg::new(
+                        None,
+                        ex(ExprKind::ImplicitMember {
+                            name: "red".to_string(),
+                            args: None,
+                        })
+                    ),
+                    Arg::new(None, int(2))
+                ]),
+            })
+        );
+    }
+
+    #[test]
+    fn an_implicit_member_may_be_compared() {
+        assert_eq!(
+            expr("c == .red"),
+            bin(
+                BinOp::Eq,
+                id("c"),
+                ex(ExprKind::ImplicitMember {
+                    name: "red".to_string(),
+                    args: None,
+                })
+            )
         );
     }
 
