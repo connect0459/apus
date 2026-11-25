@@ -341,6 +341,7 @@ pub struct Field {
     mutable: bool,
     ty: TypeName,
     unowned: bool,
+    weak: bool,
 }
 
 impl Field {
@@ -350,7 +351,17 @@ impl Field {
             mutable,
             ty: ty.into(),
             unowned: false,
+            weak: false,
         }
+    }
+
+    pub fn as_weak(mut self) -> Self {
+        self.weak = true;
+        self
+    }
+
+    pub fn is_weak(&self) -> bool {
+        self.weak
     }
 
     pub fn as_unowned(mut self) -> Self {

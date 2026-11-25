@@ -200,6 +200,8 @@ pub enum TExpr {
     },
     RetainUnowned(Box<TExpr>),
     LoadUnowned(Box<TExpr>),
+    RetainWeak(Box<TExpr>),
+    LoadWeak(Box<TExpr>),
 }
 
 impl TExpr {
@@ -218,7 +220,9 @@ impl TExpr {
             TExpr::Retain(inner)
             | TExpr::Moved(inner)
             | TExpr::RetainUnowned(inner)
-            | TExpr::LoadUnowned(inner) => inner.ty(),
+            | TExpr::LoadUnowned(inner)
+            | TExpr::RetainWeak(inner)
+            | TExpr::LoadWeak(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::FuncAddr(_) => Ty::Int,
             TExpr::Unwrap { ty, .. } | TExpr::Select { ty, .. } => *ty,
@@ -415,6 +419,8 @@ impl<E> Rewriter<'_, E> {
             },
             TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner)?)),
             TExpr::LoadUnowned(inner) => TExpr::LoadUnowned(Box::new(self.expr(inner)?)),
+            TExpr::RetainWeak(inner) => TExpr::RetainWeak(Box::new(self.expr(inner)?)),
+            TExpr::LoadWeak(inner) => TExpr::LoadWeak(Box::new(self.expr(inner)?)),
         })
     }
 }

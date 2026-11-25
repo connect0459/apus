@@ -1054,6 +1054,51 @@ impl Emitter<'_, '_> {
                 self.retain_unowned(value)?;
                 value
             }
+            TExpr::RetainWeak(inner) => {
+                let value = self.value(inner)?;
+                let flags = MemFlagsData::trusted();
+                let tag = self.builder.ins().load(types::I64, flags, value, 0);
+                self.guarded(tag, |this| {
+                    let payload =
+                        this.builder
+                            .ins()
+                            .load(types::I64, flags, value, field_offset(1));
+                    this.retain_unowned(payload)
+                })?;
+                value
+            }
+            TExpr::LoadWeak(inner) => {
+                let ty = inner.ty();
+                let source = self.value(inner)?;
+                let flags = MemFlagsData::trusted();
+                let dest = self.alloc_struct(ty)?;
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                self.builder.ins().store(flags, zero, dest, 0);
+                self.builder.ins().store(flags, zero, dest, field_offset(1));
+                let tag = self.builder.ins().load(types::I64, flags, source, 0);
+                self.guarded(tag, |this| {
+                    let payload =
+                        this.builder
+                            .ins()
+                            .load(types::I64, flags, source, field_offset(1));
+                    let strong =
+                        this.builder
+                            .ins()
+                            .load(types::I64, flags, payload, field_offset(RC_SLOT));
+                    this.guarded(strong, |this| {
+                        let next = this.builder.ins().iadd_imm_s(strong, 1);
+                        this.builder
+                            .ins()
+                            .store(flags, next, payload, field_offset(RC_SLOT));
+                        this.builder.ins().store(flags, tag, dest, 0);
+                        this.builder
+                            .ins()
+                            .store(flags, payload, dest, field_offset(1));
+                        Ok(())
+                    })
+                })?;
+                dest
+            }
             TExpr::LoadUnowned(inner) => {
                 let value = self.value(inner)?;
                 self.load_unowned(value)?;

@@ -60,6 +60,20 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
     }
     if let Some(layout) = sigs.struct_sig(id) {
         for (index, field) in layout.members() {
+            if field.is_weak() {
+                if let Some(Ty::Class(target)) = sigs.unwrapped(field.ty()) {
+                    body.push(TStmt::ReleaseUnowned(TExpr::Field {
+                        base: Box::new(TExpr::Field {
+                            base: Box::new(receiver()),
+                            index,
+                            ty: field.ty(),
+                        }),
+                        index: 1,
+                        ty: Ty::Class(target),
+                    }));
+                }
+                continue;
+            }
             if !needs_rc(sigs, field.ty()) {
                 continue;
             }
@@ -116,6 +130,16 @@ impl Pass<'_> {
         self.sigs
             .struct_sig(id)
             .and_then(|sig| sig.fields().get(index).map(|f| f.is_unowned()))
+            .unwrap_or(false)
+    }
+
+    fn is_weak_field(&self, base: Ty, index: usize) -> bool {
+        let (Ty::Struct(id) | Ty::Class(id)) = base else {
+            return false;
+        };
+        self.sigs
+            .struct_sig(id)
+            .and_then(|sig| sig.fields().get(index).map(|f| f.is_weak()))
             .unwrap_or(false)
     }
 
@@ -338,6 +362,10 @@ impl Pass<'_> {
             self.assign_unowned_field(local, index, value, out);
             return;
         }
+        if self.is_weak_field(base, index) {
+            self.assign_weak_field(local, index, value, out);
+            return;
+        }
         if !self.needs_rc(field_ty) {
             let (value, temps) = self.scoped(|p| p.expr(value));
             out.push(TStmt::AssignField {
@@ -359,6 +387,47 @@ impl Pass<'_> {
             base: Box::new(TExpr::Local(local, base)),
             index,
             ty: field_ty,
+        }));
+        out.push(TStmt::AssignField {
+            local,
+            index,
+            value: TExpr::Local(fresh, field_ty),
+        });
+    }
+
+    fn assign_weak_field(
+        &mut self,
+        local: LocalId,
+        index: usize,
+        value: &TExpr,
+        out: &mut Vec<TStmt>,
+    ) {
+        let base = self.locals[local.index()];
+        let field_ty = value.ty();
+        let target = self.sigs.unwrapped(field_ty).unwrap_or(Ty::Int);
+        let moved = matches!(value, TExpr::Moved(_));
+        let (value, temps) = self.scoped(|p| {
+            let value = p.borrowed(value);
+            if moved {
+                value
+            } else {
+                TExpr::RetainWeak(Box::new(value))
+            }
+        });
+        let fresh = self.new_local(field_ty);
+        out.push(TStmt::Let {
+            local: fresh,
+            init: value,
+        });
+        out.extend(self.release_temps(&temps));
+        out.push(TStmt::ReleaseUnowned(TExpr::Field {
+            base: Box::new(TExpr::Field {
+                base: Box::new(TExpr::Local(local, base)),
+                index,
+                ty: field_ty,
+            }),
+            index: 1,
+            ty: target,
         }));
         out.push(TStmt::AssignField {
             local,
@@ -435,7 +504,8 @@ impl Pass<'_> {
 
     fn is_owned(&self, expr: &TExpr) -> bool {
         if let TExpr::Field { base, index, .. } = expr {
-            return self.is_unowned_field(base.ty(), *index);
+            return self.is_unowned_field(base.ty(), *index)
+                || self.is_weak_field(base.ty(), *index);
         }
         matches!(
             expr,
@@ -448,6 +518,8 @@ impl Pass<'_> {
                 | TExpr::Moved(_)
                 | TExpr::LoadUnowned(_)
                 | TExpr::RetainUnowned(_)
+                | TExpr::RetainWeak(_)
+                | TExpr::LoadWeak(_)
                 | TExpr::Select { .. }
         )
     }
@@ -518,8 +590,11 @@ impl Pass<'_> {
                     .iter()
                     .enumerate()
                     .map(|(index, arg)| {
-                        if self.is_unowned_field(*ty, index) && !matches!(arg, TExpr::Moved(_)) {
+                        let moved = matches!(arg, TExpr::Moved(_));
+                        if self.is_unowned_field(*ty, index) && !moved {
                             TExpr::RetainUnowned(Box::new(self.borrowed(arg)))
+                        } else if self.is_weak_field(*ty, index) && !moved {
+                            TExpr::RetainWeak(Box::new(self.borrowed(arg)))
                         } else {
                             self.owned_value(arg)
                         }
@@ -543,6 +618,8 @@ impl Pass<'_> {
                 };
                 if self.is_unowned_field(base.ty(), *index) {
                     TExpr::LoadUnowned(Box::new(field))
+                } else if self.is_weak_field(base.ty(), *index) {
+                    TExpr::LoadWeak(Box::new(field))
                 } else {
                     field
                 }
@@ -581,6 +658,8 @@ impl Pass<'_> {
             })),
             TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner))),
             TExpr::LoadUnowned(inner) => TExpr::LoadUnowned(Box::new(self.expr(inner))),
+            TExpr::RetainWeak(inner) => TExpr::RetainWeak(Box::new(self.expr(inner))),
+            TExpr::LoadWeak(inner) => TExpr::LoadWeak(Box::new(self.expr(inner))),
             TExpr::Retain(inner) => TExpr::Retain(Box::new(self.expr(inner))),
             TExpr::Bind { local, init } => {
                 if self.needs_rc(init.ty()) && self.is_owned(init) {

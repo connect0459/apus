@@ -2337,3 +2337,111 @@ fn optional_chaining_needs_an_optional() {
     let source = "class C { var n: Int }\nfunc main() {\n  let c = C(n: 1)\n  print(c?.n ?? 0)\n}";
     assert!(build_error(source).contains("optional"));
 }
+
+const WEAK_FAMILY: &str = "class Parent {\n  var id: Int\n  var child: Child?\n  deinit { print(0 - self.id) }\n}\nclass Child {\n  weak var parent: Parent?\n  var id: Int\n  deinit { print(0 - self.id) }\n}\n";
+
+fn weak_family(body: &str) -> String {
+    format!("{WEAK_FAMILY}{body}")
+}
+
+#[test]
+fn a_weak_member_reads_the_instance_while_it_is_alive() {
+    let source = weak_family(
+        "func main() {\n  let p = Parent(id: 1, child: nil)\n  let c = Child(parent: p, id: 2)\n  print(c.parent!.id)\n  print(c.parent == nil)\n}",
+    );
+    assert_eq!(run(&source), "1\nfalse\n-2\n-1\n");
+}
+
+#[test]
+fn a_weak_member_does_not_keep_its_instance_alive() {
+    let source = weak_family(
+        "func main() {\n  let c = Child(parent: Parent(id: 1, child: nil), id: 2)\n  print(10)\n  print(c.parent == nil)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\ntrue\n-2\n");
+}
+
+#[test]
+fn a_weak_member_becomes_nil_when_its_instance_is_released() {
+    let source = weak_family(
+        "func main() {\n  var p: Parent? = Parent(id: 1, child: nil)\n  let c = Child(parent: p, id: 2)\n  print(c.parent == nil)\n  p = nil\n  print(c.parent == nil)\n}",
+    );
+    assert_eq!(run(&source), "false\n-1\ntrue\n-2\n");
+}
+
+#[test]
+fn a_parent_and_child_that_refer_to_each_other_are_both_released() {
+    let source = weak_family(
+        "func main() {\n  let p = Parent(id: 1, child: nil)\n  let c = Child(parent: p, id: 2)\n  p.child = c\n  print(10)\n  print(c.parent!.id)\n}",
+    );
+    assert_eq!(run(&source), "10\n1\n-1\n-2\n");
+}
+
+#[test]
+fn a_weak_member_can_be_assigned_another_instance_or_nil() {
+    let source = weak_family(
+        "func main() {\n  let a = Parent(id: 1, child: nil)\n  let b = Parent(id: 3, child: nil)\n  let c = Child(parent: a, id: 2)\n  c.parent = b\n  print(c.parent!.id)\n  c.parent = nil\n  print(c.parent == nil)\n  c.parent = a\n  print(c.parent!.id)\n}",
+    );
+    assert_eq!(run(&source), "3\ntrue\n1\n-2\n-3\n-1\n");
+}
+
+#[test]
+fn a_weak_member_can_be_bound_with_if_let_and_chained() {
+    let source = weak_family(
+        "func main() {\n  let p = Parent(id: 7, child: nil)\n  let c = Child(parent: p, id: 2)\n  if let q = c.parent {\n    print(q.id)\n  }\n  print(c.parent?.id ?? 0)\n  print(c.parent?.child?.id ?? 0 - 1)\n}",
+    );
+    assert_eq!(run(&source), "7\n7\n-1\n-2\n-7\n");
+}
+
+#[test]
+fn a_binding_made_from_a_weak_member_keeps_the_instance_alive() {
+    let source = weak_family(
+        "func main() {\n  var p: Parent? = Parent(id: 1, child: nil)\n  let c = Child(parent: p, id: 2)\n  if let q = c.parent {\n    p = nil\n    print(10)\n    print(q.id)\n  }\n  print(20)\n  print(c.parent == nil)\n}",
+    );
+    assert_eq!(run(&source), "10\n1\n-1\n20\ntrue\n-2\n");
+}
+
+#[test]
+fn a_weak_member_is_set_by_an_initializer() {
+    let source = "class Parent {\n  var id: Int\n}\nclass Child {\n  weak var parent: Parent?\n  init(of p: Parent) { self.parent = p }\n}\nfunc main() {\n  let p = Parent(id: 8)\n  let c = Child(of: p)\n  print(c.parent!.id)\n}";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn a_weak_member_is_inherited_by_subclasses() {
+    let source = "class Parent {\n  var id: Int\n}\nclass Child {\n  weak var parent: Parent?\n}\nclass Grandchild: Child {\n  var n: Int\n}\nfunc main() {\n  let p = Parent(id: 7)\n  let g = Grandchild(parent: p, n: 1)\n  print(g.parent!.id)\n}";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn releasing_the_holder_of_a_weak_reference_to_a_dead_instance_is_safe() {
+    let source = weak_family(
+        "func make() -> Child {\n  let p = Parent(id: 1, child: nil)\n  return Child(parent: p, id: 2)\n}\nfunc main() {\n  let c = make()\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}
+
+#[test]
+fn weak_needs_an_optional_class_type() {
+    let plain = "class P { var x: Int }\nclass C {\n  weak var p: P\n}\nfunc main() { }";
+    assert!(build_error(plain).contains("weak"));
+    let int = "class C {\n  weak var n: Int?\n}\nfunc main() { }";
+    assert!(build_error(int).contains("weak"));
+}
+
+#[test]
+fn weak_needs_var() {
+    let source = "class P { var x: Int }\nclass C {\n  weak let p: P?\n}\nfunc main() { }";
+    assert!(build_error(source).contains("weak"));
+}
+
+#[test]
+fn weak_is_rejected_on_a_struct_member() {
+    let source = "class P { var x: Int }\nstruct S {\n  weak var p: P?\n}\nfunc main() { }";
+    assert!(build_error(source).contains("weak"));
+}
+
+#[test]
+fn a_member_cannot_be_both_weak_and_unowned() {
+    let source = "class P { var x: Int }\nclass C {\n  weak unowned var p: P?\n}\nfunc main() { }";
+    assert!(build_error(source).contains("weak"));
+}

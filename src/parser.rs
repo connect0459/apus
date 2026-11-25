@@ -19,9 +19,9 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 23] = [
-    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "nil",
-    "case", "switch", "default", "var", "let", "if", "else", "while", "for", "in", "return",
+const KEYWORDS: [&str; 24] = [
+    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "weak",
+    "nil", "case", "switch", "default", "var", "let", "if", "else", "while", "for", "in", "return",
     "true", "false",
 ];
 
@@ -356,9 +356,25 @@ impl Parser<'_> {
             if self.eat_punct("}") {
                 break;
             }
-            let unowned = self.eat_keyword("unowned");
+            let mut unowned = false;
+            let mut weak = false;
+            loop {
+                if self.eat_keyword("unowned") {
+                    unowned = true;
+                } else if self.eat_keyword("weak") {
+                    weak = true;
+                } else {
+                    break;
+                }
+            }
             if unowned && !class {
                 return self.fail("'unowned' applies only to a member of a class");
+            }
+            if weak && !class {
+                return self.fail("'weak' applies only to a member of a class");
+            }
+            if weak && unowned {
+                return self.fail("a member cannot be both 'weak' and 'unowned'");
             }
             let mutable = if self.eat_keyword("var") {
                 true
@@ -371,7 +387,8 @@ impl Parser<'_> {
             self.expect_punct(":")?;
             let ty = self.type_ref()?;
             let field = Field::new(field_name, mutable, ty);
-            fields.push(if unowned { field.as_unowned() } else { field });
+            let field = if unowned { field.as_unowned() } else { field };
+            fields.push(if weak { field.as_weak() } else { field });
             self.end_of_statement()?;
         }
         let decl = StructDecl::new(line, name, fields).with_generics(generics);
@@ -1037,6 +1054,27 @@ mod tests {
         };
         assert!(class.fields()[0].is_unowned());
         assert!(!class.fields()[1].is_unowned());
+    }
+
+    #[test]
+    fn weak_marks_a_class_member() {
+        let Decl::Struct(class) = try_parse("class C { weak var p: P?\n var n: Int }").unwrap()
+        else {
+            panic!("expected a class");
+        };
+        assert!(class.fields()[0].is_weak());
+        assert!(!class.fields()[1].is_weak());
+    }
+
+    #[test]
+    fn weak_is_rejected_in_a_struct() {
+        assert!(try_parse("struct S { weak var p: P? }").is_err());
+    }
+
+    #[test]
+    fn weak_and_unowned_cannot_be_combined() {
+        assert!(try_parse("class C { weak unowned var p: P? }").is_err());
+        assert!(try_parse("class C { unowned weak var p: P? }").is_err());
     }
 
     #[test]

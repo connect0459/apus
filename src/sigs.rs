@@ -118,6 +118,7 @@ pub struct FieldSig {
     ty: Ty,
     mutable: bool,
     unowned: bool,
+    weak: bool,
 }
 
 impl FieldSig {
@@ -135,6 +136,10 @@ impl FieldSig {
 
     pub fn is_unowned(&self) -> bool {
         self.unowned
+    }
+
+    pub fn is_weak(&self) -> bool {
+        self.weak
     }
 
     pub fn is_hidden(&self) -> bool {
@@ -726,6 +731,7 @@ impl Signatures {
                 ty: Ty::Int,
                 mutable: true,
                 unowned: false,
+                weak: false,
             }));
             if let Some(superclass) = decl.superclass() {
                 let id = self.superclass_id(decl, superclass, at)?;
@@ -744,6 +750,21 @@ impl Signatures {
                     format!("duplicate field '{}' in '{name}'", field.name()),
                 ));
             }
+            if field.is_weak() {
+                let holds_class = self
+                    .unwrapped(ty)
+                    .is_some_and(|inner| matches!(inner, Ty::Class(_)));
+                if !holds_class || !field.is_mutable() {
+                    return Err(CheckError::at(
+                        at,
+                        format!(
+                            "'weak' needs a 'var' member of an optional class type, but '{}' in '{name}' is {}",
+                            field.name(),
+                            self.display(ty, scope)
+                        ),
+                    ));
+                }
+            }
             if field.is_unowned() && !ty.is_class() {
                 return Err(CheckError::at(
                     at,
@@ -759,6 +780,7 @@ impl Signatures {
                 ty,
                 mutable: field.is_mutable(),
                 unowned: field.is_unowned(),
+                weak: field.is_weak(),
             });
         }
         Ok((fields, parent))
@@ -876,6 +898,7 @@ impl Signatures {
                 ty: Ty::Int,
                 mutable: false,
                 unowned: false,
+                weak: false,
             }];
             for slot in 0..widest {
                 let ty = Self::slot_type(&cases, slot).ok_or_else(|| {
@@ -891,6 +914,7 @@ impl Signatures {
                     ty,
                     mutable: false,
                     unowned: false,
+                    weak: false,
                 });
             }
             let layout = StructId::new(instances.structs.len());
@@ -997,6 +1021,7 @@ impl Signatures {
                 ty: Ty::Int,
                 mutable: true,
                 unowned: false,
+                weak: false,
             }],
         }));
         instances.struct_origin.push(Origin::EnumCell(id));

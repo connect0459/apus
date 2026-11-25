@@ -321,6 +321,14 @@ impl Encoder<'_> {
                 self.tag(48);
                 self.expr(inner);
             }
+            TExpr::RetainWeak(inner) => {
+                self.tag(51);
+                self.expr(inner);
+            }
+            TExpr::LoadWeak(inner) => {
+                self.tag(52);
+                self.expr(inner);
+            }
         }
     }
 }
