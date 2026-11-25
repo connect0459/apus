@@ -3259,8 +3259,8 @@ fn a_constrained_value_cannot_flow_into_a_stronger_constraint() {
 }
 
 #[test]
-fn a_string_is_not_comparable_yet() {
-    let source = "func f<T: Comparable>(_ a: T, _ b: T) -> Bool { return a < b }\nfunc main() {\n  print(f(\"a\", \"b\"))\n}";
+fn a_bool_is_not_comparable() {
+    let source = "func f<T: Comparable>(_ a: T, _ b: T) -> Bool { return a < b }\nfunc main() {\n  print(f(true, false))\n}";
     assert!(build_error(source).contains("Comparable"));
 }
 
@@ -4080,4 +4080,25 @@ fn a_string_cannot_be_combined_with_other_types_or_operators() {
 fn a_string_has_only_the_members_count_and_is_empty() {
     assert!(build_error("func main() { print(\"a\".length) }").contains("length"));
     assert!(!build_error("func main() {\n  let s = \"a\"\n  s.count = 1\n}").is_empty());
+}
+
+#[test]
+fn strings_are_ordered_by_their_bytes() {
+    let source = "func main() {\n  print(\"a\" < \"b\")\n  print(\"b\" < \"a\")\n  print(\"a\" < \"ab\")\n  print(\"abc\" > \"ab\")\n  print(\"b\" > \"abc\")\n  print(\"ab\" <= \"ab\")\n  print(\"ab\" >= \"ab\")\n  print(\"ab\" < \"ab\")\n  print(\"\" < \"a\")\n  print(\"a\" <= \"\")\n  print(\"z\" < \"é\")\n  let x = \"ap\" + \"ple\"\n  print(x < \"pear\")\n}";
+    assert_eq!(
+        run(source),
+        "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn a_string_is_comparable_through_a_constraint() {
+    let source = "func largest<T: Comparable>(_ a: T, _ b: T) -> T {\n  if a > b { return a }\n  return b\n}\nfunc main() {\n  print(largest(\"pear\", \"apple\"))\n  print(largest(\"a\" + \"z\", \"b\"))\n  print(largest(3, 9))\n}";
+    assert_eq!(run(source), "pear\nb\n9\n");
+}
+
+#[test]
+fn ordering_a_string_with_another_type_is_rejected() {
+    assert!(build_error("func main() { print(\"a\" < 1) }").contains("expected String"));
+    assert!(build_error("func main() { print(1 < \"a\") }").contains("expected Int"));
 }

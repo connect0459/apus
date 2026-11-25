@@ -181,7 +181,7 @@ impl Backend {
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
         for name in [
-            "printf", "puts", "malloc", "free", "fflush", "write", "memcpy",
+            "printf", "puts", "malloc", "free", "fflush", "write", "memcpy", "memcmp",
         ] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
@@ -851,6 +851,28 @@ impl Emitter<'_, '_> {
         }
     }
 
+    fn string_order(&mut self, left: Value, right: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let left_len = self.builder.ins().load(types::I64, flags, left, STRING_LEN);
+        let right_len = self
+            .builder
+            .ins()
+            .load(types::I64, flags, right, STRING_LEN);
+        let shortest = self.builder.ins().smin(left_len, right_len);
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..3 {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I32));
+        let memcmp = self.import_func("memcmp", sig, false);
+        let call = self.builder.ins().call(memcmp, &[left, right, shortest]);
+        let bytes = self.builder.inst_results(call)[0];
+        let bytes = self.builder.ins().sextend(types::I64, bytes);
+        let lengths = self.builder.ins().isub(left_len, right_len);
+        let differ = self.builder.ins().icmp_imm_s(IntCC::NotEqual, bytes, 0);
+        self.builder.ins().select(differ, bytes, lengths)
+    }
+
     fn alloc_string(&mut self, len: Value) -> Value {
         let flags = MemFlagsData::trusted();
         let size = self
@@ -1261,6 +1283,14 @@ impl Emitter<'_, '_> {
                 } else {
                     same
                 }
+            }
+            TExpr::Binary { op, lhs, rhs } if lhs.ty() == Ty::Str => {
+                let lhs = self.value(lhs)?;
+                let rhs = self.value(rhs)?;
+                let order = self.string_order(lhs, rhs);
+                let condition = comparison(*op)
+                    .ok_or_else(|| CodegenError::from("a string supports only comparisons"))?;
+                self.builder.ins().icmp_imm_s(condition, order, 0)
             }
             TExpr::Binary { op, lhs, rhs } => {
                 let lhs = self.value(lhs)?;

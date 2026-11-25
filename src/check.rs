@@ -3052,6 +3052,9 @@ impl FnCx<'_> {
 
     fn operands(&self, line: u32, op: BinOp, lhs: Ty, rhs: Ty) -> CResult<()> {
         match op {
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge if lhs == Ty::Str => {
+                self.expect(line, Ty::Str, rhs)
+            }
             BinOp::Add
             | BinOp::Sub
             | BinOp::Mul
@@ -3645,7 +3648,8 @@ mod tests {
     fn strings_can_be_compared_and_concatenated() {
         assert!(check_main("print(\"a\" == \"b\")").is_ok());
         assert!(check_main("print(\"a\" != \"b\")").is_ok());
-        assert!(check_main("print(\"a\" < \"b\")").is_err());
+        assert!(check_main("print(\"a\" < \"b\")").is_ok());
+        assert!(check_main("print(\"a\" < 1)").is_err());
         assert!(check_main("print(\"a\" + \"b\")").is_ok());
         assert!(check_main("print(\"a\" * \"b\")").is_err());
     }

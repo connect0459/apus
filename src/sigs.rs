@@ -852,7 +852,7 @@ impl Signatures {
                 matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_))
                     || self.declared_conformances(ty).contains(&protocol)
             }
-            COMPARABLE => ty == Ty::Int,
+            COMPARABLE => matches!(ty, Ty::Int | Ty::Str),
             _ => self.declared_conformances(ty).contains(&protocol),
         }
     }
@@ -1006,7 +1006,7 @@ impl Signatures {
                     return Err(CheckError::at(
                         line,
                         format!(
-                            "'{name}' cannot conform to 'Comparable': only Int is Comparable yet"
+                            "'{name}' cannot conform to 'Comparable': only Int and String are Comparable yet"
                         ),
                     ));
                 }
