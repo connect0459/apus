@@ -4552,3 +4552,67 @@ fn a_deinit_of_a_generic_class_may_not_return_a_value_or_take_parameters() {
     let source = "class C<T> {\n  var item: T\n  deinit() { }\n}\nfunc main() { }";
     assert!(!build_error(source).is_empty());
 }
+
+#[test]
+fn two_optionals_are_equal_when_both_are_nil_or_both_hold_equal_values() {
+    let source = "func main() {\n  let a: Int? = 5\n  let b: Int? = 5\n  let c: Int? = 6\n  let n: Int? = nil\n  let m: Int? = nil\n  print(a == b)\n  print(a == c)\n  print(a == n)\n  print(n == a)\n  print(n == m)\n  print(a != b)\n  print(a != c)\n  print(a != n)\n  print(n != m)\n}";
+    assert_eq!(
+        run(source),
+        "true\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn an_optional_may_be_compared_with_a_plain_value_on_either_side() {
+    let source = "func main() {\n  let a: Int? = 5\n  let n: Int? = nil\n  print(a == 5)\n  print(5 == a)\n  print(a != 5)\n  print(a == 6)\n  print(n == 5)\n  print(5 != n)\n  let s: String? = \"x\"\n  print(s == \"x\")\n  print(s == \"y\")\n}";
+    assert_eq!(
+        run(source),
+        "true\ntrue\nfalse\nfalse\nfalse\ntrue\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn optionals_of_strings_booleans_enums_and_structs_can_be_compared() {
+    let source = "enum Color { case red, green }\nstruct P {\n  var x: Int\n  var tag: String\n}\nfunc main() {\n  let s1: String? = \"a\" + \"b\"\n  let s2: String? = \"ab\"\n  let b1: Bool? = true\n  let c1: Color? = .red\n  let c2: Color? = .green\n  let p1: P? = P(x: 1, tag: \"t\")\n  let p2: P? = P(x: 1, tag: \"t\")\n  let p3: P? = P(x: 2, tag: \"t\")\n  print(s1 == s2)\n  print(b1 == true)\n  print(c1 == c2)\n  print(c1 == .red)\n  print(p1 == p2)\n  print(p1 == p3)\n  print(p1 == nil)\n}";
+    assert_eq!(run(source), "true\ntrue\nfalse\ntrue\ntrue\nfalse\nfalse\n");
+}
+
+#[test]
+fn a_nested_optional_is_compared_level_by_level() {
+    let source = "func main() {\n  let a: Int?? = 5\n  let b: Int?? = 5\n  let c: Int?? = .some(nil)\n  let d: Int?? = nil\n  print(a == b)\n  print(a == c)\n  print(c == d)\n  print(c == c)\n}";
+    assert_eq!(run(source), "true\nfalse\nfalse\ntrue\n");
+}
+
+#[test]
+fn each_operand_of_an_optional_comparison_is_evaluated_once_from_left_to_right() {
+    let source = "func make(_ n: Int, _ v: Int?) -> Int? {\n  print(n)\n  return v\n}\nfunc main() {\n  print(make(1, 3) == make(2, 3))\n  print(make(3, nil) != make(4, 4))\n}";
+    assert_eq!(run(source), "1\n2\ntrue\n3\n4\ntrue\n");
+}
+
+#[test]
+fn comparing_optional_strings_in_a_loop_does_not_leak() {
+    let source = "func main() {\n  var hits = 0\n  var i = 0\n  while i < 20000 {\n    let a: String? = \"k\" + String(i)\n    let b: String? = \"k\" + String(i)\n    if a == b { hits += 1 }\n    i += 1\n  }\n  print(hits)\n}";
+    assert_eq!(run(source), "20000\n");
+}
+
+#[test]
+fn an_optional_satisfies_equatable_when_its_wrapped_type_does() {
+    let source = "func same<T: Equatable>(_ a: T, _ b: T) -> Bool { return a == b }\nfunc maybe<T: Equatable>(_ a: T?, _ b: T?) -> Bool { return a == b }\nfunc main() {\n  let a: Int? = 1\n  let n: Int? = nil\n  print(same(a, a))\n  print(same(a, n))\n  print(same(n, n))\n  print(maybe(a, 1))\n  print(maybe(\"s\", \"s\"))\n  print(maybe(n, n))\n  print(maybe(1, 2))\n}";
+    assert_eq!(run(source), "true\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn a_struct_with_an_optional_member_can_be_compared() {
+    let source = "struct P: Equatable {\n  var x: Int?\n  var s: String?\n}\nfunc main() {\n  let a = P(x: 1, s: nil)\n  let b = P(x: 1, s: nil)\n  let c = P(x: nil, s: \"s\")\n  let d = P(x: nil, s: \"s\")\n  print(a == b)\n  print(a == c)\n  print(c == d)\n  print(c != d)\n}";
+    assert_eq!(run(source), "true\nfalse\ntrue\nfalse\n");
+}
+
+#[test]
+fn optionals_of_unequatable_types_cannot_be_compared() {
+    let class = "class C { var x: Int }\nfunc main() {\n  let a: C? = C(x: 1)\n  print(a == a)\n}";
+    assert!(build_error(class).contains("equality is not supported"));
+    let mismatch = "func main() {\n  let a: Int? = 1\n  let s: String? = \"s\"\n  print(a == s)\n}";
+    assert!(build_error(mismatch).contains("expected"));
+    let unconstrained = "func f<T>(_ a: T?, _ b: T?) -> Bool { return a == b }\nfunc main() { }";
+    assert!(!build_error(unconstrained).is_empty());
+}

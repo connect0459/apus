@@ -860,6 +860,9 @@ impl Signatures {
             EQUATABLE => {
                 matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_))
                     || self.declared_conformances(ty).contains(&protocol)
+                    || self
+                        .unwrapped(ty)
+                        .is_some_and(|inner| self.conforms(inner, EQUATABLE))
             }
             COMPARABLE => matches!(ty, Ty::Int | Ty::Str),
             _ => self.declared_conformances(ty).contains(&protocol),
@@ -921,6 +924,17 @@ impl Signatures {
         }
     }
 
+    fn equatable_value(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => true,
+            Ty::Struct(_) => match self.unwrapped(ty) {
+                Some(inner) => self.equatable_value(inner),
+                None => self.enum_of(ty).is_none() && self.equality_leaves(0, ty).is_ok(),
+            },
+            _ => false,
+        }
+    }
+
     pub fn equality_leaves(&self, line: u32, ty: Ty) -> CResult<Vec<Vec<(usize, Ty)>>> {
         let mut leaves = Vec::new();
         self.collect_equality_leaves(line, ty, &mut Vec::new(), &mut leaves)?;
@@ -947,6 +961,13 @@ impl Signatures {
                 Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => leaves.push(path.clone()),
                 Ty::Struct(_) if self.enum_of(member).is_none() => {
                     self.collect_equality_leaves(line, member, path, leaves)?;
+                }
+                Ty::Struct(_)
+                    if self
+                        .unwrapped(member)
+                        .is_some_and(|inner| self.equatable_value(inner)) =>
+                {
+                    leaves.push(path.clone());
                 }
                 _ => {
                     return Err(CheckError::at(

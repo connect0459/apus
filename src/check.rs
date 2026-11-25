@@ -240,12 +240,7 @@ pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFu
     };
     let left = cx.declare(0, "left", ty, false)?;
     let right = cx.declare(0, "right", ty, false)?;
-    let same = cx.struct_equality(
-        0,
-        BinOp::Eq,
-        TExpr::Local(left, ty),
-        TExpr::Local(right, ty),
-    )?;
+    let same = cx.equality_of(0, ty, TExpr::Local(left, ty), TExpr::Local(right, ty))?;
     Ok(TFunc::new(
         name,
         2,
@@ -2345,6 +2340,19 @@ impl FnCx<'_> {
                     }
                     (lhs, self.value(rhs)?)
                 };
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && (self.sigs.unwrapped(lhs.ty()).is_some()
+                        || self.sigs.unwrapped(rhs.ty()).is_some())
+                {
+                    let target = if self.sigs.unwrapped(lhs.ty()).is_some() {
+                        lhs.ty()
+                    } else {
+                        rhs.ty()
+                    };
+                    let lhs = self.coerce(line, target, lhs)?;
+                    let rhs = self.coerce(line, target, rhs)?;
+                    return self.optional_equality(line, *op, lhs, rhs);
+                }
                 if let (Ty::Param(index), true) = (
                     lhs.ty(),
                     matches!(
@@ -2857,9 +2865,10 @@ impl FnCx<'_> {
         };
         let inner = sigs.unwrapped(context);
         let enum_ty = inner.unwrap_or(context);
+        let own_case = matches!(name, "none" | "some");
         let wrapped_case = sigs
             .enum_of(enum_ty)
-            .filter(|sig| inner.is_none() || sig.case_index(name).is_some());
+            .filter(|sig| inner.is_none() || (!own_case && sig.case_index(name).is_some()));
         let Some(sig) = wrapped_case else {
             return match (inner, name, args) {
                 (Some(_), "none", None) => Ok(self.none_of(context)),
@@ -3274,11 +3283,8 @@ impl FnCx<'_> {
                     ty: *ty,
                 })
             };
-            let same = TExpr::Binary {
-                op: BinOp::Eq,
-                lhs: Box::new(reach(left_root)),
-                rhs: Box::new(reach(right_root)),
-            };
+            let leaf = path.last().map_or(ty, |(_, ty)| *ty);
+            let same = self.equality_of(line, leaf, reach(left_root), reach(right_root))?;
             all = Some(match all {
                 None => same,
                 Some(before) => TExpr::Binary {
@@ -3296,6 +3302,86 @@ impl FnCx<'_> {
             }
         } else {
             all
+        })
+    }
+
+    fn equality_of(&mut self, line: u32, ty: Ty, lhs: TExpr, rhs: TExpr) -> CResult<TExpr> {
+        match ty {
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => Ok(TExpr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }),
+            Ty::Param(index) => self.parameter_operator(line, BinOp::Eq, index, lhs, rhs),
+            _ if self.sigs.unwrapped(ty).is_some() => {
+                self.optional_equality(line, BinOp::Eq, lhs, rhs)
+            }
+            Ty::Struct(_) if self.sigs.enum_of(ty).is_none() => {
+                self.struct_equality(line, BinOp::Eq, lhs, rhs)
+            }
+            other => Err(CheckError::at(
+                line,
+                format!("equality is not supported for {}", self.name_of(other)),
+            )),
+        }
+    }
+
+    fn optional_equality(
+        &mut self,
+        line: u32,
+        op: BinOp,
+        lhs: TExpr,
+        rhs: TExpr,
+    ) -> CResult<TExpr> {
+        let ty = lhs.ty();
+        let Some(inner) = self.sigs.unwrapped(ty) else {
+            return Err(CheckError::at(line, "internal error: not an optional"));
+        };
+        let left = self.temp(ty);
+        let right = self.temp(ty);
+        let tag = |held: LocalId, source: Option<TExpr>| TExpr::Field {
+            base: Box::new(match source {
+                Some(value) => TExpr::Bind {
+                    local: held,
+                    init: Box::new(value),
+                },
+                None => TExpr::Local(held, ty),
+            }),
+            index: 0,
+            ty: Ty::Int,
+        };
+        let payload = |held: LocalId| TExpr::Field {
+            base: Box::new(TExpr::Local(held, ty)),
+            index: 1,
+            ty: inner,
+        };
+        let same_tag = TExpr::Binary {
+            op: BinOp::Eq,
+            lhs: Box::new(tag(left, Some(lhs))),
+            rhs: Box::new(tag(right, Some(rhs))),
+        };
+        let is_none = TExpr::Binary {
+            op: BinOp::Eq,
+            lhs: Box::new(tag(left, None)),
+            rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+        };
+        let values = self.equality_of(line, inner, payload(left), payload(right))?;
+        let equal = TExpr::Binary {
+            op: BinOp::And,
+            lhs: Box::new(same_tag),
+            rhs: Box::new(TExpr::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(is_none),
+                rhs: Box::new(values),
+            }),
+        };
+        Ok(if op == BinOp::Ne {
+            TExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(equal),
+            }
+        } else {
+            equal
         })
     }
 
