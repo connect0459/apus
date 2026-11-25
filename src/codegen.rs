@@ -890,6 +890,46 @@ impl Emitter<'_, '_> {
             (StrOp::CharWidth, [scalar]) => Ok(self.char_width(*scalar)),
             (StrOp::FromChar, [scalar]) => Ok(self.char_to_string(*scalar)),
             (StrOp::CharAt, [text, offset]) => Ok(self.char_at(*text, *offset)),
+            (StrOp::LastChar, [text]) => Ok(self.last_char(*text)),
+            (StrOp::Trimmed, [text]) => Ok(self.trimmed(*text)),
+            (StrOp::Replace, [text, target, replacement]) => {
+                Ok(self.replaced(*text, *target, *replacement))
+            }
+            (StrOp::ByteIndex, [text, needle]) => Ok(self.byte_index(*text, *needle)),
+            (StrOp::ScalarCount, [text, bytes]) => Ok(self.scalar_count(*text, *bytes)),
+            (StrOp::Prefix | StrOp::Suffix | StrOp::DropFirst | StrOp::DropLast, [text, count]) => {
+                let non_negative =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, *count, 0);
+                self.builder.ins().trapz(non_negative, UNREACHABLE);
+                let length = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let zero = self.zero();
+                Ok(match op {
+                    StrOp::Prefix => {
+                        let end = self.forward_offset(*text, *count);
+                        self.slice(*text, zero, end)
+                    }
+                    StrOp::DropFirst => {
+                        let start = self.forward_offset(*text, *count);
+                        self.slice(*text, start, length)
+                    }
+                    StrOp::Suffix => {
+                        let start = self.backward_offset(*text, *count);
+                        self.slice(*text, start, length)
+                    }
+                    _ => {
+                        let end = self.backward_offset(*text, *count);
+                        self.slice(*text, zero, end)
+                    }
+                })
+            }
+            (StrOp::Reversed, [text]) => Ok(self.reversed_string(*text)),
+            (StrOp::Uppercased, [text]) => Ok(self.map_ascii(*text, 97, 122, -32)),
+            (StrOp::Lowercased, [text]) => Ok(self.map_ascii(*text, 65, 90, 32)),
             (StrOp::CharFromInt, [number]) => {
                 self.require_scalar(*number);
                 Ok(*number)
@@ -1070,6 +1110,462 @@ impl Emitter<'_, '_> {
         self.builder.ins().jump(done, &[BlockArg::Value(value)]);
         self.builder.switch_to_block(done);
         self.builder.block_params(done)[0]
+    }
+
+    fn find(&mut self, hay: Value, hay_len: Value, needle: Value, needle_len: Value) -> Value {
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..4 {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let memmem = self.import_func("memmem", sig, false);
+        let call = self
+            .builder
+            .ins()
+            .call(memmem, &[hay, hay_len, needle, needle_len]);
+        let found = self.builder.inst_results(call)[0];
+        let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, needle_len, 0);
+        let nothing = self.zero();
+        self.builder.ins().select(empty, nothing, found)
+    }
+
+    fn byte_index(&mut self, text: Value, needle: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let needle_len = self
+            .builder
+            .ins()
+            .load(types::I64, flags, needle, STRING_LEN);
+        let found = self.find(text, length, needle, needle_len);
+        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+        let offset = self.builder.ins().isub(found, text);
+        let none = self.builder.ins().iconst(types::I64, -1);
+        let empty = self.builder.ins().icmp_imm_s(IntCC::Equal, needle_len, 0);
+        let zero = self.zero();
+        let located = self.builder.ins().select(missing, none, offset);
+        self.builder.ins().select(empty, zero, located)
+    }
+
+    fn scalar_count(&mut self, text: Value, bytes: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        self.builder.append_block_param(header, types::I64);
+        let body = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I64);
+        let zero = self.zero();
+        self.builder
+            .ins()
+            .jump(header, &[BlockArg::Value(zero), BlockArg::Value(zero)]);
+        self.builder.switch_to_block(header);
+        let index = self.builder.block_params(header)[0];
+        let total = self.builder.block_params(header)[1];
+        let more = self.builder.ins().icmp(IntCC::SignedLessThan, index, bytes);
+        self.builder
+            .ins()
+            .brif(more, body, &[], done, &[BlockArg::Value(total)]);
+        self.builder.switch_to_block(body);
+        let address = self.builder.ins().iadd(text, index);
+        let byte = self.builder.ins().load(types::I8, flags, address, 0);
+        let byte = self.builder.ins().uextend(types::I64, byte);
+        let marker = self.builder.ins().band_imm_s(byte, 0xC0);
+        let lead = self.builder.ins().icmp_imm_s(IntCC::NotEqual, marker, 0x80);
+        let lead = self.builder.ins().uextend(types::I64, lead);
+        let next_total = self.builder.ins().iadd(total, lead);
+        let next_index = self.builder.ins().iadd_imm_s(index, 1);
+        self.builder.ins().jump(
+            header,
+            &[BlockArg::Value(next_index), BlockArg::Value(next_total)],
+        );
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
+    }
+
+    fn is_space(&mut self, byte: Value) -> Value {
+        let shifted = self.builder.ins().iadd_imm_s(byte, -9);
+        let control = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, shifted, 5);
+        let blank = self.builder.ins().icmp_imm_s(IntCC::Equal, byte, 32);
+        self.builder.ins().bor(control, blank)
+    }
+
+    fn trimmed(&mut self, text: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let zero = self.zero();
+        let start = self.skip_spaces(text, zero, length, true);
+        let end = self.skip_spaces(text, length, start, false);
+        self.slice(text, start, end)
+    }
+
+    fn skip_spaces(&mut self, text: Value, from: Value, limit: Value, forward: bool) -> Value {
+        let flags = MemFlagsData::trusted();
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        let check = self.builder.create_block();
+        let step = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I64);
+        self.builder.ins().jump(header, &[BlockArg::Value(from)]);
+        self.builder.switch_to_block(header);
+        let position = self.builder.block_params(header)[0];
+        let inside = if forward {
+            self.builder
+                .ins()
+                .icmp(IntCC::SignedLessThan, position, limit)
+        } else {
+            self.builder
+                .ins()
+                .icmp(IntCC::SignedGreaterThan, position, limit)
+        };
+        self.builder
+            .ins()
+            .brif(inside, check, &[], done, &[BlockArg::Value(position)]);
+        self.builder.switch_to_block(check);
+        let at = if forward {
+            position
+        } else {
+            self.builder.ins().iadd_imm_s(position, -1)
+        };
+        let address = self.builder.ins().iadd(text, at);
+        let byte = self.builder.ins().load(types::I8, flags, address, 0);
+        let byte = self.builder.ins().uextend(types::I64, byte);
+        let space = self.is_space(byte);
+        self.builder
+            .ins()
+            .brif(space, step, &[], done, &[BlockArg::Value(position)]);
+        self.builder.switch_to_block(step);
+        let next = if forward {
+            self.builder.ins().iadd_imm_s(position, 1)
+        } else {
+            self.builder.ins().iadd_imm_s(position, -1)
+        };
+        self.builder.ins().jump(header, &[BlockArg::Value(next)]);
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
+    }
+
+    fn replaced(&mut self, text: Value, target: Value, replacement: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let target_len = self
+            .builder
+            .ins()
+            .load(types::I64, flags, target, STRING_LEN);
+        let new_len = self
+            .builder
+            .ins()
+            .load(types::I64, flags, replacement, STRING_LEN);
+        let zero = self.zero();
+        let count_header = self.builder.create_block();
+        self.builder.append_block_param(count_header, types::I64);
+        self.builder.append_block_param(count_header, types::I64);
+        let count_done = self.builder.create_block();
+        self.builder.append_block_param(count_done, types::I64);
+        let count_next = self.builder.create_block();
+        self.builder.append_block_param(count_next, types::I64);
+        self.builder.append_block_param(count_next, types::I64);
+        self.builder.ins().jump(
+            count_header,
+            &[BlockArg::Value(zero), BlockArg::Value(zero)],
+        );
+        self.builder.switch_to_block(count_header);
+        let at = self.builder.block_params(count_header)[0];
+        let seen = self.builder.block_params(count_header)[1];
+        let rest = self.builder.ins().isub(length, at);
+        let from = self.builder.ins().iadd(text, at);
+        let hit = self.find(from, rest, target, target_len);
+        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, hit, 0);
+        let after_hit = self.builder.ins().isub(hit, text);
+        let after_hit = self.builder.ins().iadd(after_hit, target_len);
+        let next_seen = self.builder.ins().iadd_imm_s(seen, 1);
+        self.builder.ins().brif(
+            missing,
+            count_done,
+            &[BlockArg::Value(seen)],
+            count_next,
+            &[BlockArg::Value(after_hit), BlockArg::Value(next_seen)],
+        );
+        self.builder.switch_to_block(count_next);
+        let next_at = self.builder.block_params(count_next)[0];
+        let next_count = self.builder.block_params(count_next)[1];
+        self.builder.ins().jump(
+            count_header,
+            &[BlockArg::Value(next_at), BlockArg::Value(next_count)],
+        );
+        self.builder.switch_to_block(count_done);
+        let matches = self.builder.block_params(count_done)[0];
+        let delta = self.builder.ins().isub(new_len, target_len);
+        let growth = self.builder.ins().imul(matches, delta);
+        let total = self.builder.ins().iadd(length, growth);
+        let result = self.alloc_string(total);
+        let fill_header = self.builder.create_block();
+        self.builder.append_block_param(fill_header, types::I64);
+        self.builder.append_block_param(fill_header, types::I64);
+        let fill_hit = self.builder.create_block();
+        let fill_tail = self.builder.create_block();
+        let fill_done = self.builder.create_block();
+        let start = self.zero();
+        self.builder.ins().jump(
+            fill_header,
+            &[BlockArg::Value(start), BlockArg::Value(start)],
+        );
+        self.builder.switch_to_block(fill_header);
+        let at = self.builder.block_params(fill_header)[0];
+        let out = self.builder.block_params(fill_header)[1];
+        let rest = self.builder.ins().isub(length, at);
+        let from = self.builder.ins().iadd(text, at);
+        let hit = self.find(from, rest, target, target_len);
+        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, hit, 0);
+        self.builder
+            .ins()
+            .brif(missing, fill_tail, &[], fill_hit, &[]);
+        self.builder.switch_to_block(fill_tail);
+        let to = self.builder.ins().iadd(result, out);
+        self.copy_bytes(to, from, rest);
+        self.builder.ins().jump(fill_done, &[]);
+        self.builder.switch_to_block(fill_hit);
+        let segment = self.builder.ins().isub(hit, from);
+        let to = self.builder.ins().iadd(result, out);
+        self.copy_bytes(to, from, segment);
+        let out = self.builder.ins().iadd(out, segment);
+        let to = self.builder.ins().iadd(result, out);
+        self.copy_bytes(to, replacement, new_len);
+        let out = self.builder.ins().iadd(out, new_len);
+        let after = self.builder.ins().isub(hit, text);
+        let after = self.builder.ins().iadd(after, target_len);
+        self.builder
+            .ins()
+            .jump(fill_header, &[BlockArg::Value(after), BlockArg::Value(out)]);
+        self.builder.switch_to_block(fill_done);
+        result
+    }
+
+    fn slice(&mut self, text: Value, start: Value, end: Value) -> Value {
+        let length = self.builder.ins().isub(end, start);
+        let result = self.alloc_string(length);
+        let from = self.builder.ins().iadd(text, start);
+        self.copy_bytes(result, from, length);
+        result
+    }
+
+    fn forward_offset(&mut self, text: Value, count: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        self.builder.append_block_param(header, types::I64);
+        let check = self.builder.create_block();
+        let step = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I64);
+        let zero = self.zero();
+        self.builder
+            .ins()
+            .jump(header, &[BlockArg::Value(zero), BlockArg::Value(zero)]);
+        self.builder.switch_to_block(header);
+        let offset = self.builder.block_params(header)[0];
+        let seen = self.builder.block_params(header)[1];
+        let wanted = self.builder.ins().icmp(IntCC::SignedLessThan, seen, count);
+        self.builder
+            .ins()
+            .brif(wanted, check, &[], done, &[BlockArg::Value(offset)]);
+        self.builder.switch_to_block(check);
+        let inside = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThan, offset, length);
+        self.builder
+            .ins()
+            .brif(inside, step, &[], done, &[BlockArg::Value(offset)]);
+        self.builder.switch_to_block(step);
+        let address = self.builder.ins().iadd(text, offset);
+        let lead = self.builder.ins().load(types::I8, flags, address, 0);
+        let lead = self.builder.ins().uextend(types::I64, lead);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let two = self.builder.ins().iconst(types::I64, 2);
+        let three = self.builder.ins().iconst(types::I64, 3);
+        let four = self.builder.ins().iconst(types::I64, 4);
+        let wide = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, lead, 0xF0);
+        let upper = self.builder.ins().select(wide, three, four);
+        let medium = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, lead, 0xE0);
+        let middle = self.builder.ins().select(medium, two, upper);
+        let narrow = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, lead, 0x80);
+        let width = self.builder.ins().select(narrow, one, middle);
+        let next_offset = self.builder.ins().iadd(offset, width);
+        let next_seen = self.builder.ins().iadd_imm_s(seen, 1);
+        self.builder.ins().jump(
+            header,
+            &[BlockArg::Value(next_offset), BlockArg::Value(next_seen)],
+        );
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
+    }
+
+    fn backward_offset(&mut self, text: Value, count: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        self.builder.append_block_param(header, types::I64);
+        let check = self.builder.create_block();
+        let step = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I64);
+        let zero = self.zero();
+        self.builder
+            .ins()
+            .jump(header, &[BlockArg::Value(length), BlockArg::Value(zero)]);
+        self.builder.switch_to_block(header);
+        let offset = self.builder.block_params(header)[0];
+        let seen = self.builder.block_params(header)[1];
+        let wanted = self.builder.ins().icmp(IntCC::SignedLessThan, seen, count);
+        self.builder
+            .ins()
+            .brif(wanted, check, &[], done, &[BlockArg::Value(offset)]);
+        self.builder.switch_to_block(check);
+        let inside = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedGreaterThan, offset, 0);
+        self.builder
+            .ins()
+            .brif(inside, step, &[], done, &[BlockArg::Value(offset)]);
+        self.builder.switch_to_block(step);
+        let earlier = self.scalar_start_before(text, offset);
+        let next_seen = self.builder.ins().iadd_imm_s(seen, 1);
+        self.builder.ins().jump(
+            header,
+            &[BlockArg::Value(earlier), BlockArg::Value(next_seen)],
+        );
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
+    }
+
+    fn last_char(&mut self, text: Value) -> Value {
+        let start = self.last_start(text);
+        self.char_at(text, start)
+    }
+
+    fn last_start(&mut self, text: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        self.scalar_start_before(text, length)
+    }
+
+    fn scalar_start_before(&mut self, text: Value, end: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        let back = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I64);
+        let first = self.builder.ins().iadd_imm_s(end, -1);
+        self.builder.ins().jump(header, &[BlockArg::Value(first)]);
+        self.builder.switch_to_block(header);
+        let start = self.builder.block_params(header)[0];
+        let address = self.builder.ins().iadd(text, start);
+        let byte = self.builder.ins().load(types::I8, flags, address, 0);
+        let byte = self.builder.ins().uextend(types::I64, byte);
+        let marker = self.builder.ins().band_imm_s(byte, 0xC0);
+        let continuation = self.builder.ins().icmp_imm_s(IntCC::Equal, marker, 0x80);
+        self.builder
+            .ins()
+            .brif(continuation, back, &[], done, &[BlockArg::Value(start)]);
+        self.builder.switch_to_block(back);
+        let earlier = self.builder.ins().iadd_imm_s(start, -1);
+        self.builder.ins().jump(header, &[BlockArg::Value(earlier)]);
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
+    }
+
+    fn reversed_string(&mut self, text: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let result = self.alloc_string(length);
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        self.builder.append_block_param(header, types::I64);
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+        let nothing = self.zero();
+        self.builder
+            .ins()
+            .jump(header, &[BlockArg::Value(length), BlockArg::Value(nothing)]);
+        self.builder.switch_to_block(header);
+        let end = self.builder.block_params(header)[0];
+        let written = self.builder.block_params(header)[1];
+        let more = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::SignedGreaterThan, end, 0);
+        self.builder.ins().brif(more, body, &[], exit, &[]);
+        self.builder.switch_to_block(body);
+        let start = self.scalar_start_before(text, end);
+        let width = self.builder.ins().isub(end, start);
+        let from = self.builder.ins().iadd(text, start);
+        let to = self.builder.ins().iadd(result, written);
+        self.copy_bytes(to, from, width);
+        let next_written = self.builder.ins().iadd(written, width);
+        self.builder.ins().jump(
+            header,
+            &[BlockArg::Value(start), BlockArg::Value(next_written)],
+        );
+        self.builder.switch_to_block(exit);
+        result
+    }
+
+    fn map_ascii(&mut self, text: Value, low: i64, high: i64, delta: i64) -> Value {
+        let flags = MemFlagsData::trusted();
+        let length = self.builder.ins().load(types::I64, flags, text, STRING_LEN);
+        let result = self.alloc_string(length);
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+        let start = self.zero();
+        self.builder.ins().jump(header, &[BlockArg::Value(start)]);
+        self.builder.switch_to_block(header);
+        let index = self.builder.block_params(header)[0];
+        let more = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThan, index, length);
+        self.builder.ins().brif(more, body, &[], exit, &[]);
+        self.builder.switch_to_block(body);
+        let source = self.builder.ins().iadd(text, index);
+        let byte = self.builder.ins().load(types::I8, flags, source, 0);
+        let wide = self.builder.ins().uextend(types::I64, byte);
+        let shifted = self.builder.ins().iadd_imm_s(wide, -low);
+        let inside =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::UnsignedLessThan, shifted, high - low + 1);
+        let changed = self.builder.ins().iadd_imm_s(wide, delta);
+        let chosen = self.builder.ins().select(inside, changed, wide);
+        let narrow = self.builder.ins().ireduce(types::I8, chosen);
+        let target = self.builder.ins().iadd(result, index);
+        self.builder.ins().store(flags, narrow, target, 0);
+        let next = self.builder.ins().iadd_imm_s(index, 1);
+        self.builder.ins().jump(header, &[BlockArg::Value(next)]);
+        self.builder.switch_to_block(exit);
+        result
+    }
+
+    fn zero(&mut self) -> Value {
+        self.builder.ins().iconst(types::I64, 0)
     }
 
     fn require_scalar(&mut self, number: Value) {

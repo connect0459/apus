@@ -73,20 +73,63 @@ pub enum StrOp {
     CharValue,
     CharFromInt,
     CharFromString,
+    LastChar,
+    Reversed,
+    Uppercased,
+    Lowercased,
+    Prefix,
+    Suffix,
+    DropFirst,
+    DropLast,
+    Replace,
+    Trimmed,
+    ByteIndex,
+    ScalarCount,
 }
 
 impl StrOp {
     pub fn result(self) -> Ty {
         match self {
-            StrOp::Concat | StrOp::FromInt | StrOp::FromChar => Ty::Str,
-            StrOp::Count | StrOp::CharWidth | StrOp::CharValue => Ty::Int,
-            StrOp::CharAt | StrOp::CharFromInt | StrOp::CharFromString => Ty::Char,
+            StrOp::Concat
+            | StrOp::FromInt
+            | StrOp::FromChar
+            | StrOp::Reversed
+            | StrOp::Uppercased
+            | StrOp::Lowercased
+            | StrOp::Prefix
+            | StrOp::Suffix
+            | StrOp::DropFirst
+            | StrOp::DropLast
+            | StrOp::Replace
+            | StrOp::Trimmed => Ty::Str,
+            StrOp::Count
+            | StrOp::CharWidth
+            | StrOp::CharValue
+            | StrOp::ByteIndex
+            | StrOp::ScalarCount => Ty::Int,
+            StrOp::CharAt | StrOp::CharFromInt | StrOp::CharFromString | StrOp::LastChar => {
+                Ty::Char
+            }
             StrOp::IsEmpty | StrOp::HasPrefix | StrOp::HasSuffix | StrOp::Contains => Ty::Bool,
         }
     }
 
     pub fn allocates(self) -> bool {
-        matches!(self, StrOp::Concat | StrOp::FromInt | StrOp::FromChar)
+        matches!(
+            self,
+            StrOp::Concat
+                | StrOp::FromInt
+                | StrOp::FromChar
+                | StrOp::Reversed
+                | StrOp::Uppercased
+                | StrOp::Lowercased
+                | StrOp::Prefix
+                | StrOp::Suffix
+                | StrOp::DropFirst
+                | StrOp::DropLast
+                | StrOp::Replace
+                | StrOp::Trimmed
+        )
     }
 
     pub fn code(self) -> u8 {
@@ -104,6 +147,18 @@ impl StrOp {
             StrOp::CharValue => 11,
             StrOp::CharFromInt => 12,
             StrOp::CharFromString => 13,
+            StrOp::LastChar => 14,
+            StrOp::Reversed => 15,
+            StrOp::Uppercased => 16,
+            StrOp::Lowercased => 17,
+            StrOp::Prefix => 18,
+            StrOp::Suffix => 19,
+            StrOp::DropFirst => 20,
+            StrOp::DropLast => 21,
+            StrOp::Replace => 22,
+            StrOp::Trimmed => 23,
+            StrOp::ByteIndex => 24,
+            StrOp::ScalarCount => 25,
         }
     }
 }

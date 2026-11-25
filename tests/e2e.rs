@@ -4719,3 +4719,132 @@ fn a_character_does_not_mix_with_strings_or_numbers() {
             .contains("shout")
     );
 }
+
+#[test]
+fn a_string_has_a_first_and_a_last_character_or_none() {
+    let source = "func main() {\n  let s = \"héllo😀\"\n  if let f = s.first { print(f) }\n  if let l = s.last { print(l) }\n  let e = \"\" + \"\"\n  print(e.first == nil)\n  print(e.last == nil)\n  print(s.first == \"h\")\n  print(\"é\".last == \"é\")\n  print(\"x\".first == \"x\")\n  print((\"a\" + \"bc\").last == \"c\")\n}";
+    assert_eq!(run(source), "h\n😀\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_string_can_be_reversed_by_characters() {
+    let source = "func main() {\n  print(\"abc\".reversed())\n  print(\"héあ😀\".reversed())\n  print(\"\".reversed().isEmpty)\n  print(\"x\".reversed())\n  let s = \"ab\" + \"cd\"\n  print(s.reversed().reversed() == s)\n  print(\"héあ\".reversed().count)\n}";
+    assert_eq!(run(source), "cba\n😀あéh\ntrue\nx\ntrue\n6\n");
+}
+
+#[test]
+fn a_string_changes_the_case_of_its_ascii_letters_only() {
+    let source = "func main() {\n  let s = \"Hello, World 123 é\"\n  print(s.uppercased())\n  print(s.lowercased())\n  print(\"\".uppercased().isEmpty)\n  print((\"ab\" + \"Cd\").uppercased())\n  let c: Character = \"q\"\n  print(c.uppercased())\n  print(\"Z\".lowercased())\n}";
+    assert_eq!(
+        run(source),
+        "HELLO, WORLD 123 é\nhello, world 123 é\ntrue\nABCD\nQ\nz\n"
+    );
+}
+
+#[test]
+fn reversing_and_changing_case_in_a_loop_does_not_leak() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    let s = \"item\" + String(i)\n    total += s.reversed().uppercased().count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "168890\n");
+}
+
+#[test]
+fn the_new_string_members_reject_misuse() {
+    assert!(build_error("func main() { print(\"a\".reversed(1)) }").contains("reversed"));
+    assert!(build_error("func main() { print(\"a\".uppercased(1)) }").contains("uppercased"));
+    assert!(!build_error("func main() {\n  let s = \"a\"\n  s.first = \"b\"\n}").is_empty());
+    assert!(build_error("func main() { print(\"a\".middle) }").contains("middle"));
+}
+
+#[test]
+fn prefix_and_suffix_take_a_number_of_characters_from_either_end() {
+    let source = "func main() {\n  let s = \"héあ😀z\"\n  print(s.prefix(0).isEmpty)\n  print(s.prefix(1))\n  print(s.prefix(3))\n  print(s.prefix(4))\n  print(s.prefix(5) == s)\n  print(s.prefix(99) == s)\n  print(s.suffix(1))\n  print(s.suffix(2))\n  print(s.suffix(4))\n  print(s.suffix(99) == s)\n  print(s.suffix(0).isEmpty)\n  print(\"\".prefix(3).isEmpty)\n}";
+    assert_eq!(
+        run(source),
+        "true\nh\nhéあ\nhéあ😀\ntrue\ntrue\nz\n😀z\néあ😀z\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn drop_first_and_drop_last_remove_a_number_of_characters() {
+    let source = "func main() {\n  let s = \"héあ😀z\"\n  print(s.dropFirst(0) == s)\n  print(s.dropFirst(1))\n  print(s.dropFirst(3))\n  print(s.dropFirst(5).isEmpty)\n  print(s.dropFirst(99).isEmpty)\n  print(s.dropLast(0) == s)\n  print(s.dropLast(1))\n  print(s.dropLast(3))\n  print(s.dropLast(5).isEmpty)\n  print(s.dropLast(99).isEmpty)\n  print(s.dropFirst(1).dropLast(1))\n}";
+    assert_eq!(
+        run(source),
+        "true\néあ😀z\n😀z\ntrue\ntrue\ntrue\nhéあ😀\nhé\ntrue\ntrue\néあ😀\n"
+    );
+}
+
+#[test]
+fn the_pieces_of_a_string_are_new_strings_that_join_back_together() {
+    let source = "func main() {\n  let s = \"ab\" + \"cdéf\"\n  var n = 0\n  while n <= 6 {\n    if s.prefix(n) + s.dropFirst(n) == s { print(n) }\n    if s.dropLast(n) + s.suffix(n) == s { print(n) }\n    n += 1\n  }\n}";
+    assert_eq!(run(source), "0\n0\n1\n1\n2\n2\n3\n3\n4\n4\n5\n5\n6\n6\n");
+}
+
+#[test]
+fn cutting_strings_in_a_loop_does_not_leak() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    let s = \"item\" + String(i)\n    total += s.prefix(2).count + s.dropFirst(2).count + s.suffix(3).count + s.dropLast(3).count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "337780\n");
+}
+
+#[test]
+fn a_negative_count_traps_and_a_wrong_argument_is_rejected() {
+    run_expecting_a_crash("func main() {\n  let n = -1\n  print(\"abc\".prefix(n))\n}");
+    run_expecting_a_crash("func main() {\n  let n = -1\n  print(\"abc\".dropLast(n))\n}");
+    assert!(build_error("func main() { print(\"a\".prefix()) }").contains("prefix"));
+    assert!(build_error("func main() { print(\"a\".prefix(\"b\")) }").contains("expected Int"));
+    assert!(build_error("func main() { print(\"a\".dropFirst(count: 1)) }").contains("dropFirst"));
+}
+
+#[test]
+fn replacing_occurrences_replaces_every_non_overlapping_match_from_the_left() {
+    let source = "func main() {\n  print(\"banana\".replacingOccurrences(of: \"an\", with: \"AN\"))\n  print(\"aaa\".replacingOccurrences(of: \"aa\", with: \"b\"))\n  print(\"abc\".replacingOccurrences(of: \"x\", with: \"y\"))\n  print(\"a-b-c\".replacingOccurrences(of: \"-\", with: \"\"))\n  print(\"ab\".replacingOccurrences(of: \"b\", with: \"longer\"))\n  print(\"héllo\".replacingOccurrences(of: \"é\", with: \"e\"))\n  print(\"abc\".replacingOccurrences(of: \"abc\", with: \"z\"))\n  print(\"abc\".replacingOccurrences(of: \"\", with: \"z\"))\n  print(\"\".replacingOccurrences(of: \"a\", with: \"b\").isEmpty)\n  let s = \"x\" + \"yx\"\n  print(s.replacingOccurrences(of: \"x\", with: \"[x]\").replacingOccurrences(of: \"y\", with: \"Y\"))\n}";
+    assert_eq!(
+        run(source),
+        "bANANa\nba\nabc\nabc\nalonger\nhello\nz\nabc\ntrue\n[x]Y[x]\n"
+    );
+}
+
+#[test]
+fn trimmed_removes_ascii_whitespace_from_both_ends() {
+    let source = "func main() {\n  print(\"  hi \\n\\t\".trimmed())\n  print(\"   \".trimmed().isEmpty)\n  print(\"\".trimmed().isEmpty)\n  print(\"a b\".trimmed())\n  print(\" é \".trimmed())\n  print((\" x\" + \"y \").trimmed().count)\n  print(\"none\".trimmed())\n}";
+    assert_eq!(run(source), "hi\ntrue\ntrue\na b\né\n2\nnone\n");
+}
+
+#[test]
+fn first_index_gives_the_character_offset_of_the_first_match() {
+    let source = "func main() {\n  let s = \"héllo😀l\"\n  print(s.firstIndex(of: \"h\") == 0)\n  print(s.firstIndex(of: \"l\") == 2)\n  print(s.firstIndex(of: \"😀\") == 5)\n  print(s.firstIndex(of: \"x\") == nil)\n  if let i = s.firstIndex(of: \"é\") { print(i) }\n  print(\"\".firstIndex(of: \"a\") == nil)\n  let c: Character = \"o\"\n  print(s.firstIndex(of: c) == 4)\n}";
+    assert_eq!(run(source), "true\ntrue\ntrue\ntrue\n1\ntrue\ntrue\n");
+}
+
+#[test]
+fn contains_accepts_a_character_as_well_as_a_string() {
+    let source = "func main() {\n  let s = \"héllo\"\n  let e: Character = \"é\"\n  let z: Character = \"z\"\n  print(s.contains(e))\n  print(s.contains(z))\n  print(s.contains(\"ll\"))\n}";
+    assert_eq!(run(source), "true\nfalse\ntrue\n");
+}
+
+#[test]
+fn replacing_trimming_and_searching_in_a_loop_do_not_leak() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    let s = \" k\" + String(i) + \" \"\n    let t = s.trimmed().replacingOccurrences(of: \"k\", with: \"key\")\n    total += t.count\n    if let at = t.firstIndex(of: \"y\") { total += at }\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "188890\n");
+}
+
+#[test]
+fn the_search_and_replace_members_check_their_arguments() {
+    assert!(
+        build_error("func main() { print(\"a\".replacingOccurrences(\"a\", \"b\")) }")
+            .contains("replacingOccurrences")
+    );
+    assert!(
+        build_error("func main() { print(\"a\".replacingOccurrences(of: \"a\")) }")
+            .contains("replacingOccurrences")
+    );
+    assert!(
+        build_error("func main() { print(\"a\".replacingOccurrences(of: 1, with: \"b\")) }")
+            .contains("expected String")
+    );
+    assert!(
+        build_error("func main() { print(\"a\".firstIndex(of: 1)) }")
+            .contains("expected Character")
+    );
+    assert!(build_error("func main() { print(\"a\".firstIndex(\"a\")) }").contains("firstIndex"));
+    assert!(build_error("func main() { print(\"a\".trimmed(1)) }").contains("trimmed"));
+}

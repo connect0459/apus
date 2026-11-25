@@ -432,6 +432,7 @@ impl FnCx<'_> {
             let op = match name {
                 "count" => StrOp::Count,
                 "isEmpty" => StrOp::IsEmpty,
+                "first" | "last" => return Ok(self.string_end(base, name == "first")),
                 _ => {
                     return Err(CheckError::at(
                         line,
@@ -2320,6 +2321,67 @@ impl FnCx<'_> {
         result
     }
 
+    fn string_end(&mut self, text: TExpr, first: bool) -> TExpr {
+        let optional = self.sigs.optional_of(Ty::Char).unwrap_or(Ty::Int);
+        let held = self.temp(Ty::Str);
+        let source = TExpr::Local(held, Ty::Str);
+        let character = if first {
+            TExpr::StrOp {
+                op: StrOp::CharAt,
+                args: vec![source, TExpr::Int(0)],
+            }
+        } else {
+            TExpr::StrOp {
+                op: StrOp::LastChar,
+                args: vec![source],
+            }
+        };
+        TExpr::Select {
+            cond: Box::new(TExpr::StrOp {
+                op: StrOp::IsEmpty,
+                args: vec![TExpr::Bind {
+                    local: held,
+                    init: Box::new(text),
+                }],
+            }),
+            then: Box::new(self.none_of(optional)),
+            otherwise: Box::new(TExpr::StructInit {
+                ty: optional,
+                args: vec![TExpr::Int(SOME_CASE as i64), character],
+            }),
+            ty: optional,
+        }
+    }
+
+    fn character_method(
+        &mut self,
+        line: u32,
+        receiver: TExpr,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let op = match name {
+            "uppercased" => StrOp::Uppercased,
+            "lowercased" => StrOp::Lowercased,
+            _ => {
+                return Err(CheckError::at(
+                    line,
+                    format!("Character has no method '{name}'"),
+                ));
+            }
+        };
+        if !args.is_empty() {
+            return Err(CheckError::at(line, format!("'{name}' takes no arguments")));
+        }
+        Ok(TExpr::StrOp {
+            op,
+            args: vec![TExpr::StrOp {
+                op: StrOp::FromChar,
+                args: vec![receiver],
+            }],
+        })
+    }
+
     fn string_method(
         &mut self,
         line: u32,
@@ -2327,6 +2389,51 @@ impl FnCx<'_> {
         name: &str,
         args: &[Arg],
     ) -> CResult<TExpr> {
+        let whole = match name {
+            "reversed" => Some(StrOp::Reversed),
+            "uppercased" => Some(StrOp::Uppercased),
+            "lowercased" => Some(StrOp::Lowercased),
+            "trimmed" => Some(StrOp::Trimmed),
+            _ => None,
+        };
+        if let Some(op) = whole {
+            if !args.is_empty() {
+                return Err(CheckError::at(line, format!("'{name}' takes no arguments")));
+            }
+            return Ok(TExpr::StrOp {
+                op,
+                args: vec![receiver],
+            });
+        }
+        if name == "replacingOccurrences" {
+            return self.string_replacement(line, receiver, args);
+        }
+        if name == "firstIndex" {
+            return self.string_first_index(line, receiver, args);
+        }
+        let counted = match name {
+            "prefix" => Some(StrOp::Prefix),
+            "suffix" => Some(StrOp::Suffix),
+            "dropFirst" => Some(StrOp::DropFirst),
+            "dropLast" => Some(StrOp::DropLast),
+            _ => None,
+        };
+        if let Some(op) = counted {
+            let usage = format!("'{name}' takes exactly one unlabeled argument");
+            let [arg] = args else {
+                return Err(CheckError::at(line, usage));
+            };
+            if arg.label().is_some() {
+                return Err(CheckError::at(line, usage));
+            }
+            self.expected = Some(Ty::Int);
+            let value = self.value(arg.value())?;
+            self.expect(line, Ty::Int, value.ty())?;
+            return Ok(TExpr::StrOp {
+                op,
+                args: vec![receiver, value],
+            });
+        }
         let op = match name {
             "hasPrefix" => StrOp::HasPrefix,
             "hasSuffix" => StrOp::HasSuffix,
@@ -2346,11 +2453,89 @@ impl FnCx<'_> {
             return Err(CheckError::at(line, usage));
         }
         self.expected = Some(Ty::Str);
-        let value = self.value(arg.value())?;
+        let mut value = self.value(arg.value())?;
+        if op == StrOp::Contains && value.ty() == Ty::Char {
+            value = TExpr::StrOp {
+                op: StrOp::FromChar,
+                args: vec![value],
+            };
+        }
         self.expect(line, Ty::Str, value.ty())?;
         Ok(TExpr::StrOp {
             op,
             args: vec![receiver, value],
+        })
+    }
+
+    fn string_replacement(&mut self, line: u32, receiver: TExpr, args: &[Arg]) -> CResult<TExpr> {
+        let usage = "'replacingOccurrences' takes the labels 'of:' and 'with:'";
+        let [target, replacement] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if target.label() != Some("of") || replacement.label() != Some("with") {
+            return Err(CheckError::at(line, usage));
+        }
+        let mut values = vec![receiver];
+        for arg in [target, replacement] {
+            self.expected = Some(Ty::Str);
+            let value = self.value(arg.value())?;
+            self.expect(line, Ty::Str, value.ty())?;
+            values.push(value);
+        }
+        Ok(TExpr::StrOp {
+            op: StrOp::Replace,
+            args: values,
+        })
+    }
+
+    fn string_first_index(&mut self, line: u32, receiver: TExpr, args: &[Arg]) -> CResult<TExpr> {
+        let usage = "'firstIndex' takes the label 'of:'";
+        let [arg] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if arg.label() != Some("of") {
+            return Err(CheckError::at(line, usage));
+        }
+        self.expected = Some(Ty::Char);
+        let needle = self.value(arg.value())?;
+        self.expect(line, Ty::Char, needle.ty())?;
+        let optional = self.sigs.optional_of(Ty::Int)?;
+        let text = self.temp(Ty::Str);
+        let at = self.temp(Ty::Int);
+        let found = TExpr::Bind {
+            local: at,
+            init: Box::new(TExpr::StrOp {
+                op: StrOp::ByteIndex,
+                args: vec![
+                    TExpr::Bind {
+                        local: text,
+                        init: Box::new(receiver),
+                    },
+                    TExpr::StrOp {
+                        op: StrOp::FromChar,
+                        args: vec![needle],
+                    },
+                ],
+            }),
+        };
+        Ok(TExpr::Select {
+            cond: Box::new(TExpr::Binary {
+                op: BinOp::Lt,
+                lhs: Box::new(found),
+                rhs: Box::new(TExpr::Int(0)),
+            }),
+            then: Box::new(self.none_of(optional)),
+            otherwise: Box::new(TExpr::StructInit {
+                ty: optional,
+                args: vec![
+                    TExpr::Int(SOME_CASE as i64),
+                    TExpr::StrOp {
+                        op: StrOp::ScalarCount,
+                        args: vec![TExpr::Local(text, Ty::Str), TExpr::Local(at, Ty::Int)],
+                    },
+                ],
+            }),
+            ty: optional,
         })
     }
 
@@ -2656,6 +2841,9 @@ impl FnCx<'_> {
         } else {
             let receiver = self.value(base)?;
             let ty = receiver.ty();
+            if ty == Ty::Char {
+                return self.character_method(line, receiver, name, args);
+            }
             if ty == Ty::Str {
                 if explicit.is_some() {
                     return Err(CheckError::at(
