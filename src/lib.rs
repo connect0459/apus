@@ -9,6 +9,7 @@ pub mod init_check;
 pub mod items;
 pub mod key;
 pub mod lexer;
+pub mod limits;
 pub mod link;
 pub mod memo;
 pub mod mono;

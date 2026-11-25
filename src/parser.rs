@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::lexer::{Spanned, Token};
+use crate::limits::{MAX_DEPTH, MAX_NESTING};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -102,6 +103,8 @@ fn parse_with(tokens: &[Spanned], header_only: bool) -> PResult<Decl> {
         tokens,
         pos: 0,
         header_only,
+        nesting: 0,
+        depth: 0,
     };
     let decl = parser.decl()?;
     match parser.tokens.get(parser.pos) {
@@ -117,9 +120,34 @@ struct Parser<'a> {
     tokens: &'a [Spanned],
     pos: usize,
     header_only: bool,
+    nesting: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
+    fn enter(&mut self) -> PResult<()> {
+        self.nesting += 1;
+        if self.nesting > MAX_NESTING {
+            return self.fail(&format!(
+                "structure nesting level exceeded maximum of {MAX_NESTING}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.nesting -= 1;
+    }
+
+    fn check_depth(&self, expression: usize) -> PResult<()> {
+        if self.depth + expression > MAX_DEPTH {
+            return self.fail(&format!(
+                "nesting depth exceeded the maximum of {MAX_DEPTH}"
+            ));
+        }
+        Ok(())
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos).map(Spanned::token)
     }
@@ -249,10 +277,12 @@ impl Parser<'_> {
 
     fn type_args(&mut self) -> PResult<Vec<TypeRef>> {
         self.expect_punct("<")?;
+        self.enter()?;
         let mut args = vec![self.type_ref()?];
         while self.eat_punct(",") {
             args.push(self.type_ref()?);
         }
+        self.leave();
         self.expect_punct(">")?;
         Ok(args)
     }
@@ -587,11 +617,15 @@ impl Parser<'_> {
         let subject = self.expr()?;
         self.expect_punct("{")?;
         let mut cases = Vec::new();
+        let outer = self.depth;
         loop {
             while self.eat_punct(";") {}
             if self.eat_punct("}") {
+                self.depth = outer;
                 return Ok(StmtKind::Switch { subject, cases });
             }
+            self.depth += 1;
+            self.check_depth(0)?;
             cases.push(self.switch_case()?);
         }
     }
@@ -680,6 +714,16 @@ impl Parser<'_> {
     }
 
     fn block(&mut self) -> PResult<Vec<Stmt>> {
+        self.enter()?;
+        self.depth += 1;
+        self.check_depth(0)?;
+        let stmts = self.block_statements();
+        self.depth -= 1;
+        self.leave();
+        stmts
+    }
+
+    fn block_statements(&mut self) -> PResult<Vec<Stmt>> {
         self.expect_punct("{")?;
         let mut stmts = Vec::new();
         loop {
@@ -838,7 +882,11 @@ impl Parser<'_> {
         let else_body = if self.eat_keyword("else") {
             let line = self.line();
             if self.eat_keyword("if") {
-                Some(vec![Stmt::new(line, self.if_kind()?)])
+                self.depth += 1;
+                self.check_depth(0)?;
+                let nested = self.if_kind();
+                self.depth -= 1;
+                Some(vec![Stmt::new(line, nested?)])
             } else {
                 Some(self.block()?)
             }
@@ -883,7 +931,9 @@ impl Parser<'_> {
     }
 
     fn expr(&mut self) -> PResult<Expr> {
-        self.binary(LEVEL_OR)
+        let expr = self.binary(LEVEL_OR)?;
+        self.check_depth(expr.depth())?;
+        Ok(expr)
     }
 
     fn binary(&mut self, level: usize) -> PResult<Expr> {
@@ -912,6 +962,7 @@ impl Parser<'_> {
                     rhs: Box::new(rhs),
                 },
             );
+            self.check_depth(lhs.depth())?;
         }
         Ok(lhs)
     }
@@ -930,7 +981,10 @@ impl Parser<'_> {
         let lhs = self.binary(LEVEL_COALESCE + 1)?;
         if self.on_same_line() && self.is_punct("??") {
             self.pos += 1;
-            let rhs = self.coalesce()?;
+            self.enter()?;
+            let rhs = self.coalesce();
+            self.leave();
+            let rhs = rhs?;
             let line = lhs.line();
             return Ok(Expr::new(
                 line,
@@ -975,6 +1029,7 @@ impl Parser<'_> {
                     checked,
                 },
             );
+            self.check_depth(lhs.depth())?;
         }
         Ok(lhs)
     }
@@ -1015,7 +1070,10 @@ impl Parser<'_> {
         match op {
             Some(op) => {
                 self.pos += 1;
-                let operand = self.unary()?;
+                self.enter()?;
+                let operand = self.unary();
+                self.leave();
+                let operand = operand?;
                 Ok(Expr::new(
                     line,
                     ExprKind::Unary {
@@ -1036,34 +1094,34 @@ impl Parser<'_> {
     fn postfix_rest(&mut self, mut expr: Expr) -> PResult<Expr> {
         while self.on_same_line() {
             let line = expr.line();
-            if let ExprKind::Ident(name) = expr.kind().clone()
-                && let Some(type_args) = self.generic_name_args()
-            {
-                expr = Expr::new(line, ExprKind::GenericName { name, type_args });
-                continue;
+            if let ExprKind::Ident(name) = expr.kind() {
+                let name = name.clone();
+                if let Some(type_args) = self.generic_name_args() {
+                    expr = Expr::new(line, ExprKind::GenericName { name, type_args });
+                    continue;
+                }
             }
             if self.is_punct("!") {
                 self.pos += 1;
                 expr = Expr::new(line, ExprKind::Unwrap(Box::new(expr)));
-                continue;
-            }
-            if self.is_punct("?")
+            } else if self.is_punct("?")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(Spanned::token),
                     Some(Token::Punct(p)) if p == "."
                 )
             {
                 self.pos += 1;
-                let link = self.postfix_rest(Expr::new(line, ExprKind::ChainValue))?;
+                self.enter()?;
+                let link = self.postfix_rest(Expr::new(line, ExprKind::ChainValue));
+                self.leave();
                 return Ok(Expr::new(
                     line,
                     ExprKind::OptionalChain {
                         subject: Box::new(expr),
-                        link: Box::new(link),
+                        link: Box::new(link?),
                     },
                 ));
-            }
-            if self.eat_punct(".") {
+            } else if self.eat_punct(".") {
                 let after_super = matches!(expr.kind(), ExprKind::Ident(n) if n == "super");
                 let name = if after_super && self.eat_keyword("init") {
                     "init".to_string()
@@ -1078,41 +1136,26 @@ impl Parser<'_> {
                     },
                 );
             } else if self.is_punct("(") {
-                if let ExprKind::Member { base, name } = expr.kind().clone() {
-                    expr = Expr::new(
-                        line,
-                        ExprKind::MemberCall {
-                            base,
-                            name,
-                            args: self.args()?,
-                        },
-                    );
-                    continue;
-                }
-                if let ExprKind::GenericName { name, type_args } = expr.kind().clone() {
-                    expr = Expr::new(
+                let args = self.args()?;
+                expr = match expr.into_kind() {
+                    ExprKind::Member { base, name } => {
+                        Expr::new(line, ExprKind::MemberCall { base, name, args })
+                    }
+                    ExprKind::GenericName { name, type_args } => Expr::new(
                         line,
                         ExprKind::GenericCall {
                             callee: name,
                             type_args,
-                            args: self.args()?,
+                            args,
                         },
-                    );
-                    continue;
-                }
-                let ExprKind::Ident(callee) = expr.kind().clone() else {
-                    return self.fail("only a named function can be called");
+                    ),
+                    ExprKind::Ident(callee) => Expr::new(line, ExprKind::Call { callee, args }),
+                    _ => return self.fail("only a named function can be called"),
                 };
-                expr = Expr::new(
-                    line,
-                    ExprKind::Call {
-                        callee,
-                        args: self.args()?,
-                    },
-                );
             } else {
                 break;
             }
+            self.check_depth(expr.depth())?;
         }
         Ok(expr)
     }
@@ -1133,6 +1176,13 @@ impl Parser<'_> {
     }
 
     fn args(&mut self) -> PResult<Vec<Arg>> {
+        self.enter()?;
+        let args = self.argument_list();
+        self.leave();
+        args
+    }
+
+    fn argument_list(&mut self) -> PResult<Vec<Arg>> {
         self.expect_punct("(")?;
         let mut args = Vec::new();
         while !self.is_punct(")") {
@@ -1165,7 +1215,10 @@ impl Parser<'_> {
             Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => ExprKind::Ident(s.clone()),
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;
-                let inner = self.expr()?;
+                self.enter()?;
+                let inner = self.expr();
+                self.leave();
+                let inner = inner?;
                 self.expect_punct(")")?;
                 return Ok(inner);
             }
@@ -2046,6 +2099,110 @@ mod tests {
                 vec![TypeRef::from("C.Item")]
             ))
         );
+    }
+
+    fn parse_on_a_large_stack(src: String) -> Result<(), ParseError> {
+        crate::limits::run_with_large_stack(move || try_parse(&src).map(|_| ()))
+            .expect("the parser thread starts")
+    }
+
+    #[test]
+    fn nested_parentheses_are_limited_like_swift_structure_nesting() {
+        let nested = |depth: usize| {
+            format!(
+                "func f() {{ let x = {}1{} }}",
+                "(".repeat(depth),
+                ")".repeat(depth)
+            )
+        };
+        assert!(parse_on_a_large_stack(nested(200)).is_ok());
+        let error = parse_on_a_large_stack(nested(300)).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("structure nesting level exceeded maximum of 256"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn nested_blocks_are_limited_like_swift_structure_nesting() {
+        let nested = |depth: usize| {
+            format!(
+                "func f() {{ {}{} }}",
+                "if true { ".repeat(depth),
+                "}".repeat(depth)
+            )
+        };
+        assert!(parse_on_a_large_stack(nested(200)).is_ok());
+        let error = parse_on_a_large_stack(nested(300)).unwrap_err();
+        assert!(error.message().contains("structure nesting level"));
+    }
+
+    #[test]
+    fn a_chain_of_prefix_operators_counts_as_nesting() {
+        let source = format!("func f() {{ let x = {}1 }}", "- ".repeat(300));
+        let error = parse_on_a_large_stack(source).unwrap_err();
+        assert!(error.message().contains("structure nesting level"));
+    }
+
+    #[test]
+    fn a_long_chain_of_operators_is_accepted_up_to_the_depth_limit() {
+        let chain =
+            |terms: usize| format!("func f() {{ let x = {} }}", vec!["1"; terms].join(" + "));
+        assert!(parse_on_a_large_stack(chain(7000)).is_ok());
+        let error = parse_on_a_large_stack(chain(9000)).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("nesting depth exceeded the maximum of 8000"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_long_chain_of_member_accesses_counts_toward_the_depth_limit() {
+        let chain = |links: usize| format!("func f() {{ let x = a{} }}", ".b".repeat(links));
+        assert!(parse_on_a_large_stack(chain(7000)).is_ok());
+        assert!(parse_on_a_large_stack(chain(9000)).is_err());
+    }
+
+    #[test]
+    fn a_long_else_if_chain_counts_toward_the_depth_limit() {
+        let chain = |links: usize| {
+            format!(
+                "func f() {{ if a {{ }}{} }}",
+                " else if a { }".repeat(links)
+            )
+        };
+        assert!(parse_on_a_large_stack(chain(7000)).is_ok());
+        assert!(parse_on_a_large_stack(chain(9000)).is_err());
+    }
+
+    #[test]
+    fn a_switch_with_very_many_cases_counts_toward_the_depth_limit() {
+        let cases = |count: usize| {
+            let mut body = String::new();
+            for n in 0..count {
+                body.push_str(&format!("case {n}: break\n"));
+            }
+            format!("func f() {{ switch a {{\n{body}default: break\n}} }}")
+        };
+        assert!(parse_on_a_large_stack(cases(7000)).is_ok());
+        assert!(parse_on_a_large_stack(cases(9000)).is_err());
+    }
+
+    #[test]
+    fn a_statement_deep_in_blocks_adds_its_expression_depth_to_the_block_depth() {
+        let source = format!(
+            "func f() {{ {}let x = {}{} }}",
+            "if true { ".repeat(200),
+            vec!["1"; 7900].join(" + "),
+            "}".repeat(200)
+        );
+        assert!(parse_on_a_large_stack(source).is_err());
     }
 
     #[test]

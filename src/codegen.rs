@@ -110,8 +110,13 @@ impl Backend {
         std::thread::scope(|scope| {
             let handles: Vec<_> = funcs
                 .chunks(chunk_size)
-                .map(|chunk| scope.spawn(move || self.compile_chunk(chunk, structs)))
-                .collect();
+                .map(|chunk| {
+                    std::thread::Builder::new()
+                        .stack_size(crate::limits::STACK_SIZE)
+                        .spawn_scoped(scope, move || self.compile_chunk(chunk, structs))
+                        .map_err(|e| CodegenError::from(format!("cannot start a thread: {e}")))
+                })
+                .collect::<GResult<Vec<_>>>()?;
             let mut entries = Vec::with_capacity(funcs.len());
             for handle in handles {
                 let chunk = handle

@@ -559,3 +559,18 @@ fn editing_an_unrelated_function_keeps_the_protocol_dispatch_cached() {
     assert_eq!(report.compiled(), 1);
     assert_eq!(project.run(), "45\n");
 }
+
+#[test]
+fn deep_expressions_compile_on_the_parallel_workers() {
+    let project = Project::new();
+    let chain = vec!["1"; 6000].join(" + ");
+    let mut source = String::new();
+    for index in 0..8 {
+        source.push_str(&format!("func f{index}() -> Int {{ return {chain} }}\n"));
+    }
+    source
+        .push_str("func main() { print(f0() + f1() + f2() + f3() + f4() + f5() + f6() + f7()) }\n");
+    let report = project.build_with(&source, &BuildOptions::default().with_threads(4));
+    assert_eq!(report.compiled(), 9);
+    assert_eq!(project.run(), "48000\n");
+}

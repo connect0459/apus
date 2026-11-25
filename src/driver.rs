@@ -108,6 +108,15 @@ pub fn build_with(
     output: &Path,
     options: &BuildOptions,
 ) -> Result<BuildReport, BuildError> {
+    crate::limits::run_with_large_stack(|| build_on_this_thread(source, output, options))
+        .map_err(BuildError::new)?
+}
+
+fn build_on_this_thread(
+    source: &str,
+    output: &Path,
+    options: &BuildOptions,
+) -> Result<BuildReport, BuildError> {
     let cache_dir = options
         .cache_dir
         .clone()

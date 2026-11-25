@@ -669,11 +669,45 @@ impl Pattern {
 pub struct Expr {
     line: u32,
     kind: ExprKind,
+    depth: u32,
+}
+
+fn depth_of(kind: &ExprKind) -> u32 {
+    let deepest = |args: &[Arg]| args.iter().map(|a| a.value().depth).max().unwrap_or(0);
+    1 + match kind {
+        ExprKind::Nil
+        | ExprKind::ChainValue
+        | ExprKind::Int(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::Ident(_)
+        | ExprKind::GenericName { .. } => 0,
+        ExprKind::Unwrap(expr)
+        | ExprKind::Unary { expr, .. }
+        | ExprKind::Cast { expr, .. }
+        | ExprKind::Member { base: expr, .. } => expr.depth,
+        ExprKind::Coalesce { lhs, rhs } | ExprKind::Binary { lhs, rhs, .. } => {
+            lhs.depth.max(rhs.depth)
+        }
+        ExprKind::OptionalChain { subject, link } => subject.depth.max(link.depth),
+        ExprKind::Range { lo, hi, .. } => lo.depth.max(hi.depth),
+        ExprKind::Call { args, .. } | ExprKind::GenericCall { args, .. } => deepest(args),
+        ExprKind::MemberCall { base, args, .. } => base.depth.max(deepest(args)),
+    }
 }
 
 impl Expr {
     pub fn new(line: u32, kind: ExprKind) -> Self {
-        Self { line, kind }
+        let depth = depth_of(&kind);
+        Self { line, kind, depth }
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth as usize
+    }
+
+    pub fn into_kind(self) -> ExprKind {
+        self.kind
     }
 
     pub fn line(&self) -> u32 {

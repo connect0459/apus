@@ -3596,3 +3596,72 @@ fn fatal_error_does_not_produce_a_value() {
 fn fatal_error_is_a_reserved_function_name() {
     assert!(build_error("func fatalError() { }\nfunc main() { }").contains("fatalError"));
 }
+
+#[test]
+fn a_long_chain_of_operators_builds_and_runs() {
+    let source = format!("func main() {{ print({}) }}", vec!["1"; 7500].join(" + "));
+    assert_eq!(run(&source), "7500\n");
+}
+
+#[test]
+fn a_chain_of_operators_beyond_the_depth_limit_is_an_error_and_not_a_crash() {
+    let source = format!("func main() {{ print({}) }}", vec!["1"; 9000].join(" + "));
+    assert!(build_error(&source).contains("nesting depth exceeded"));
+}
+
+#[test]
+fn a_long_else_if_chain_builds_and_runs() {
+    let mut source = String::from("func pick(_ n: Int) -> Int {\n  if n == 0 { return 0 }");
+    for k in 1..2000 {
+        source.push_str(&format!(" else if n == {k} {{ return {k} }}"));
+    }
+    source.push_str(
+        " else { return 0 - 1 }\n}\nfunc main() {\n  print(pick(1999))\n  print(pick(5000))\n}",
+    );
+    assert_eq!(run(&source), "1999\n-1\n");
+}
+
+#[test]
+fn a_switch_with_many_cases_builds_and_runs() {
+    let mut source = String::from("func pick(_ n: Int) -> Int {\n  switch n {\n");
+    for k in 0..2000 {
+        source.push_str(&format!("  case {k}: return {}\n", k + 1));
+    }
+    source.push_str("  default: return 0\n  }\n}\nfunc main() {\n  print(pick(0))\n  print(pick(1999))\n  print(pick(2000))\n}");
+    assert_eq!(run(&source), "1\n2000\n0\n");
+}
+
+#[test]
+fn deeply_nested_parentheses_and_blocks_within_the_limit_build_and_run() {
+    let parens = format!(
+        "func main() {{ print({}7{}) }}",
+        "(".repeat(200),
+        ")".repeat(200)
+    );
+    assert_eq!(run(&parens), "7\n");
+    let blocks = format!(
+        "func main() {{\n{}print(8)\n{}\n}}",
+        "if true {\n".repeat(200),
+        "}\n".repeat(200)
+    );
+    assert_eq!(run(&blocks), "8\n");
+}
+
+#[test]
+fn nesting_beyond_the_structure_limit_is_an_error_and_not_a_crash() {
+    let parens = format!(
+        "func main() {{ print({}7{}) }}",
+        "(".repeat(400),
+        ")".repeat(400)
+    );
+    assert!(build_error(&parens).contains("structure nesting level exceeded"));
+}
+
+#[test]
+fn a_long_chain_of_method_calls_builds_and_runs() {
+    let source = format!(
+        "struct Counter {{\n  var n: Int\n  func next() -> Counter {{ return Counter(n: n + 1) }}\n}}\nfunc main() {{\n  print(Counter(n: 0){}.n)\n}}",
+        ".next()".repeat(3000)
+    );
+    assert_eq!(run(&source), "3000\n");
+}
