@@ -46,16 +46,13 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
     }];
     let mut chain = Some(class);
     while let Some(ty) = chain {
-        if let Some(owner) = sigs.owner_name(ty) {
-            let deinit = format!("{owner}.deinit");
-            if sigs.func(&deinit).is_some() {
-                body.push(TStmt::Eval(TExpr::Call {
-                    callee: deinit,
-                    type_args: Vec::new(),
-                    args: vec![receiver()],
-                    ret: Ty::Void,
-                }));
-            }
+        if let Some(deinit) = sigs.deinit_name(ty) {
+            body.push(TStmt::Eval(TExpr::Call {
+                callee: deinit,
+                type_args: Vec::new(),
+                args: vec![receiver()],
+                ret: Ty::Void,
+            }));
         }
         chain = sigs.superclass(ty);
     }

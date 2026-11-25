@@ -608,3 +608,16 @@ fn editing_an_override_of_a_generic_hierarchy_recompiles_only_that_method() {
     assert_eq!(report.compiled(), 1);
     assert_eq!(project.run(), "110\n");
 }
+
+const GENERIC_DEINIT: &str = "class Counted<T> {\n  var item: T\n  var id: Int\n  deinit { print(0 - id) }\n}\nfunc unrelated() -> Int { return 40 }\nfunc main() {\n  let c = Counted<Int>(item: 1, id: 2)\n  print(unrelated())\n}\n";
+
+#[test]
+fn editing_the_deinit_of_a_generic_class_recompiles_only_its_instances() {
+    let project = Project::new();
+    project.build(GENERIC_DEINIT);
+    assert_eq!(project.run(), "40\n-2\n");
+    let edited = GENERIC_DEINIT.replace("print(0 - id)", "print(100 - id)");
+    let report = project.build(&edited);
+    assert!(report.reused() >= 1, "unrelated code must stay cached");
+    assert_eq!(project.run(), "40\n98\n");
+}

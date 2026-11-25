@@ -1386,6 +1386,26 @@ impl Signatures {
         None
     }
 
+    pub fn mangled_call(&self, callee: &str, args: &[Ty]) -> String {
+        let names: Vec<String> = args.iter().map(|a| self.type_name(*a)).collect();
+        format!("{callee}<{}>", names.join(","))
+    }
+
+    pub fn deinit_of(&self, class: Ty) -> Option<(String, Vec<Ty>)> {
+        let qualified = format!("{}.deinit", self.owner_name(class)?);
+        self.funcs.get(&qualified)?;
+        Some((qualified, self.type_arguments(class)))
+    }
+
+    pub fn deinit_name(&self, class: Ty) -> Option<String> {
+        let (qualified, args) = self.deinit_of(class)?;
+        Some(if args.is_empty() {
+            qualified
+        } else {
+            self.mangled_call(&qualified, &args)
+        })
+    }
+
     pub fn descriptor_name(&self, class: Ty) -> String {
         format!("apus_class_{}", self.type_name(class))
     }
@@ -1496,12 +1516,6 @@ impl Signatures {
             return Err(CheckError::at(
                 line,
                 format!("'deinit' applies only to a class, not to '{owner}'"),
-            ));
-        }
-        if func.is_deinit() && !generics.is_empty() {
-            return Err(CheckError::at(
-                line,
-                format!("the generic class '{owner}' cannot declare a deinit yet"),
             ));
         }
         if func.is_override() && !ty.is_class() {

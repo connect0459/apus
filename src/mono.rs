@@ -158,6 +158,12 @@ impl<'a> Instantiator<'a> {
             Some(parent) => self.describe(parent, direct)?,
             None => None,
         };
+        if let Some((qualified, arguments)) = sigs.deinit_of(class)
+            && !arguments.is_empty()
+        {
+            let instance = self.instance_for(&qualified, &arguments)?;
+            note_dependency(direct, instance);
+        }
         let mut methods = Vec::new();
         for name in sigs.vtable_methods(class) {
             let (qualified, owner) = sigs
@@ -244,8 +250,7 @@ impl<'a> Instantiator<'a> {
     }
 
     fn instance_for(&mut self, callee: &str, args: &[Ty]) -> Result<usize, String> {
-        let names: Vec<String> = args.iter().map(|a| self.sigs.type_name(*a)).collect();
-        let mangled = format!("{callee}<{}>", names.join(","));
+        let mangled = self.sigs.mangled_call(callee, args);
         if let Some(id) = self.ids.get(&mangled) {
             return Ok(*id);
         }

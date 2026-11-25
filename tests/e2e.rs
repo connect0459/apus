@@ -1606,12 +1606,6 @@ fn an_enum_cannot_declare_a_deinitializer() {
 }
 
 #[test]
-fn a_generic_class_cannot_declare_a_deinitializer_yet() {
-    let source = "class Box<T> {\n  var v: T\n  deinit { }\n}\nfunc main() { }";
-    assert!(build_error(source).contains("generic"));
-}
-
-#[test]
 fn a_class_cannot_declare_two_deinitializers() {
     let source = "class A {\n  var v: Int\n  deinit { }\n  deinit { }\n}\nfunc main() { }";
     assert!(build_error(source).contains("duplicate"));
@@ -4512,4 +4506,49 @@ fn bound_names_are_not_visible_outside_their_case() {
         "{MULTI}func f(_ s: Shape) {{\n  switch s {{\n  case .circle(let a), .square(let a): print(a)\n  default: print(a)\n  }}\n}}\nfunc main() {{ }}"
     );
     assert!(build_error(&source).contains("cannot find 'a'"));
+}
+
+#[test]
+fn a_generic_class_may_declare_a_deinit() {
+    let source = "class Counted<T> {\n  var item: T\n  var id: Int\n  deinit { print(0 - id) }\n}\nfunc main() {\n  let a = Counted<Int>(item: 5, id: 1)\n  let b = Counted<String>(item: \"s\", id: 2)\n  print(a.item)\n  print(b.item)\n}";
+    assert_eq!(run(source), "5\ns\n-2\n-1\n");
+}
+
+#[test]
+fn each_instance_of_a_generic_class_runs_its_deinit_when_the_last_reference_goes() {
+    let source = "class Counted<T> {\n  var item: T\n  var id: Int\n  deinit { print(0 - id) }\n}\nfunc main() {\n  var c = Counted<Int>(item: 1, id: 1)\n  print(10)\n  c = Counted<Int>(item: 2, id: 2)\n  print(20)\n}";
+    assert_eq!(run(source), "10\n-1\n20\n-2\n");
+}
+
+#[test]
+fn a_deinit_of_a_generic_class_runs_before_that_of_its_superclass_and_before_its_members_go() {
+    let source = format!(
+        "{TRACKED}class Base<T> {{\n  var item: T\n  deinit {{ print(1) }}\n}}\nclass Derived<T>: Base<T> {{\n  var own: Tracked\n  deinit {{ print(2) }}\n}}\nfunc main() {{\n  let d = Derived<Int>(item: 0, own: Tracked(id: 7))\n  print(d.item)\n}}"
+    );
+    assert_eq!(run(&source), "0\n2\n1\n-7\n");
+}
+
+#[test]
+fn a_plain_subclass_of_a_generic_class_runs_both_deinits_and_one_that_adds_none_inherits_the_base_one()
+ {
+    let source = "class Base<T> {\n  var item: T\n  deinit { print(1) }\n}\nclass Sub: Base<Int> {\n  deinit { print(2) }\n}\nclass Quiet: Base<Bool> { }\nfunc main() {\n  let s = Sub(item: 0)\n  let q = Quiet(item: true)\n  print(s.item)\n}";
+    assert_eq!(run(source), "0\n1\n2\n1\n");
+}
+
+#[test]
+fn a_deinit_of_a_generic_class_may_use_the_constraint_of_its_parameter() {
+    let source = "protocol Shape {\n  func area() -> Int\n}\nstruct Square: Shape {\n  var side: Int\n  func area() -> Int { return side * side }\n}\nclass Holder<T: Shape> {\n  var item: T\n  deinit { print(item.area()) }\n}\nfunc main() {\n  let h = Holder(item: Square(side: 3))\n  print(0)\n}";
+    assert_eq!(run(source), "0\n9\n");
+}
+
+#[test]
+fn a_generic_class_created_inside_a_generic_function_runs_its_deinit() {
+    let source = "class Counted<T> {\n  var item: T\n  deinit { print(7) }\n}\nfunc make<U>(_ x: U) -> Counted<U> { return Counted<U>(item: x) }\nfunc use<U>(_ x: U) {\n  let c = make(x)\n  print(1)\n}\nfunc main() {\n  use(5)\n  use(true)\n}";
+    assert_eq!(run(source), "1\n7\n1\n7\n");
+}
+
+#[test]
+fn a_deinit_of_a_generic_class_may_not_return_a_value_or_take_parameters() {
+    let source = "class C<T> {\n  var item: T\n  deinit() { }\n}\nfunc main() { }";
+    assert!(!build_error(source).is_empty());
 }
