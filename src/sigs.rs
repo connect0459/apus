@@ -858,13 +858,13 @@ impl Signatures {
     pub fn conforms(&self, ty: Ty, protocol: &str) -> bool {
         match protocol {
             EQUATABLE => {
-                matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_))
+                matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_))
                     || self.declared_conformances(ty).contains(&protocol)
                     || self
                         .unwrapped(ty)
                         .is_some_and(|inner| self.conforms(inner, EQUATABLE))
             }
-            COMPARABLE => matches!(ty, Ty::Int | Ty::Str),
+            COMPARABLE => matches!(ty, Ty::Int | Ty::Str | Ty::Char),
             _ => self.declared_conformances(ty).contains(&protocol),
         }
     }
@@ -926,7 +926,7 @@ impl Signatures {
 
     fn equatable_value(&self, ty: Ty) -> bool {
         match ty {
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => true,
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_) => true,
             Ty::Struct(_) => match self.unwrapped(ty) {
                 Some(inner) => self.equatable_value(inner),
                 None => self.enum_of(ty).is_none() && self.equality_leaves(0, ty).is_ok(),
@@ -958,7 +958,7 @@ impl Signatures {
             let member = field.ty();
             path.push((index, member));
             match member {
-                Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => leaves.push(path.clone()),
+                Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_) => leaves.push(path.clone()),
                 Ty::Struct(_) if self.enum_of(member).is_none() => {
                     self.collect_equality_leaves(line, member, path, leaves)?;
                 }
@@ -2187,6 +2187,7 @@ impl Signatures {
             Ty::Int => "Int".to_string(),
             Ty::Bool => "Bool".to_string(),
             Ty::Str => "String".to_string(),
+            Ty::Char => "Character".to_string(),
             Ty::Void => "Void".to_string(),
             Ty::Param(index) => scope
                 .iter()

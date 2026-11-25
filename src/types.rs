@@ -29,6 +29,7 @@ pub enum Ty {
     Int,
     Bool,
     Str,
+    Char,
     Void,
     Struct(StructId),
     Class(StructId),
@@ -51,6 +52,7 @@ impl Ty {
             "Int" => Some(Ty::Int),
             "Bool" => Some(Ty::Bool),
             "String" => Some(Ty::Str),
+            "Character" => Some(Ty::Char),
             _ => None,
         }
     }

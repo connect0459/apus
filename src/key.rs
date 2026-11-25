@@ -48,6 +48,7 @@ impl Encoder<'_> {
             Ty::Int => self.tag(1),
             Ty::Bool => self.tag(2),
             Ty::Str => self.tag(3),
+            Ty::Char => self.tag(10),
             Ty::Void => self.tag(4),
             Ty::Enum(_) => self.tag(6),
             Ty::Param(index) => {
@@ -256,6 +257,10 @@ impl Encoder<'_> {
                 for arg in args {
                     self.expr(arg);
                 }
+            }
+            TExpr::Char(value) => {
+                self.tag(60);
+                self.usize(*value as usize);
             }
             TExpr::ClassDesc(ty) => {
                 self.tag(56);

@@ -424,7 +424,10 @@ impl FnCx<'_> {
         local
     }
 
-    fn field_of(&self, line: u32, base: TExpr, name: &str) -> CResult<TExpr> {
+    fn field_of(&mut self, line: u32, base: TExpr, name: &str) -> CResult<TExpr> {
+        if base.ty() == Ty::Char {
+            return self.character_property(line, base, name);
+        }
         if base.ty() == Ty::Str {
             let op = match name {
                 "count" => StrOp::Count,
@@ -1176,7 +1179,7 @@ impl FnCx<'_> {
     ) -> CResult<()> {
         let subject_value = self.value(subject)?;
         let subject_ty = subject_value.ty();
-        if matches!(subject_ty, Ty::Int | Ty::Bool | Ty::Str) {
+        if matches!(subject_ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Char) {
             return self.value_switch(line, subject_value, cases, out);
         }
         let sigs = self.sigs;
@@ -1353,10 +1356,11 @@ impl FnCx<'_> {
         Ok(())
     }
 
-    fn literal_pattern(&mut self, line: u32, expr: &Expr) -> CResult<TExpr> {
+    fn literal_pattern(&mut self, line: u32, expr: &Expr, expected: Ty) -> CResult<TExpr> {
+        self.expected = Some(expected);
         let value = self.value(expr)?;
         let literal = match &value {
-            TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) => true,
+            TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) | TExpr::Char(_) => true,
             TExpr::Unary {
                 op: UnaryOp::Neg,
                 expr,
@@ -1380,16 +1384,19 @@ impl FnCx<'_> {
     ) -> CResult<TExpr> {
         let subject = TExpr::Local(local, ty);
         if let ExprKind::Range { lo, hi, inclusive } = pattern.kind() {
-            if ty != Ty::Int {
+            if !matches!(ty, Ty::Int | Ty::Char) {
                 return Err(CheckError::at(
                     line,
-                    format!("a range pattern needs an Int, not {}", self.name_of(ty)),
+                    format!(
+                        "a range pattern needs an Int or a Character, not {}",
+                        self.name_of(ty)
+                    ),
                 ));
             }
-            let lo = self.literal_pattern(line, lo)?;
-            let hi = self.literal_pattern(line, hi)?;
-            self.expect(line, Ty::Int, lo.ty())?;
-            self.expect(line, Ty::Int, hi.ty())?;
+            let lo = self.literal_pattern(line, lo, ty)?;
+            let hi = self.literal_pattern(line, hi, ty)?;
+            self.expect(line, ty, lo.ty())?;
+            self.expect(line, ty, hi.ty())?;
             let upper = if *inclusive { BinOp::Le } else { BinOp::Lt };
             return Ok(TExpr::Binary {
                 op: BinOp::And,
@@ -1405,7 +1412,7 @@ impl FnCx<'_> {
                 }),
             });
         }
-        let value = self.literal_pattern(line, pattern)?;
+        let value = self.literal_pattern(line, pattern, ty)?;
         self.expect(line, ty, value.ty())?;
         if let TExpr::Bool(b) = value {
             bools[usize::from(b)] = true;
@@ -1987,7 +1994,14 @@ impl FnCx<'_> {
 
     fn for_stmt(&mut self, line: u32, var: &str, iter: &Expr, body: &[Stmt]) -> CResult<TStmt> {
         let ExprKind::Range { lo, hi, inclusive } = iter.kind() else {
-            return Err(CheckError::at(line, "a for loop iterates over a range"));
+            let text = self.value(iter)?;
+            if text.ty() != Ty::Str {
+                return Err(CheckError::at(
+                    line,
+                    "a for loop iterates over a range or a string",
+                ));
+            }
+            return self.for_characters(line, var, text, body);
         };
         let lo = self.int_value(lo)?;
         let hi = self.int_value(hi)?;
@@ -2004,6 +2018,166 @@ impl FnCx<'_> {
         });
         self.scopes.pop();
         result
+    }
+
+    fn for_characters(
+        &mut self,
+        line: u32,
+        var: &str,
+        text: TExpr,
+        body: &[Stmt],
+    ) -> CResult<TStmt> {
+        let held = self.temp(Ty::Str);
+        let offset = self.temp(Ty::Int);
+        self.scopes.push(HashMap::new());
+        let result = self.declare(line, var, Ty::Char, false).and_then(|local| {
+            let mut stmts = vec![
+                TStmt::Let {
+                    local,
+                    init: TExpr::StrOp {
+                        op: StrOp::CharAt,
+                        args: vec![TExpr::Local(held, Ty::Str), TExpr::Local(offset, Ty::Int)],
+                    },
+                },
+                TStmt::Assign {
+                    local: offset,
+                    value: TExpr::Binary {
+                        op: BinOp::Add,
+                        lhs: Box::new(TExpr::Local(offset, Ty::Int)),
+                        rhs: Box::new(TExpr::StrOp {
+                            op: StrOp::CharWidth,
+                            args: vec![TExpr::Local(local, Ty::Char)],
+                        }),
+                    },
+                },
+            ];
+            stmts.extend(self.in_target(TargetKind::Loop, |cx| cx.block(body))?);
+            Ok(TStmt::While {
+                cond: TExpr::Binary {
+                    op: BinOp::Lt,
+                    lhs: Box::new(TExpr::Local(offset, Ty::Int)),
+                    rhs: Box::new(TExpr::StrOp {
+                        op: StrOp::Count,
+                        args: vec![TExpr::Local(held, Ty::Str)],
+                    }),
+                },
+                body: stmts,
+            })
+        });
+        self.scopes.pop();
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: vec![
+                TStmt::Let {
+                    local: held,
+                    init: text,
+                },
+                TStmt::Let {
+                    local: offset,
+                    init: TExpr::Int(0),
+                },
+                result?,
+            ],
+            else_body: Vec::new(),
+        })
+    }
+
+    fn character_literal(line: u32, text: &str) -> CResult<TExpr> {
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Ok(TExpr::Char(u32::from(c))),
+            _ => Err(CheckError::at(
+                line,
+                "a Character literal must hold exactly one character",
+            )),
+        }
+    }
+
+    fn character_conversion(&mut self, line: u32, args: &[Arg]) -> CResult<TExpr> {
+        let usage = "Character takes exactly one unlabeled argument";
+        let [arg] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if arg.label().is_some() {
+            return Err(CheckError::at(line, usage));
+        }
+        self.expected = Some(Ty::Char);
+        let value = self.value(arg.value())?;
+        match value.ty() {
+            Ty::Char => Ok(value),
+            Ty::Int => Ok(TExpr::StrOp {
+                op: StrOp::CharFromInt,
+                args: vec![value],
+            }),
+            Ty::Str => Ok(TExpr::StrOp {
+                op: StrOp::CharFromString,
+                args: vec![value],
+            }),
+            other => Err(CheckError::at(
+                line,
+                format!(
+                    "cannot convert a value of type {} to Character",
+                    self.name_of(other)
+                ),
+            )),
+        }
+    }
+
+    fn character_property(&mut self, line: u32, base: TExpr, name: &str) -> CResult<TExpr> {
+        let value = TExpr::StrOp {
+            op: StrOp::CharValue,
+            args: vec![base],
+        };
+        let ranges: &[(i64, i64)] = match name {
+            "unicodeValue" => return Ok(value),
+            "isLetter" => &[(65, 90), (97, 122)],
+            "isNumber" => &[(48, 57)],
+            "isUppercase" => &[(65, 90)],
+            "isLowercase" => &[(97, 122)],
+            "isWhitespace" => &[(9, 13), (32, 32)],
+            "isPunctuation" => &[(33, 47), (58, 64), (91, 96), (123, 126)],
+            "isASCII" => &[(0, 127)],
+            _ => {
+                return Err(CheckError::at(
+                    line,
+                    format!("Character has no member '{name}'"),
+                ));
+            }
+        };
+        let held = self.temp(Ty::Int);
+        let mut source = Some(value);
+        let mut any: Option<TExpr> = None;
+        for (low, high) in ranges {
+            let operand = match source.take() {
+                Some(value) => TExpr::Bind {
+                    local: held,
+                    init: Box::new(value),
+                },
+                None => TExpr::Local(held, Ty::Int),
+            };
+            let inside = TExpr::Binary {
+                op: BinOp::And,
+                lhs: Box::new(TExpr::Binary {
+                    op: BinOp::Ge,
+                    lhs: Box::new(operand),
+                    rhs: Box::new(TExpr::Int(*low)),
+                }),
+                rhs: Box::new(TExpr::Binary {
+                    op: BinOp::Le,
+                    lhs: Box::new(TExpr::Local(held, Ty::Int)),
+                    rhs: Box::new(TExpr::Int(*high)),
+                }),
+            };
+            any = Some(match any {
+                None => inside,
+                Some(before) => TExpr::Binary {
+                    op: BinOp::Or,
+                    lhs: Box::new(before),
+                    rhs: Box::new(inside),
+                },
+            });
+        }
+        Ok(any.unwrap_or(TExpr::Bool(false)))
     }
 
     fn expr_stmt(&mut self, expr: &Expr) -> CResult<TStmt> {
@@ -2082,6 +2256,10 @@ impl FnCx<'_> {
         let value = self.value(arg.value())?;
         match value.ty() {
             Ty::Str => Ok(value),
+            Ty::Char => Ok(TExpr::StrOp {
+                op: StrOp::FromChar,
+                args: vec![value],
+            }),
             Ty::Int => Ok(TExpr::StrOp {
                 op: StrOp::FromInt,
                 args: vec![value],
@@ -2226,6 +2404,12 @@ impl FnCx<'_> {
         if matches!(value.ty(), Ty::Enum(_)) {
             return Ok(self.print_enum(value));
         }
+        if value.ty() == Ty::Char {
+            return Ok(TStmt::Print(TExpr::StrOp {
+                op: StrOp::FromChar,
+                args: vec![value],
+            }));
+        }
         if !matches!(value.ty(), Ty::Int | Ty::Bool | Ty::Str) {
             return Err(CheckError::at(
                 line,
@@ -2298,6 +2482,12 @@ impl FnCx<'_> {
             }
             ExprKind::Int(n) => Ok(TExpr::Int(*n)),
             ExprKind::Bool(b) => Ok(TExpr::Bool(*b)),
+            ExprKind::Str(text)
+                if expected
+                    .is_some_and(|t| t == Ty::Char || self.sigs.unwrapped(t) == Some(Ty::Char)) =>
+            {
+                Self::character_literal(line, text)
+            }
             ExprKind::Str(text) if text.contains('\0') => Err(CheckError::at(
                 line,
                 "a string literal cannot contain a NUL character",
@@ -2327,8 +2517,13 @@ impl FnCx<'_> {
                 })
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let implicit = |e: &Expr| matches!(e.kind(), ExprKind::ImplicitMember { .. });
-                let comparing = matches!(op, BinOp::Eq | BinOp::Ne);
+                let implicit = |e: &Expr| {
+                    matches!(e.kind(), ExprKind::ImplicitMember { .. } | ExprKind::Str(_))
+                };
+                let comparing = matches!(
+                    op,
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
+                );
                 let (lhs, rhs) = if comparing && implicit(lhs) && !implicit(rhs) {
                     let rhs = self.value(rhs)?;
                     self.expected = Some(rhs.ty());
@@ -3307,7 +3502,7 @@ impl FnCx<'_> {
 
     fn equality_of(&mut self, line: u32, ty: Ty, lhs: TExpr, rhs: TExpr) -> CResult<TExpr> {
         match ty {
-            Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => Ok(TExpr::Binary {
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_) => Ok(TExpr::Binary {
                 op: BinOp::Eq,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
@@ -3390,6 +3585,9 @@ impl FnCx<'_> {
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge if lhs == Ty::Str => {
                 self.expect(line, Ty::Str, rhs)
             }
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge if lhs == Ty::Char => {
+                self.expect(line, Ty::Char, rhs)
+            }
             BinOp::Add
             | BinOp::Sub
             | BinOp::Mul
@@ -3404,8 +3602,9 @@ impl FnCx<'_> {
             }
             BinOp::Eq | BinOp::Ne => {
                 self.expect(line, lhs, rhs)?;
-                let comparable = matches!(lhs, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_))
-                    || (lhs.is_struct() && self.sigs.enum_of(lhs).is_none());
+                let comparable =
+                    matches!(lhs, Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_))
+                        || (lhs.is_struct() && self.sigs.enum_of(lhs).is_none());
                 if comparable {
                     Ok(())
                 } else {
@@ -3455,6 +3654,9 @@ impl FnCx<'_> {
     ) -> CResult<TExpr> {
         if callee == "String" {
             return self.string_conversion(line, args);
+        }
+        if callee == "Character" {
+            return self.character_conversion(line, args);
         }
         let sigs = self.sigs;
         if let Some(receiver) = self.lookup("self", line).ok()

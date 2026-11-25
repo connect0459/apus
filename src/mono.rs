@@ -30,7 +30,12 @@ fn resolve_witness(
         return Err(missing());
     }
     match (protocol, method) {
-        (EQUATABLE, "==") if matches!(self_ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_)) => {
+        (EQUATABLE, "==")
+            if matches!(
+                self_ty,
+                Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_)
+            ) =>
+        {
             Ok(Witnessed::Operator(BinOp::Eq))
         }
         (EQUATABLE, "==") => Ok(Witnessed::Call {

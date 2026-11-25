@@ -4616,3 +4616,106 @@ fn optionals_of_unequatable_types_cannot_be_compared() {
     let unconstrained = "func f<T>(_ a: T?, _ b: T?) -> Bool { return a == b }\nfunc main() { }";
     assert!(!build_error(unconstrained).is_empty());
 }
+
+#[test]
+fn a_string_literal_in_a_character_context_is_a_character() {
+    let source = "func show(_ c: Character) { print(c) }\nfunc pick() -> Character { return \"z\" }\nfunc main() {\n  let a: Character = \"a\"\n  var b: Character = \"b\"\n  b = \"c\"\n  print(a)\n  print(b)\n  show(\"d\")\n  print(pick())\n  print(\"é\")\n}";
+    assert_eq!(run(source), "a\nc\nd\nz\né\n");
+}
+
+#[test]
+fn characters_are_compared_for_equality_and_order() {
+    let source = "func main() {\n  let a: Character = \"a\"\n  let b: Character = \"b\"\n  print(a == a)\n  print(a == b)\n  print(a != b)\n  print(a < b)\n  print(b <= a)\n  print(a == \"a\")\n  print(\"b\" > a)\n  let e: Character = \"é\"\n  print(e > \"z\")\n}";
+    assert_eq!(
+        run(source),
+        "true\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn a_character_becomes_a_string_with_its_utf8_bytes() {
+    let source = "func main() {\n  let a: Character = \"a\"\n  let e: Character = \"é\"\n  let j: Character = \"あ\"\n  let s: Character = \"😀\"\n  print(String(a).count)\n  print(String(e).count)\n  print(String(j).count)\n  print(String(s).count)\n  print(String(e) + String(j) + String(s))\n  print(\"[\\(a)\\(e)]\")\n  print(String(a) == \"a\")\n}";
+    assert_eq!(run(source), "1\n2\n3\n4\néあ😀\n[aé]\ntrue\n");
+}
+
+#[test]
+fn a_for_loop_visits_the_characters_of_a_string() {
+    let source = "func main() {\n  for c in \"héあ😀!\" {\n    print(c)\n  }\n  var count = 0\n  for c in \"abc\" + \"def\" {\n    count += 1\n    let ignored = c\n  }\n  print(count)\n  for c in \"\" { print(\"never\") }\n  var out = \"\"\n  for c in \"xyz\" { out += String(c) + \"-\" }\n  print(out)\n}";
+    assert_eq!(run(source), "h\né\nあ\n😀\n!\n6\nx-y-z-\n");
+}
+
+#[test]
+fn break_and_continue_work_in_a_loop_over_a_string() {
+    let source = "func main() {\n  for c in \"abcde\" {\n    if c == \"b\" { continue }\n    if c == \"d\" { break }\n    print(c)\n  }\n  outer: for a in \"xy\" {\n    for b in \"12\" {\n      if b == \"2\" { continue outer }\n      print(String(a) + String(b))\n    }\n  }\n}";
+    assert_eq!(run(source), "a\nc\nx1\ny1\n");
+}
+
+#[test]
+fn a_switch_on_a_character_takes_literals_and_ranges() {
+    let source = "func kind(_ c: Character) -> Int {\n  switch c {\n  case \"a\", \"e\", \"i\": return 1\n  case \"a\"...\"z\": return 2\n  case \"0\"...\"9\": return 3\n  default: return 0\n  }\n}\nfunc main() {\n  for c in \"ab5-e\" { print(kind(c)) }\n}";
+    assert_eq!(run(source), "1\n2\n3\n0\n1\n");
+}
+
+#[test]
+fn a_character_may_be_stored_optional_generic_and_compared_through_comparable() {
+    let source = "struct Pair: Equatable {\n  var left: Character\n  var right: Character?\n}\nfunc largest<T: Comparable>(_ a: T, _ b: T) -> T { if a > b { return a }; return b }\nfunc main() {\n  let a: Character = \"a\"\n  let z: Character = \"z\"\n  print(largest(a, z))\n  let o: Character? = a\n  print(o == a)\n  print(o == nil)\n  let p = Pair(left: a, right: nil)\n  let q = Pair(left: a, right: nil)\n  print(p == q)\n}";
+    assert_eq!(run(source), "z\ntrue\nfalse\ntrue\n");
+}
+
+#[test]
+fn a_character_knows_its_ascii_class_and_its_value() {
+    let source = "func main() {\n  for c in \"aZ5 !é\" {\n    print(c.isLetter)\n    print(c.isNumber)\n    print(c.isWhitespace)\n    print(c.isUppercase)\n    print(c.isLowercase)\n    print(c.unicodeValue)\n  }\n}";
+    let expected = [
+        ("a", "true", "false", "false", "false", "true", "97"),
+        ("Z", "true", "false", "false", "true", "false", "90"),
+        ("5", "false", "true", "false", "false", "false", "53"),
+        (" ", "false", "false", "true", "false", "false", "32"),
+        ("!", "false", "false", "false", "false", "false", "33"),
+        ("é", "false", "false", "false", "false", "false", "233"),
+    ];
+    let text: String = expected
+        .iter()
+        .map(|(_, l, n, w, u, lo, v)| format!("{l}\n{n}\n{w}\n{u}\n{lo}\n{v}\n"))
+        .collect();
+    assert_eq!(run(source), text);
+}
+
+#[test]
+fn a_character_can_be_made_from_a_value_or_a_one_character_string() {
+    let source = "func main() {\n  print(Character(65))\n  print(Character(233))\n  print(Character(128512))\n  let s = \"q\" + \"\"\n  print(Character(s))\n  print(Character(\"w\"))\n}";
+    assert_eq!(run(source), "A\né\n😀\nq\nw\n");
+}
+
+#[test]
+fn an_invalid_character_value_or_string_traps() {
+    run_expecting_a_crash("func main() {\n  let n = 55296\n  print(Character(n))\n}");
+    run_expecting_a_crash("func main() {\n  let n = -1\n  print(Character(n))\n}");
+    run_expecting_a_crash("func main() {\n  let s = \"ab\" + \"\"\n  print(Character(s))\n}");
+    run_expecting_a_crash("func main() {\n  let s = \"\" + \"\"\n  print(Character(s))\n}");
+}
+
+#[test]
+fn a_character_literal_must_hold_exactly_one_character() {
+    assert!(build_error("func main() {\n  let c: Character = \"ab\"\n}").contains("exactly one"));
+    assert!(build_error("func main() {\n  let c: Character = \"\"\n}").contains("exactly one"));
+    assert!(build_error("func main() {\n  print(Character(\"ab\"))\n}").contains("exactly one"));
+}
+
+#[test]
+fn a_character_does_not_mix_with_strings_or_numbers() {
+    let a = "func main() {\n  let a: Character = \"a\"\n  let s = \"s\"\n  print(a == s)\n}";
+    assert!(build_error(a).contains("expected"));
+    assert!(
+        build_error("func main() {\n  let a: Character = \"a\"\n  print(a + a)\n}")
+            .contains("expected")
+    );
+    assert!(
+        build_error("func main() {\n  let a: Character = \"a\"\n  print(a == 97)\n}")
+            .contains("expected")
+    );
+    assert!(build_error("func main() {\n  let n: Int = \"a\"\n}").contains("expected"));
+    assert!(
+        build_error("func main() {\n  let a: Character = \"a\"\n  print(a.shout)\n}")
+            .contains("shout")
+    );
+}

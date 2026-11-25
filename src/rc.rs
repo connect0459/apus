@@ -792,6 +792,7 @@ impl Pass<'_> {
             TExpr::Int(_)
             | TExpr::Bool(_)
             | TExpr::Str(_)
+            | TExpr::Char(_)
             | TExpr::Local(..)
             | TExpr::EnumCase { .. }
             | TExpr::Zero(_)

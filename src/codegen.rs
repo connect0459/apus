@@ -305,7 +305,9 @@ fn entry_reloc(
 
 fn clif_type(ty: Ty) -> Option<Type> {
     match ty {
-        Ty::Int | Ty::Str | Ty::Struct(_) | Ty::Class(_) | Ty::Enum(_) => Some(types::I64),
+        Ty::Int | Ty::Str | Ty::Char | Ty::Struct(_) | Ty::Class(_) | Ty::Enum(_) => {
+            Some(types::I64)
+        }
         Ty::Bool => Some(types::I8),
         Ty::Void | Ty::Param(_) | Ty::Assoc(_) => None,
     }
@@ -884,6 +886,26 @@ impl Emitter<'_, '_> {
                 Ok(self.builder.ins().icmp_imm_s(IntCC::Equal, len, 0))
             }
             (StrOp::FromInt, [number]) => Ok(self.int_to_string(*number)),
+            (StrOp::CharValue, [scalar]) => Ok(*scalar),
+            (StrOp::CharWidth, [scalar]) => Ok(self.char_width(*scalar)),
+            (StrOp::FromChar, [scalar]) => Ok(self.char_to_string(*scalar)),
+            (StrOp::CharAt, [text, offset]) => Ok(self.char_at(*text, *offset)),
+            (StrOp::CharFromInt, [number]) => {
+                self.require_scalar(*number);
+                Ok(*number)
+            }
+            (StrOp::CharFromString, [text]) => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let scalar = self.char_at(*text, zero);
+                let width = self.char_width(scalar);
+                let length = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let exact = self.builder.ins().icmp(IntCC::Equal, length, width);
+                self.builder.ins().trapz(exact, UNREACHABLE);
+                Ok(scalar)
+            }
             (StrOp::HasPrefix, [text, prefix]) => Ok(self.string_edge(*text, *prefix, false)),
             (StrOp::HasSuffix, [text, suffix]) => Ok(self.string_edge(*text, *suffix, true)),
             (StrOp::Contains, [text, needle]) => {
@@ -914,6 +936,155 @@ impl Emitter<'_, '_> {
                 "a string operation has the wrong operands",
             )),
         }
+    }
+
+    fn char_width(&mut self, scalar: Value) -> Value {
+        let below = |this: &mut Self, limit: i64| {
+            this.builder
+                .ins()
+                .icmp_imm_s(IntCC::UnsignedLessThan, scalar, limit)
+        };
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let two = self.builder.ins().iconst(types::I64, 2);
+        let three = self.builder.ins().iconst(types::I64, 3);
+        let four = self.builder.ins().iconst(types::I64, 4);
+        let wide = below(self, 0x10000);
+        let upper = self.builder.ins().select(wide, three, four);
+        let medium = below(self, 0x800);
+        let middle = self.builder.ins().select(medium, two, upper);
+        let narrow = below(self, 0x80);
+        self.builder.ins().select(narrow, one, middle)
+    }
+
+    fn char_to_string(&mut self, scalar: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let width = self.char_width(scalar);
+        let result = self.alloc_string(width);
+        let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+        let bytes = self.builder.ins().stack_addr(types::I64, buffer, 0);
+        let is =
+            |this: &mut Self, count: i64| this.builder.ins().icmp_imm_s(IntCC::Equal, width, count);
+        let shifted = |this: &mut Self, amount: i64| this.builder.ins().ushr_imm_u(scalar, amount);
+        let tail = |this: &mut Self, value: Value| {
+            let low = this.builder.ins().band_imm_s(value, 0x3f);
+            this.builder.ins().bor_imm_s(low, 0x80)
+        };
+        let marked =
+            |this: &mut Self, value: Value, mark: i64| this.builder.ins().bor_imm_s(value, mark);
+        let two = is(self, 2);
+        let three = is(self, 3);
+        let one = is(self, 1);
+        let s6 = shifted(self, 6);
+        let s12 = shifted(self, 12);
+        let s18 = shifted(self, 18);
+        let lead2 = marked(self, s6, 0xC0);
+        let lead3 = marked(self, s12, 0xE0);
+        let lead4 = marked(self, s18, 0xF0);
+        let pick34 = self.builder.ins().select(three, lead3, lead4);
+        let pick234 = self.builder.ins().select(two, lead2, pick34);
+        let first = self.builder.ins().select(one, scalar, pick234);
+        let t0 = tail(self, scalar);
+        let t6 = tail(self, s6);
+        let t12 = tail(self, s12);
+        let second_wide = self.builder.ins().select(three, t6, t12);
+        let second = self.builder.ins().select(two, t0, second_wide);
+        let third = self.builder.ins().select(three, t0, t6);
+        for (offset, value) in [(0, first), (1, second), (2, third), (3, t0)] {
+            let byte = self.builder.ins().ireduce(types::I8, value);
+            self.builder.ins().store(flags, byte, bytes, offset);
+        }
+        self.copy_bytes(result, bytes, width);
+        result
+    }
+
+    fn char_at(&mut self, text: Value, offset: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let at = self.builder.ins().iadd(text, offset);
+        let load = |this: &mut Self, delta: i32| {
+            let byte = this.builder.ins().load(types::I8, flags, at, delta);
+            this.builder.ins().uextend(types::I64, byte)
+        };
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I64);
+        let multi = self.builder.create_block();
+        let two = self.builder.create_block();
+        let wide = self.builder.create_block();
+        let three = self.builder.create_block();
+        let four = self.builder.create_block();
+        let b0 = load(self, 0);
+        let ascii = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, b0, 0x80);
+        self.builder
+            .ins()
+            .brif(ascii, done, &[BlockArg::Value(b0)], multi, &[]);
+        self.builder.switch_to_block(multi);
+        let short = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, b0, 0xE0);
+        self.builder.ins().brif(short, two, &[], wide, &[]);
+        self.builder.switch_to_block(two);
+        let b1 = load(self, 1);
+        let high = self.builder.ins().band_imm_s(b0, 0x1f);
+        let high = self.builder.ins().ishl_imm_u(high, 6);
+        let low = self.builder.ins().band_imm_s(b1, 0x3f);
+        let value = self.builder.ins().bor(high, low);
+        self.builder.ins().jump(done, &[BlockArg::Value(value)]);
+        self.builder.switch_to_block(wide);
+        let medium = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, b0, 0xF0);
+        self.builder.ins().brif(medium, three, &[], four, &[]);
+        self.builder.switch_to_block(three);
+        let b1 = load(self, 1);
+        let b2 = load(self, 2);
+        let high = self.builder.ins().band_imm_s(b0, 0x0f);
+        let high = self.builder.ins().ishl_imm_u(high, 12);
+        let mid = self.builder.ins().band_imm_s(b1, 0x3f);
+        let mid = self.builder.ins().ishl_imm_u(mid, 6);
+        let low = self.builder.ins().band_imm_s(b2, 0x3f);
+        let value = self.builder.ins().bor(high, mid);
+        let value = self.builder.ins().bor(value, low);
+        self.builder.ins().jump(done, &[BlockArg::Value(value)]);
+        self.builder.switch_to_block(four);
+        let b1 = load(self, 1);
+        let b2 = load(self, 2);
+        let b3 = load(self, 3);
+        let high = self.builder.ins().band_imm_s(b0, 0x07);
+        let high = self.builder.ins().ishl_imm_u(high, 18);
+        let a = self.builder.ins().band_imm_s(b1, 0x3f);
+        let a = self.builder.ins().ishl_imm_u(a, 12);
+        let b = self.builder.ins().band_imm_s(b2, 0x3f);
+        let b = self.builder.ins().ishl_imm_u(b, 6);
+        let c = self.builder.ins().band_imm_s(b3, 0x3f);
+        let value = self.builder.ins().bor(high, a);
+        let value = self.builder.ins().bor(value, b);
+        let value = self.builder.ins().bor(value, c);
+        self.builder.ins().jump(done, &[BlockArg::Value(value)]);
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
+    }
+
+    fn require_scalar(&mut self, number: Value) {
+        let in_range = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, number, 0x0011_0000);
+        let shifted = self.builder.ins().iadd_imm_s(number, -0xD800);
+        let surrogate = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThan, shifted, 0x800);
+        let allowed = self.builder.ins().bxor_imm_u(surrogate, 1);
+        let valid = self.builder.ins().band(in_range, allowed);
+        self.builder.ins().trapz(valid, UNREACHABLE);
     }
 
     fn memcmp(&mut self, left: Value, right: Value, len: Value) -> Value {
@@ -1373,6 +1544,7 @@ impl Emitter<'_, '_> {
             }
             TExpr::Bool(b) => self.builder.ins().iconst(types::I8, i64::from(*b)),
             TExpr::Str(text) => self.string_address(text),
+            TExpr::Char(value) => self.builder.ins().iconst(types::I64, i64::from(*value)),
             TExpr::Local(local, _) => self.builder.use_var(self.vars[local.index()]),
             TExpr::Unary { op, expr } => {
                 let operand = self.value(expr)?;

@@ -67,19 +67,26 @@ pub enum StrOp {
     HasPrefix,
     HasSuffix,
     Contains,
+    FromChar,
+    CharAt,
+    CharWidth,
+    CharValue,
+    CharFromInt,
+    CharFromString,
 }
 
 impl StrOp {
     pub fn result(self) -> Ty {
         match self {
-            StrOp::Concat | StrOp::FromInt => Ty::Str,
-            StrOp::Count => Ty::Int,
+            StrOp::Concat | StrOp::FromInt | StrOp::FromChar => Ty::Str,
+            StrOp::Count | StrOp::CharWidth | StrOp::CharValue => Ty::Int,
+            StrOp::CharAt | StrOp::CharFromInt | StrOp::CharFromString => Ty::Char,
             StrOp::IsEmpty | StrOp::HasPrefix | StrOp::HasSuffix | StrOp::Contains => Ty::Bool,
         }
     }
 
     pub fn allocates(self) -> bool {
-        matches!(self, StrOp::Concat | StrOp::FromInt)
+        matches!(self, StrOp::Concat | StrOp::FromInt | StrOp::FromChar)
     }
 
     pub fn code(self) -> u8 {
@@ -91,6 +98,12 @@ impl StrOp {
             StrOp::HasPrefix => 5,
             StrOp::HasSuffix => 6,
             StrOp::Contains => 7,
+            StrOp::FromChar => 8,
+            StrOp::CharAt => 9,
+            StrOp::CharWidth => 10,
+            StrOp::CharValue => 11,
+            StrOp::CharFromInt => 12,
+            StrOp::CharFromString => 13,
         }
     }
 }
@@ -246,6 +259,7 @@ pub enum TExpr {
     Int(i64),
     Bool(bool),
     Str(String),
+    Char(u32),
     Local(LocalId, Ty),
     Unary {
         op: UnaryOp,
@@ -343,6 +357,7 @@ impl TExpr {
             TExpr::Int(_) => Ty::Int,
             TExpr::Bool(_) => Ty::Bool,
             TExpr::Str(_) => Ty::Str,
+            TExpr::Char(_) => Ty::Char,
             TExpr::Local(_, ty) => *ty,
             TExpr::Unary { expr, .. } => expr.ty(),
             TExpr::Binary { op, .. } => match op {
@@ -583,7 +598,7 @@ impl<E> Rewriter<'_, E> {
 
     fn expr(&mut self, expr: &TExpr) -> Result<TExpr, E> {
         Ok(match expr {
-            TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) => expr.clone(),
+            TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) | TExpr::Char(_) => expr.clone(),
             TExpr::Local(local, ty) => TExpr::Local(*local, (self.ty)(*ty)?),
             TExpr::Unary { op, expr } => TExpr::Unary {
                 op: *op,
