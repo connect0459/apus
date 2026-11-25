@@ -9,6 +9,7 @@ use crate::tir::{TExpr, TStruct};
 use crate::types::{EnumId, StructId, Ty};
 
 pub const PRINT: &str = "print";
+pub const FATAL_ERROR: &str = "fatalError";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckError {
@@ -1171,10 +1172,10 @@ impl Signatures {
     }
 
     fn register_func(&mut self, func: &FuncDecl) -> CResult<()> {
-        if func.name() == PRINT {
+        if func.name() == PRINT || func.name() == FATAL_ERROR {
             return Err(CheckError::at(
                 func.line(),
-                "'print' is a reserved function name",
+                format!("'{}' is a reserved function name", func.name()),
             ));
         }
         if self.struct_def_ids.contains_key(func.name())

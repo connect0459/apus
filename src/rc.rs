@@ -220,7 +220,7 @@ impl Pass<'_> {
         let scope = self.scopes.pop().unwrap_or_default();
         if !matches!(
             out.last(),
-            Some(TStmt::Return(_) | TStmt::Break(_) | TStmt::Continue(_))
+            Some(TStmt::Return(_) | TStmt::Break(_) | TStmt::Continue(_) | TStmt::Fatal(_))
         ) {
             out.extend(self.release_all(scope.into_iter().rev()));
         }
@@ -322,6 +322,7 @@ impl Pass<'_> {
                     body,
                 });
             }
+            TStmt::Fatal(text) => out.push(TStmt::Fatal(text.clone())),
             TStmt::Print(expr) => {
                 let (expr, temps) = self.scoped(|p| p.expr(expr));
                 out.push(TStmt::Print(expr));

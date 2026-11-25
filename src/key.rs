@@ -159,6 +159,10 @@ impl Encoder<'_> {
                 self.tag(u8::from(*inclusive));
                 self.stmts(body);
             }
+            TStmt::Fatal(text) => {
+                self.tag(26);
+                self.str(text);
+            }
             TStmt::Print(expr) => {
                 self.tag(17);
                 self.expr(expr);

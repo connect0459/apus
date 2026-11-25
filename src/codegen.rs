@@ -171,7 +171,7 @@ impl Backend {
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
-        for name in ["printf", "puts", "malloc", "free"] {
+        for name in ["printf", "puts", "malloc", "free", "fflush", "write"] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
         }
@@ -624,6 +624,10 @@ impl Emitter<'_, '_> {
                 self.print(expr)?;
                 Ok(false)
             }
+            TStmt::Fatal(text) => {
+                self.fatal(text);
+                Ok(true)
+            }
             TStmt::Eval(expr) => {
                 self.expr(expr)?;
                 Ok(false)
@@ -997,6 +1001,31 @@ impl Emitter<'_, '_> {
         let no = self.data_address(RUNTIME_FALSE);
         let text = self.builder.ins().select(value, yes, no);
         self.puts(text);
+    }
+
+    fn fatal(&mut self, text: &str) {
+        let mut flush = Signature::new(self.call_conv);
+        flush.params.push(AbiParam::new(types::I64));
+        flush.returns.push(AbiParam::new(types::I32));
+        let flush = self.import_func("fflush", flush, false);
+        let everything = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().call(flush, &[everything]);
+        let mut write = Signature::new(self.call_conv);
+        write.params.push(AbiParam::new(types::I32));
+        write.params.push(AbiParam::new(types::I64));
+        write.params.push(AbiParam::new(types::I64));
+        write.returns.push(AbiParam::new(types::I64));
+        let write = self.import_func("write", write, false);
+        let standard_error = self.builder.ins().iconst(types::I32, 2);
+        let address = self.string_address(text);
+        let length = self
+            .builder
+            .ins()
+            .iconst(types::I64, i64::try_from(text.len()).unwrap_or(0));
+        self.builder
+            .ins()
+            .call(write, &[standard_error, address, length]);
+        self.builder.ins().trap(UNREACHABLE);
     }
 
     fn puts(&mut self, text: Value) {

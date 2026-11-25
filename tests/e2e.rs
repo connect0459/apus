@@ -3515,3 +3515,84 @@ fn a_cast_to_a_protocol_is_rejected() {
         format!("{PROTOCOL_SHAPES}func main() {{\n  let c = Circle(r: 1)\n  print(c is Shape)\n}}");
     assert!(!build_error(&source).is_empty());
 }
+
+fn run_failing(source: &str) -> (String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("prog");
+    build(source, &exe).unwrap();
+    let output = Command::new(&exe).output().unwrap();
+    assert!(!output.status.success(), "program should have trapped");
+    (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn fatal_error_writes_its_message_to_standard_error_and_stops_the_program() {
+    let (stdout, stderr) =
+        run_failing("func main() {\n  print(1)\n  fatalError(\"boom\")\n  print(2)\n}");
+    assert_eq!(stdout, "1\n");
+    assert_eq!(stderr, "Fatal error: boom\n");
+}
+
+#[test]
+fn fatal_error_without_a_message_still_reports_itself() {
+    let (_, stderr) = run_failing("func main() {\n  fatalError()\n}");
+    assert_eq!(stderr, "Fatal error\n");
+}
+
+#[test]
+fn fatal_error_ends_a_function_that_must_return_a_value() {
+    let source = "func positive(_ n: Int) -> Int {\n  if n > 0 { return n }\n  fatalError(\"not positive\")\n}\nfunc main() {\n  print(positive(4))\n}";
+    assert_eq!(run(source), "4\n");
+    let (_, stderr) = run_failing(&source.replace("positive(4)", "positive(0 - 1)"));
+    assert_eq!(stderr, "Fatal error: not positive\n");
+}
+
+#[test]
+fn fatal_error_can_be_the_way_out_of_a_guard() {
+    let source = "func double(_ x: Int?) -> Int {\n  guard let v = x else { fatalError(\"no value\") }\n  return v * 2\n}\nfunc check(_ ok: Bool) {\n  guard ok else { fatalError(\"not ok\") }\n  print(1)\n}\nfunc main() {\n  print(double(4))\n  check(true)\n}";
+    assert_eq!(run(source), "8\n1\n");
+    let (_, stderr) = run_failing(&source.replace("check(true)", "check(false)"));
+    assert_eq!(stderr, "Fatal error: not ok\n");
+}
+
+#[test]
+fn fatal_error_can_end_every_branch_of_a_switch_and_an_if() {
+    let source = "enum E { case a, b }\nfunc pick(_ e: E) -> Int {\n  switch e {\n  case .a: return 1\n  case .b: fatalError(\"b\")\n  }\n}\nfunc sign(_ n: Int) -> Int {\n  if n > 0 { return 1 } else { fatalError(\"no\") }\n}\nfunc main() {\n  print(pick(E.a))\n  print(sign(3))\n}";
+    assert_eq!(run(source), "1\n1\n");
+}
+
+#[test]
+fn fatal_error_in_a_branch_that_is_not_taken_does_nothing() {
+    let source = "func main() {\n  var i = 0\n  while i < 3 {\n    if i == 7 { fatalError(\"never\") }\n    i += 1\n  }\n  print(i)\n}";
+    assert_eq!(run(source), "3\n");
+}
+
+#[test]
+fn fatal_error_does_not_run_the_deinit_of_live_objects() {
+    let source =
+        tracked("func main() {\n  let t = Tracked(id: 1)\n  print(1)\n  fatalError(\"stop\")\n}");
+    let (stdout, stderr) = run_failing(&source);
+    assert_eq!(stdout, "1\n");
+    assert_eq!(stderr, "Fatal error: stop\n");
+}
+
+#[test]
+fn fatal_error_takes_at_most_one_string_literal() {
+    assert!(build_error("func main() {\n  fatalError(1)\n}").contains("fatalError"));
+    assert!(build_error("func main() {\n  let s = \"a\"\n  fatalError(s)\n}").contains("literal"));
+    assert!(build_error("func main() {\n  fatalError(\"a\", \"b\")\n}").contains("fatalError"));
+    assert!(build_error("func main() {\n  fatalError(message: \"a\")\n}").contains("fatalError"));
+}
+
+#[test]
+fn fatal_error_does_not_produce_a_value() {
+    assert!(build_error("func main() {\n  let x = fatalError(\"a\")\n}").contains("fatalError"));
+}
+
+#[test]
+fn fatal_error_is_a_reserved_function_name() {
+    assert!(build_error("func fatalError() { }\nfunc main() { }").contains("fatalError"));
+}

@@ -6,8 +6,8 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    COMPARABLE, CResult, EQUATABLE, EnumSig, FieldSig, FuncSig, NONE_CASE, PRINT, ParamSig,
-    SOME_CASE, bound_includes, scope_of,
+    COMPARABLE, CResult, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig, NONE_CASE, PRINT,
+    ParamSig, SOME_CASE, bound_includes, scope_of,
 };
 use crate::tir::{LocalId, TAG_SLOT, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -172,9 +172,18 @@ fn zero_struct(cx: &FnCx, func: &FuncDecl, id: StructId, ty: Ty) -> CResult<TExp
     Ok(cx.sigs.construct(ty, zeros))
 }
 
+fn is_fatal_error(stmt: &StmtKind) -> bool {
+    matches!(
+        stmt,
+        StmtKind::Expr(expr)
+            if matches!(expr.kind(), ExprKind::Call { callee, .. } if callee == FATAL_ERROR)
+    )
+}
+
 fn always_returns(stmts: &[Stmt]) -> bool {
     match stmts.last().map(Stmt::kind) {
         Some(StmtKind::Return(_)) => true,
+        Some(other) if is_fatal_error(other) => true,
         Some(StmtKind::If {
             then_body,
             else_body: Some(else_body),
@@ -290,6 +299,7 @@ fn always_exits(stmts: &[Stmt]) -> bool {
 fn exits(stmts: &[Stmt], in_switch: bool, inner_labels: &[String]) -> bool {
     match stmts.last().map(Stmt::kind) {
         Some(StmtKind::Return(_) | StmtKind::Continue(_)) => true,
+        Some(other) if is_fatal_error(other) => true,
         Some(StmtKind::Break(None)) => !in_switch,
         Some(StmtKind::Break(Some(label))) => !inner_labels.contains(label),
         Some(StmtKind::If {
@@ -1835,7 +1845,37 @@ impl FnCx<'_> {
         if callee == PRINT {
             return self.print(expr.line(), args);
         }
+        if callee == FATAL_ERROR {
+            return Self::fatal_error(expr.line(), args);
+        }
         Ok(TStmt::Eval(self.call(expr.line(), callee, args, None)?))
+    }
+
+    fn fatal_error(line: u32, args: &[Arg]) -> CResult<TStmt> {
+        let usage = "fatalError takes no argument or one unlabeled string literal";
+        let text = match args {
+            [] => "Fatal error\n".to_string(),
+            [arg] if arg.label().is_none() => match arg.value().kind() {
+                ExprKind::Str(text) if !text.contains('\0') => format!("Fatal error: {text}\n"),
+                ExprKind::Str(_) => {
+                    return Err(CheckError::at(
+                        line,
+                        "a string literal cannot contain a NUL character",
+                    ));
+                }
+                ExprKind::Int(_) | ExprKind::Bool(_) => {
+                    return Err(CheckError::at(line, usage));
+                }
+                _ => {
+                    return Err(CheckError::at(
+                        line,
+                        "the message of fatalError must be a string literal",
+                    ));
+                }
+            },
+            _ => return Err(CheckError::at(line, usage)),
+        };
+        Ok(TStmt::Fatal(text))
     }
 
     fn print(&mut self, line: u32, args: &[Arg]) -> CResult<TStmt> {
@@ -1977,6 +2017,10 @@ impl FnCx<'_> {
             ExprKind::Call { callee, .. } if callee == PRINT => {
                 Err(CheckError::at(line, "print does not produce a value"))
             }
+            ExprKind::Call { callee, .. } if callee == FATAL_ERROR => Err(CheckError::at(
+                line,
+                "fatalError does not produce a value: write it as a statement",
+            )),
             ExprKind::Call { callee, args } => self.call(line, callee, args, expected),
             ExprKind::GenericCall {
                 callee,
