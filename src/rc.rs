@@ -1,6 +1,6 @@
 use crate::ast::BinOp;
 use crate::sigs::Signatures;
-use crate::tir::{DROP_SLOT, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
+use crate::tir::{LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
 use crate::types::{StructId, Ty};
 
 const DESTROYING: i64 = 1 << 40;
@@ -588,6 +588,7 @@ impl Pass<'_> {
             TExpr::New { .. }
                 | TExpr::Call { .. }
                 | TExpr::Virtual { .. }
+                | TExpr::VCall { .. }
                 | TExpr::StructInit { .. }
                 | TExpr::Zero(_)
                 | TExpr::Retain(_)
@@ -674,6 +675,24 @@ impl Pass<'_> {
                 args: self.borrowed_all(args),
                 ret: *ret,
             },
+            TExpr::VCall { slot, args, ret } => TExpr::VCall {
+                slot: *slot,
+                args: self.borrowed_all(args),
+                ret: *ret,
+            },
+            TExpr::InstanceOf { object, class } => TExpr::InstanceOf {
+                object: Box::new(self.borrowed(object)),
+                class: Box::new(self.expr(class)),
+            },
+            TExpr::ClassDesc(ty) => TExpr::ClassDesc(*ty),
+            TExpr::Descriptor(descriptor) => {
+                for link in descriptor.chain() {
+                    if !self.created.contains(&link.class()) {
+                        self.created.push(link.class());
+                    }
+                }
+                TExpr::Descriptor(descriptor.clone())
+            }
             TExpr::Virtual {
                 cases,
                 default,
@@ -710,7 +729,6 @@ impl Pass<'_> {
                     }
                     let tag = i64::try_from(id.index()).unwrap_or(i64::MAX);
                     args[TAG_SLOT] = TExpr::Int(tag);
-                    args[DROP_SLOT] = TExpr::FuncAddr(self.sigs.drop_name(*id));
                 }
                 TExpr::New { ty: *ty, args }
             }

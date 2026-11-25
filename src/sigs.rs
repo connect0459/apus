@@ -1292,12 +1292,15 @@ impl Signatures {
             .superclass(ty)
             .and_then(|parent| self.resolve_method(parent, name));
         let line = func.line();
-        if func.is_override() && inherited.is_some() && self.hierarchy_has_generic(ty) {
+        let own_generics = self.owner_generics(owner);
+        let has_own_parameters = self
+            .funcs
+            .get(func.name())
+            .is_some_and(|sig| sig.generics().len() > own_generics);
+        if has_own_parameters && (func.is_override() || inherited.is_some()) {
             return Err(CheckError::at(
                 line,
-                format!(
-                    "'{name}' overrides a method of a hierarchy that includes a generic class, which is not supported yet"
-                ),
+                format!("'{name}' has type parameters of its own and cannot be overridden"),
             ));
         }
         match (func.is_override(), inherited) {
@@ -1315,14 +1318,20 @@ impl Signatures {
                 else {
                     return Ok(());
                 };
-                let same = mine.ret == theirs.ret
+                let owner_args = self
+                    .superclass(ty)
+                    .and_then(|parent| self.resolve_method_owner(parent, name))
+                    .map(|(_, owner_ty)| self.type_arguments(owner_ty))
+                    .unwrap_or_default();
+                let seen = |ty: Ty| self.subst(ty, &owner_args, &[], line).unwrap_or(ty);
+                let same = mine.ret == seen(theirs.ret)
                     && mine.params.len() == theirs.params.len()
                     && mine
                         .params
                         .iter()
                         .zip(&theirs.params)
                         .skip(1)
-                        .all(|(a, b)| a.ty == b.ty && a.label == b.label);
+                        .all(|(a, b)| a.ty == seen(b.ty) && a.label == b.label);
                 if same {
                     Ok(())
                 } else {
@@ -1372,35 +1381,96 @@ impl Signatures {
         None
     }
 
-    pub fn class_tags(&self, target: Ty) -> Vec<i64> {
-        let Ty::Class(root) = target else {
-            return Vec::new();
-        };
-        let mut ids: Vec<StructId> = self.instances.borrow().superclass.keys().copied().collect();
-        ids.push(root);
-        ids.sort_by_key(|id| id.index());
-        ids.dedup();
-        ids.into_iter()
-            .filter(|id| self.is_subclass(Ty::Class(*id), target))
-            .map(|id| i64::try_from(id.index()).unwrap_or(i64::MAX))
-            .collect()
+    pub fn descriptor_name(&self, class: Ty) -> String {
+        format!("apus_class_{}", self.type_name(class))
     }
 
-    pub fn dispatch_cases(&self, ty: Ty, name: &str) -> Vec<(i64, String)> {
-        let Some(default) = self.resolve_method(ty, name) else {
+    pub fn resolve_method_owner(&self, ty: Ty, name: &str) -> Option<(String, Ty)> {
+        let mut current = Some(ty);
+        while let Some(t) = current {
+            let qualified = format!("{}.{name}", self.owner_name(t)?);
+            if self
+                .funcs
+                .get(&qualified)
+                .is_some_and(FuncSig::has_receiver)
+            {
+                return Some((qualified, t));
+            }
+            current = self.superclass(t);
+        }
+        None
+    }
+
+    fn virtual_candidates(&self, class: Ty) -> Vec<String> {
+        let Some(owner) = self.owner_name(class) else {
             return Vec::new();
         };
-        let mut ids: Vec<StructId> = self.instances.borrow().superclass.keys().copied().collect();
-        ids.sort_by_key(|id| id.index());
-        ids.into_iter()
-            .map(Ty::Class)
-            .filter(|class| *class != ty && self.is_subclass(*class, ty))
-            .filter_map(|class| {
-                let Ty::Class(id) = class else { return None };
-                let target = self.resolve_method(class, name)?;
-                (target != default).then(|| (i64::try_from(id.index()).unwrap_or(i64::MAX), target))
+        let own_generics = self.owner_generics(&owner);
+        let prefix = format!("{owner}.");
+        let mut names: Vec<String> = self
+            .funcs
+            .iter()
+            .filter(|(_, sig)| {
+                sig.has_receiver() && !sig.is_mutating() && sig.generics().len() == own_generics
             })
-            .collect()
+            .filter_map(|(name, _)| name.strip_prefix(&prefix))
+            .filter(|name| !name.contains('.') && *name != "deinit")
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names
+    }
+
+    pub fn vtable_methods(&self, class: Ty) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut current = Some(class);
+        while let Some(t) = current {
+            chain.push(t);
+            current = self.superclass(t);
+        }
+        let mut methods: Vec<String> = Vec::new();
+        for t in chain.into_iter().rev() {
+            for name in self.virtual_candidates(t) {
+                if !methods.contains(&name) {
+                    methods.push(name);
+                }
+            }
+        }
+        methods
+    }
+
+    pub fn vtable_slot(&self, class: Ty, name: &str) -> Option<usize> {
+        self.vtable_methods(class)
+            .iter()
+            .position(|method| method == name)
+    }
+
+    pub fn is_overridden_below(&self, class: Ty, name: &str) -> bool {
+        let Some((Kind::Struct, def, _)) = self.origin_of(class) else {
+            return false;
+        };
+        (0..self.struct_defs.len()).any(|candidate| {
+            if candidate == def || !self.struct_defs[candidate].is_class() {
+                return false;
+            }
+            let mut current = self.struct_defs[candidate].superclass();
+            let mut steps = 0;
+            while let Some(parent) = current {
+                let Some(parent_def) = self.struct_def_ids.get(parent.name()).copied() else {
+                    return false;
+                };
+                if parent_def == def {
+                    let method = format!("{}.{name}", self.struct_defs[candidate].name());
+                    return self.funcs.get(&method).is_some_and(FuncSig::has_receiver);
+                }
+                current = self.struct_defs[parent_def].superclass();
+                steps += 1;
+                if steps > self.struct_defs.len() {
+                    return false;
+                }
+            }
+            false
+        })
     }
 
     fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<(Ty, Vec<String>)> {
@@ -1759,7 +1829,7 @@ impl Signatures {
                 let header = [
                     TExpr::Int(tag),
                     TExpr::Int(1),
-                    TExpr::FuncAddr(self.drop_name(id)),
+                    TExpr::ClassDesc(ty),
                     TExpr::Int(0),
                 ];
                 let args = header.into_iter().chain(members).collect();

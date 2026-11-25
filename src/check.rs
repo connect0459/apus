@@ -9,7 +9,7 @@ use crate::sigs::{
     COMPARABLE, CResult, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig, NONE_CASE, PRINT,
     ParamSig, SOME_CASE, bound_includes, scope_of,
 };
-use crate::tir::{LocalId, StrOp, TAG_SLOT, TExpr, TFunc, TStmt};
+use crate::tir::{LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
 const SUPER: &str = "super";
@@ -457,35 +457,13 @@ impl FnCx<'_> {
 
     fn instance_test(&mut self, subject: TExpr, target: Ty) -> (TExpr, LocalId) {
         let object = self.temp(subject.ty());
-        let tag = self.temp(Ty::Int);
-        let tags = self.sigs.class_tags(target);
-        let first = tags.first().copied().unwrap_or(-1);
-        let mut condition = TExpr::Binary {
-            op: BinOp::Eq,
-            lhs: Box::new(TExpr::Bind {
-                local: tag,
-                init: Box::new(TExpr::Field {
-                    base: Box::new(TExpr::Bind {
-                        local: object,
-                        init: Box::new(subject),
-                    }),
-                    index: TAG_SLOT,
-                    ty: Ty::Int,
-                }),
+        let condition = TExpr::InstanceOf {
+            object: Box::new(TExpr::Bind {
+                local: object,
+                init: Box::new(subject),
             }),
-            rhs: Box::new(TExpr::Int(first)),
+            class: Box::new(TExpr::ClassDesc(target)),
         };
-        for other in tags.iter().skip(1) {
-            condition = TExpr::Binary {
-                op: BinOp::Or,
-                lhs: Box::new(condition),
-                rhs: Box::new(TExpr::Binary {
-                    op: BinOp::Eq,
-                    lhs: Box::new(TExpr::Local(tag, Ty::Int)),
-                    rhs: Box::new(TExpr::Int(*other)),
-                }),
-            };
-        }
         (condition, object)
     }
 
@@ -515,12 +493,6 @@ impl FnCx<'_> {
             ));
         }
         let source = value.ty();
-        if self.sigs.hierarchy_has_generic(source) || self.sigs.hierarchy_has_generic(target) {
-            return Err(CheckError::at(
-                line,
-                "'is' and 'as' cannot be used on a hierarchy that includes a generic class yet",
-            ));
-        }
         let (class, through_optional) = if source.is_class() {
             (source, false)
         } else if let Some(inner) = self.sigs.unwrapped(source).filter(|t| t.is_class()) {
@@ -2498,21 +2470,15 @@ impl FnCx<'_> {
             None => None,
         };
         let call = self.finish_call(line, &qualified, sig, checked, expected, explicit)?;
-        let cases = if dispatching {
-            sigs.dispatch_cases(lookup_ty, name)
-        } else {
-            Vec::new()
-        };
-        Ok(match call {
-            TExpr::Call {
-                callee, args, ret, ..
-            } if !cases.is_empty() => TExpr::Virtual {
-                cases,
-                default: callee,
-                args,
-                ret,
-            },
-            other => other,
+        let slot =
+            if dispatching && lookup_ty.is_class() && sigs.is_overridden_below(lookup_ty, name) {
+                sigs.vtable_slot(lookup_ty, name)
+            } else {
+                None
+            };
+        Ok(match (call, slot) {
+            (TExpr::Call { args, ret, .. }, Some(slot)) => TExpr::VCall { slot, args, ret },
+            (other, _) => other,
         })
     }
 

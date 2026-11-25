@@ -1,5 +1,62 @@
 use crate::ast::{BinOp, UnaryOp};
-use crate::types::Ty;
+use crate::types::{StructId, Ty};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Descriptor {
+    name: String,
+    class: StructId,
+    drop: String,
+    parent: Option<Box<Descriptor>>,
+    methods: Vec<String>,
+}
+
+impl Descriptor {
+    pub fn new(
+        name: String,
+        class: StructId,
+        drop: String,
+        parent: Option<Box<Descriptor>>,
+        methods: Vec<String>,
+    ) -> Self {
+        Self {
+            name,
+            class,
+            drop,
+            parent,
+            methods,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn class(&self) -> StructId {
+        self.class
+    }
+
+    pub fn drop(&self) -> &str {
+        &self.drop
+    }
+
+    pub fn parent(&self) -> Option<&Descriptor> {
+        self.parent.as_deref()
+    }
+
+    pub fn methods(&self) -> &[String] {
+        &self.methods
+    }
+
+    pub fn chain(&self) -> Vec<&Descriptor> {
+        let mut found = vec![self];
+        let mut current = self.parent();
+        while let Some(parent) = current {
+            found.push(parent);
+            current = parent.parent();
+        }
+        found
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrOp {
@@ -40,7 +97,9 @@ impl StrOp {
 
 pub const TAG_SLOT: usize = 0;
 pub const RC_SLOT: usize = 1;
-pub const DROP_SLOT: usize = 2;
+pub const DESC_SLOT: usize = 2;
+pub const DESC_PARENT: usize = 1;
+pub const DESC_METHODS: usize = 2;
 pub const UNOWNED_SLOT: usize = 3;
 pub const HEADER_SLOTS: usize = 4;
 
@@ -234,6 +293,17 @@ pub enum TExpr {
         init: Box<TExpr>,
     },
     FuncAddr(String),
+    ClassDesc(Ty),
+    Descriptor(Box<Descriptor>),
+    VCall {
+        slot: usize,
+        args: Vec<TExpr>,
+        ret: Ty,
+    },
+    InstanceOf {
+        object: Box<TExpr>,
+        class: Box<TExpr>,
+    },
     StrOp {
         op: StrOp,
         args: Vec<TExpr>,
@@ -282,6 +352,7 @@ impl TExpr {
             TExpr::Call { ret, .. }
             | TExpr::Virtual { ret, .. }
             | TExpr::Witness { ret, .. }
+            | TExpr::VCall { ret, .. }
             | TExpr::Dispatch { ret, .. } => *ret,
             TExpr::Retain(inner)
             | TExpr::Moved(inner)
@@ -290,7 +361,8 @@ impl TExpr {
             | TExpr::RetainWeak(inner)
             | TExpr::LoadWeak(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
-            TExpr::FuncAddr(_) => Ty::Int,
+            TExpr::FuncAddr(_) | TExpr::ClassDesc(_) | TExpr::Descriptor(_) => Ty::Int,
+            TExpr::InstanceOf { .. } => Ty::Bool,
             TExpr::StrOp { op, .. } => op.result(),
             TExpr::Unwrap { ty, .. } | TExpr::Select { ty, .. } => *ty,
             TExpr::StructInit { ty, .. }
@@ -306,19 +378,14 @@ type TyMap<'a, E> = &'a mut dyn FnMut(Ty) -> Result<Ty, E>;
 type CallMap<'a, E> = &'a mut dyn FnMut(String, Vec<Ty>) -> Result<(String, Vec<Ty>), E>;
 type WitnessMap<'a, E> = &'a mut dyn FnMut(&str, &str, Ty) -> Result<Witnessed, E>;
 type DispatchMap<'a, E> = &'a mut dyn FnMut(&str, &str) -> Result<Option<Vec<(i64, String)>>, E>;
+type DescribeMap<'a, E> = &'a mut dyn FnMut(Ty) -> Result<Option<Box<Descriptor>>, E>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Witnessed {
     Keep,
-    Call {
-        callee: String,
-        type_args: Vec<Ty>,
-    },
+    Call { callee: String, type_args: Vec<Ty> },
     Operator(BinOp),
-    Virtual {
-        cases: Vec<(i64, String)>,
-        default: String,
-    },
+    Slot(usize),
 }
 
 struct Rewriter<'a, E> {
@@ -326,6 +393,7 @@ struct Rewriter<'a, E> {
     call: CallMap<'a, E>,
     witness: WitnessMap<'a, E>,
     dispatch: DispatchMap<'a, E>,
+    describe: DescribeMap<'a, E>,
 }
 
 impl TFunc {
@@ -336,12 +404,14 @@ impl TFunc {
         call: CallMap<'_, E>,
         witness: WitnessMap<'_, E>,
         dispatch: DispatchMap<'_, E>,
+        describe: DescribeMap<'_, E>,
     ) -> Result<TFunc, E> {
         let mut rewriter = Rewriter {
             ty,
             call,
             witness,
             dispatch,
+            describe,
         };
         let ret = (rewriter.ty)(self.ret)?;
         let locals = self
@@ -467,18 +537,7 @@ impl<E> Rewriter<'_, E> {
                     _ => TExpr::Bool(false),
                 }
             }
-            Witnessed::Virtual { cases, default } => {
-                let mut renamed = Vec::with_capacity(cases.len());
-                for (tag, callee) in cases {
-                    renamed.push((tag, (self.call)(callee, Vec::new())?.0));
-                }
-                TExpr::Virtual {
-                    cases: renamed,
-                    default: (self.call)(default, Vec::new())?.0,
-                    args,
-                    ret,
-                }
-            }
+            Witnessed::Slot(slot) => TExpr::VCall { slot, args, ret },
         })
     }
 
@@ -587,9 +646,32 @@ impl<E> Rewriter<'_, E> {
                 ty: (self.ty)(*ty)?,
                 args: self.exprs(args)?,
             },
-            TExpr::New { ty, args } => TExpr::New {
-                ty: (self.ty)(*ty)?,
+            TExpr::New { ty, args } => {
+                let ty = (self.ty)(*ty)?;
+                let mut args = self.exprs(args)?;
+                if let Some(descriptor) = (self.describe)(ty)?
+                    && let Some(slot) = args.get_mut(DESC_SLOT)
+                {
+                    *slot = TExpr::Descriptor(descriptor);
+                }
+                TExpr::New { ty, args }
+            }
+            TExpr::ClassDesc(ty) => {
+                let ty = (self.ty)(*ty)?;
+                match (self.describe)(ty)? {
+                    Some(descriptor) => TExpr::Descriptor(descriptor),
+                    None => TExpr::ClassDesc(ty),
+                }
+            }
+            TExpr::Descriptor(_) => expr.clone(),
+            TExpr::VCall { slot, args, ret } => TExpr::VCall {
+                slot: *slot,
                 args: self.exprs(args)?,
+                ret: (self.ty)(*ret)?,
+            },
+            TExpr::InstanceOf { object, class } => TExpr::InstanceOf {
+                object: Box::new(self.expr(object)?),
+                class: Box::new(self.expr(class)?),
             },
             TExpr::Field { base, index, ty } => TExpr::Field {
                 base: Box::new(self.expr(base)?),

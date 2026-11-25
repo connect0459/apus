@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::ast::BinOp;
 use crate::check::{boxed_requirement, equality_function};
 use crate::sigs::{COMPARABLE, Conformer, EQUATABLE, Signatures};
-use crate::tir::{TFunc, Witnessed};
+use crate::tir::{Descriptor, TFunc, Witnessed};
 use crate::types::Ty;
 
 const INSTANCE_LIMIT: usize = 2000;
@@ -50,18 +50,18 @@ fn resolve_witness(
             let qualified = sigs
                 .resolve_method(self_ty, method)
                 .ok_or_else(|| format!("type '{name}' has no method '{method}'"))?;
-            let cases = sigs.dispatch_cases(self_ty, method);
-            if cases.is_empty() {
-                Ok(Witnessed::Call {
+            let slot = if self_ty.is_class() && sigs.is_overridden_below(self_ty, method) {
+                sigs.vtable_slot(self_ty, method)
+            } else {
+                None
+            };
+            Ok(match slot {
+                Some(slot) => Witnessed::Slot(slot),
+                None => Witnessed::Call {
                     callee: qualified,
                     type_args: sigs.type_arguments(self_ty),
-                })
-            } else {
-                Ok(Witnessed::Virtual {
-                    cases,
-                    default: qualified,
-                })
-            }
+                },
+            })
         }
     }
 }
@@ -129,15 +129,56 @@ impl<'a> Instantiator<'a> {
                     .dispatch_cases(protocol, method, &direct)
                     .map(Some)
             };
+            let mut describe = |class: Ty| me.borrow_mut().describe(class, &direct);
             func.rewrite(
                 func.name().to_string(),
                 &mut ty,
                 &mut call,
                 &mut witness,
                 &mut dispatch,
+                &mut describe,
             )?
         };
         Ok((rewritten, direct.into_inner()))
+    }
+
+    fn describe(
+        &mut self,
+        class: Ty,
+        direct: &RefCell<Vec<usize>>,
+    ) -> Result<Option<Box<Descriptor>>, String> {
+        let sigs = self.sigs;
+        let Ty::Class(id) = class else {
+            return Ok(None);
+        };
+        if sigs.has_param(class) || sigs.existential_protocol(class).is_some() {
+            return Ok(None);
+        }
+        let parent = match sigs.superclass(class) {
+            Some(parent) => self.describe(parent, direct)?,
+            None => None,
+        };
+        let mut methods = Vec::new();
+        for name in sigs.vtable_methods(class) {
+            let (qualified, owner) = sigs
+                .resolve_method_owner(class, &name)
+                .ok_or_else(|| format!("'{}' has no method '{name}'", sigs.type_name(class)))?;
+            let arguments = sigs.type_arguments(owner);
+            if arguments.is_empty() {
+                methods.push(qualified);
+            } else {
+                let instance = self.instance_for(&qualified, &arguments)?;
+                note_dependency(direct, instance);
+                methods.push(self.funcs[instance].name().to_string());
+            }
+        }
+        Ok(Some(Box::new(Descriptor::new(
+            sigs.descriptor_name(class),
+            id,
+            sigs.drop_name(id),
+            parent,
+            methods,
+        ))))
     }
 
     fn dispatch_cases(
@@ -231,12 +272,14 @@ impl<'a> Instantiator<'a> {
         let mut keep = |c: String, a: Vec<Ty>| Ok::<_, String>((c, a));
         let mut keep_witness = |_: &str, _: &str, _: Ty| Ok::<_, String>(Witnessed::Keep);
         let mut keep_dispatch = |_: &str, _: &str| Ok::<_, String>(None);
+        let mut keep_describe = |_: Ty| Ok::<_, String>(None);
         let substituted = generic.rewrite(
             mangled.clone(),
             &mut ty,
             &mut keep,
             &mut keep_witness,
             &mut keep_dispatch,
+            &mut keep_describe,
         )?;
         let id = self.funcs.len();
         self.ids.insert(mangled, id);

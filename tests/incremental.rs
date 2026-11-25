@@ -574,3 +574,37 @@ fn deep_expressions_compile_on_the_parallel_workers() {
     assert_eq!(report.compiled(), 9);
     assert_eq!(project.run(), "48000\n");
 }
+
+const GENERIC_DISPATCH: &str = "class Base<T> {\n  var value: T\n  func describe() -> Int { return 1 }\n}\nclass A: Base<Int> {\n  override func describe() -> Int { return 7 }\n}\nfunc use(_ b: Base<Int>) -> Int { return b.describe() }\nfunc unrelated() -> Int { return 40 }\nfunc main() {\n  print(use(A(value: 0)) + unrelated())\n}\n";
+
+#[test]
+fn a_new_subclass_of_a_generic_class_dispatches_correctly_through_cached_callers() {
+    let project = Project::new();
+    project.build(GENERIC_DISPATCH);
+    assert_eq!(project.run(), "47\n");
+    let with_subclass = GENERIC_DISPATCH
+        .replace(
+            "func use(",
+            "class B<T>: Base<T> {\n  override func describe() -> Int { return 8 }\n}\nfunc use(",
+        )
+        .replace(
+            "print(use(A(value: 0)) + unrelated())",
+            "print(use(A(value: 0)) + use(B<Int>(value: 0)) + unrelated())",
+        );
+    let report = project.build(&with_subclass);
+    assert!(report.reused() >= 1, "the callers must stay cached");
+    assert_eq!(project.run(), "55\n");
+    let changed = with_subclass.replace("return 8", "return 9");
+    project.build(&changed);
+    assert_eq!(project.run(), "56\n");
+}
+
+#[test]
+fn editing_an_override_of_a_generic_hierarchy_recompiles_only_that_method() {
+    let project = Project::new();
+    project.build(GENERIC_DISPATCH);
+    let edited = GENERIC_DISPATCH.replace("return 7", "return 70");
+    let report = project.build(&edited);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "110\n");
+}

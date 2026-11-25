@@ -4314,14 +4314,72 @@ fn a_generic_class_cannot_inherit_from_a_struct_from_itself_or_with_the_wrong_ar
     assert!(!build_error(bare).is_empty());
 }
 
+const GENERIC_CHAIN: &str = "class Base<T> {\n  var value: T\n  func describe() -> Int { return 1 }\n  func get() -> T { return value }\n  func twice() -> Int { return describe() * 2 }\n}\n";
+
 #[test]
-fn a_hierarchy_that_includes_a_generic_class_cannot_override_or_cast_yet() {
-    let overriding = format!(
-        "{GENERIC_BASE}class IntBox: Base<Int> {{\n  override func get() -> Int {{ return 1 }}\n}}\nfunc main() {{ }}"
+fn a_plain_subclass_may_override_a_method_of_a_generic_superclass() {
+    let source = format!(
+        "{GENERIC_CHAIN}class IntBox: Base<Int> {{\n  override func describe() -> Int {{ return 2 }}\n}}\nfunc show(_ b: Base<Int>) {{\n  print(b.describe())\n  print(b.twice())\n}}\nfunc main() {{\n  show(Base<Int>(value: 0))\n  show(IntBox(value: 0))\n}}"
     );
-    assert!(build_error(&overriding).contains("generic"));
-    let casting = format!(
-        "{GENERIC_BASE}class IntBox: Base<Int> {{ }}\nfunc main() {{\n  let b: Base<Int> = IntBox(value: 1)\n  print(b is IntBox)\n}}"
+    assert_eq!(run(&source), "1\n2\n2\n4\n");
+}
+
+#[test]
+fn a_generic_subclass_may_override_a_method_and_the_override_sees_its_type_parameter() {
+    let source = format!(
+        "{GENERIC_CHAIN}class Derived<T>: Base<T> {{\n  var fallback: T\n  override func get() -> T {{ return fallback }}\n  override func describe() -> Int {{ return super.describe() + 10 }}\n}}\nfunc read<T>(_ b: Base<T>) -> T {{ return b.get() }}\nfunc main() {{\n  let a: Base<String> = Derived<String>(value: \"v\", fallback: \"f\")\n  let b: Base<Int> = Derived<Int>(value: 1, fallback: 2)\n  let c: Base<Int> = Base<Int>(value: 3)\n  print(read(a))\n  print(read(b))\n  print(read(c))\n  print(a.describe())\n  print(b.twice())\n}}"
     );
-    assert!(build_error(&casting).contains("generic"));
+    assert_eq!(run(&source), "f\n2\n3\n11\n22\n");
+}
+
+#[test]
+fn dispatch_through_a_generic_class_uses_the_class_of_the_object_whoever_created_it() {
+    let source = format!(
+        "{GENERIC_CHAIN}class A: Base<Int> {{\n  override func describe() -> Int {{ return 7 }}\n}}\nclass B<T>: Base<T> {{\n  override func describe() -> Int {{ return 8 }}\n}}\nfunc makeA() -> Base<Int> {{ return A(value: 0) }}\nfunc makeB() -> Base<Int> {{ return B<Int>(value: 0) }}\nfunc makeBase() -> Base<Int> {{ return Base<Int>(value: 0) }}\nfunc use(_ b: Base<Int>) -> Int {{ return b.describe() }}\nfunc main() {{\n  print(use(makeA()))\n  print(use(makeB()))\n  print(use(makeBase()))\n}}"
+    );
+    assert_eq!(run(&source), "7\n8\n1\n");
+}
+
+#[test]
+fn a_generic_hierarchy_of_several_levels_keeps_its_methods_in_one_table() {
+    let source = "class A<T> {\n  var v: T\n  func f() -> Int { return 1 }\n  func g() -> Int { return 10 }\n}\nclass B<T>: A<T> {\n  func h() -> Int { return 100 }\n  override func g() -> Int { return 20 }\n}\nclass C<T>: B<T> {\n  override func f() -> Int { return 2 }\n  override func h() -> Int { return 200 }\n  func k() -> Int { return 1000 }\n}\nfunc total(_ a: A<Int>) -> Int { return a.f() * 1 + a.g() }\nfunc more(_ b: B<Int>) -> Int { return b.h() + b.f() }\nfunc main() {\n  let c = C<Int>(v: 0)\n  let b = B<Int>(v: 0)\n  print(total(c))\n  print(total(b))\n  print(more(c))\n  print(more(b))\n  print(c.k())\n}";
+    assert_eq!(run(source), "22\n21\n202\n101\n1000\n");
+}
+
+#[test]
+fn a_protocol_requirement_is_dispatched_dynamically_on_a_generic_class_hierarchy() {
+    let source = format!(
+        "protocol Named {{\n  func describe() -> Int\n}}\n{GENERIC_CHAIN}class IntBox: Base<Int>, Named {{\n  override func describe() -> Int {{ return 5 }}\n}}\nfunc show<N: Named>(_ n: N) -> Int {{ return n.describe() }}\nfunc main() {{\n  print(show(IntBox(value: 0)))\n}}"
+    );
+    assert_eq!(run(&source), "5\n");
+}
+
+#[test]
+fn casts_work_on_a_hierarchy_that_includes_generic_classes() {
+    let source = format!(
+        "{GENERIC_CHAIN}class IntBox: Base<Int> {{ }}\nclass Wide<T>: Base<T> {{\n  var more: Int\n}}\nfunc main() {{\n  let a: Base<Int> = IntBox(value: 1)\n  let b: Base<Int> = Wide<Int>(value: 2, more: 9)\n  let c: Base<Int> = Base<Int>(value: 3)\n  print(a is IntBox)\n  print(b is IntBox)\n  print(b is Wide<Int>)\n  print(c is Wide<Int>)\n  print(a is Base<Int>)\n  if let w = b as? Wide<Int> {{ print(w.more) }}\n  if let w = a as? Wide<Int> {{ print(w.more) }} else {{ print(0) }}\n  let forced = b as! Wide<Int>\n  print(forced.more + 1)\n}}"
+    );
+    assert_eq!(run(&source), "true\nfalse\ntrue\nfalse\ntrue\n9\n0\n10\n");
+}
+
+#[test]
+fn an_instance_of_a_subclass_that_overrides_is_released_through_its_own_class() {
+    let source = format!(
+        "{TRACKED}class Base<T> {{\n  var item: T\n  func tag() -> Int {{ return 1 }}\n}}\nclass Sub: Base<Tracked> {{\n  var own: Tracked\n  override func tag() -> Int {{ return 2 }}\n}}\nfunc main() {{\n  let b: Base<Tracked> = Sub(item: Tracked(id: 1), own: Tracked(id: 2))\n  print(b.tag())\n}}"
+    );
+    assert_eq!(run(&source), "2\n-1\n-2\n");
+}
+
+#[test]
+fn an_override_must_keep_the_signature_with_the_type_arguments_of_the_superclass() {
+    let source = format!(
+        "{GENERIC_CHAIN}class IntBox: Base<Int> {{\n  override func get() -> Bool {{ return true }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&source).contains("signature"));
+}
+
+#[test]
+fn a_method_with_type_parameters_of_its_own_cannot_be_overridden() {
+    let source = "class Base {\n  func pick<U>(_ x: U) -> U { return x }\n}\nclass Sub: Base {\n  override func pick<U>(_ x: U) -> U { return x }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("type parameters of its own"));
 }

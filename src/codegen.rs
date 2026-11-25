@@ -22,7 +22,10 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
-use crate::tir::{DROP_SLOT, RC_SLOT, StrOp, TExpr, TFunc, TStmt, TStruct, UNOWNED_SLOT};
+use crate::tir::{
+    DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, RC_SLOT, StrOp, TExpr, TFunc, TStmt, TStruct,
+    UNOWNED_SLOT,
+};
 use crate::types::Ty;
 
 const VARIADIC_PADDING: usize = 7;
@@ -197,12 +200,42 @@ impl Backend {
         for entry in entries {
             let id = module.declare_function(entry.symbol(), Linkage::Export, &placeholder)?;
             funcs.insert(entry.symbol().to_string(), id);
+        }
+        let mut pending: Vec<(DataId, &Literal)> = Vec::new();
+        for entry in entries {
             for literal in entry.literals() {
                 if !data.contains_key(literal.name()) {
-                    let id = define_text(&mut module, literal.name(), literal.bytes())?;
+                    let writable = !literal.relocs().is_empty();
+                    let id =
+                        module.declare_data(literal.name(), Linkage::Local, writable, false)?;
                     data.insert(literal.name().to_string(), id);
+                    pending.push((id, literal));
                 }
             }
+        }
+        for (id, literal) in pending {
+            let mut description = DataDescription::new();
+            description.define(literal.bytes().to_vec().into_boxed_slice());
+            description.set_align(8);
+            for (offset, target) in literal.relocs() {
+                match target {
+                    SymbolRef::Func(name) => {
+                        let func = *funcs.get(name).ok_or_else(|| {
+                            CodegenError::from(format!("unresolved function '{name}'"))
+                        })?;
+                        let func_ref = module.declare_func_in_data(func, &mut description);
+                        description.write_function_addr(*offset, func_ref);
+                    }
+                    SymbolRef::Data(name) => {
+                        let target = *data.get(name).ok_or_else(|| {
+                            CodegenError::from(format!("unresolved data '{name}'"))
+                        })?;
+                        let value = module.declare_data_in_data(target, &mut description);
+                        description.write_data_addr(*offset, value, 0);
+                    }
+                }
+            }
+            module.define_data(id, &description)?;
         }
         for entry in entries {
             let relocs = entry
@@ -1068,10 +1101,11 @@ impl Emitter<'_, '_> {
             let merge = this.builder.create_block();
             this.builder.ins().brif(last, destroy, &[], decrement, &[]);
             this.builder.switch_to_block(destroy);
-            let drop_fn =
+            let descriptor =
                 this.builder
                     .ins()
-                    .load(types::I64, flags, value, field_offset(DROP_SLOT));
+                    .load(types::I64, flags, value, field_offset(DESC_SLOT));
+            let drop_fn = this.builder.ins().load(types::I64, flags, descriptor, 0);
             let mut sig = Signature::new(this.call_conv);
             sig.params.push(AbiParam::new(types::I64));
             let sig = this.builder.import_signature(sig);
@@ -1510,6 +1544,16 @@ impl Emitter<'_, '_> {
                 self.builder.def_var(self.vars[local.index()], value);
                 value
             }
+            TExpr::ClassDesc(_) => {
+                return Err(CodegenError::from("a class descriptor was not resolved"));
+            }
+            TExpr::Descriptor(descriptor) => self.descriptor_address(descriptor),
+            TExpr::VCall { slot, args, ret } => return self.table_call(*slot, args, *ret),
+            TExpr::InstanceOf { object, class } => {
+                let object = self.value(object)?;
+                let target = self.value(class)?;
+                self.instance_of(object, target)
+            }
             TExpr::FuncAddr(name) => {
                 let sig = signature(self.call_conv, &[Ty::Int], Ty::Void);
                 let func_ref = self.import_func(&symbol(name), sig, true);
@@ -1695,6 +1739,94 @@ impl Emitter<'_, '_> {
         }
         self.builder.switch_to_block(merge);
         Ok(result_slot.or_else(|| self.builder.block_params(merge).first().copied()))
+    }
+
+    fn descriptor_address(&mut self, descriptor: &Descriptor) -> Value {
+        for link in descriptor.chain() {
+            if self.literals.iter().any(|l| l.name() == link.name()) {
+                continue;
+            }
+            let slots = DESC_METHODS + link.methods().len();
+            let mut relocs = vec![(0, SymbolRef::Func(symbol(link.drop())))];
+            if let Some(parent) = link.parent() {
+                let offset = u32::try_from(DESC_PARENT * 8).unwrap_or(0);
+                relocs.push((offset, SymbolRef::Data(parent.name().to_string())));
+            }
+            for (index, method) in link.methods().iter().enumerate() {
+                let offset = u32::try_from((DESC_METHODS + index) * 8).unwrap_or(0);
+                relocs.push((offset, SymbolRef::Func(symbol(method))));
+            }
+            self.literals.push(
+                Literal::new(link.name().to_string(), vec![0; slots * 8]).with_relocs(relocs),
+            );
+        }
+        self.data_address(descriptor.name())
+    }
+
+    fn table_call(&mut self, slot: usize, args: &[TExpr], ret: Ty) -> GResult<Option<Value>> {
+        let param_types: Vec<Ty> = args.iter().map(TExpr::ty).collect();
+        let sig = signature(self.call_conv, &param_types, ret);
+        let result_slot = if ret.is_struct() {
+            Some(self.alloc_struct(ret)?)
+        } else {
+            None
+        };
+        let mut values: Vec<Value> = result_slot.into_iter().collect();
+        for arg in args {
+            values.push(self.value(arg)?);
+        }
+        let receiver = *values
+            .get(usize::from(result_slot.is_some()))
+            .ok_or_else(|| CodegenError::from("a virtual call has no receiver"))?;
+        let flags = MemFlagsData::trusted();
+        let descriptor =
+            self.builder
+                .ins()
+                .load(types::I64, flags, receiver, field_offset(DESC_SLOT));
+        let entry = self.builder.ins().load(
+            types::I64,
+            flags,
+            descriptor,
+            field_offset(DESC_METHODS + slot),
+        );
+        let signature = self.builder.import_signature(sig);
+        let call = self.builder.ins().call_indirect(signature, entry, &values);
+        Ok(result_slot.or_else(|| self.builder.inst_results(call).first().copied()))
+    }
+
+    fn instance_of(&mut self, object: Value, target: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let walk = self.builder.create_block();
+        self.builder.append_block_param(walk, types::I64);
+        let compare = self.builder.create_block();
+        let step = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, types::I8);
+        let first = self
+            .builder
+            .ins()
+            .load(types::I64, flags, object, field_offset(DESC_SLOT));
+        self.builder.ins().jump(walk, &[BlockArg::Value(first)]);
+        self.builder.switch_to_block(walk);
+        let current = self.builder.block_params(walk)[0];
+        let no = self.builder.ins().iconst(types::I8, 0);
+        self.builder
+            .ins()
+            .brif(current, compare, &[], done, &[BlockArg::Value(no)]);
+        self.builder.switch_to_block(compare);
+        let same = self.builder.ins().icmp(IntCC::Equal, current, target);
+        let yes = self.builder.ins().iconst(types::I8, 1);
+        self.builder
+            .ins()
+            .brif(same, done, &[BlockArg::Value(yes)], step, &[]);
+        self.builder.switch_to_block(step);
+        let parent = self
+            .builder
+            .ins()
+            .load(types::I64, flags, current, field_offset(DESC_PARENT));
+        self.builder.ins().jump(walk, &[BlockArg::Value(parent)]);
+        self.builder.switch_to_block(done);
+        self.builder.block_params(done)[0]
     }
 
     fn call(&mut self, callee: &str, args: &[TExpr], ret: Ty) -> GResult<Option<Value>> {

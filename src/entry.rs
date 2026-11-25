@@ -45,11 +45,25 @@ impl EntryReloc {
 pub struct Literal {
     name: String,
     bytes: Vec<u8>,
+    relocs: Vec<(u32, SymbolRef)>,
 }
 
 impl Literal {
     pub fn new(name: String, bytes: Vec<u8>) -> Self {
-        Self { name, bytes }
+        Self {
+            name,
+            bytes,
+            relocs: Vec::new(),
+        }
+    }
+
+    pub fn with_relocs(mut self, relocs: Vec<(u32, SymbolRef)>) -> Self {
+        self.relocs = relocs;
+        self
+    }
+
+    pub fn relocs(&self) -> &[(u32, SymbolRef)] {
+        &self.relocs
     }
 
     pub fn name(&self) -> &str {
@@ -109,7 +123,7 @@ impl FuncEntry {
 }
 
 const MAGIC: [u8; 4] = *b"APFE";
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
 
 const TARGET_FUNC: u8 = 0;
 const TARGET_DATA: u8 = 1;
@@ -222,6 +236,20 @@ impl FuncEntry {
         for literal in &self.literals {
             put_bytes(&mut out, literal.name.as_bytes());
             put_bytes(&mut out, &literal.bytes);
+            put_u64(&mut out, literal.relocs.len() as u64);
+            for (offset, target) in &literal.relocs {
+                out.extend_from_slice(&offset.to_le_bytes());
+                match target {
+                    SymbolRef::Func(name) => {
+                        out.push(TARGET_FUNC);
+                        put_bytes(&mut out, name.as_bytes());
+                    }
+                    SymbolRef::Data(name) => {
+                        out.push(TARGET_DATA);
+                        put_bytes(&mut out, name.as_bytes());
+                    }
+                }
+            }
         }
         Some(out)
     }
@@ -252,7 +280,18 @@ impl FuncEntry {
         for _ in 0..literal_count {
             let name = reader.string()?;
             let bytes = reader.blob()?;
-            literals.push(Literal::new(name, bytes));
+            let reloc_count = reader.length()?;
+            let mut relocs = Vec::with_capacity(reloc_count);
+            for _ in 0..reloc_count {
+                let offset = reader.u32()?;
+                let target = match reader.u8()? {
+                    TARGET_FUNC => SymbolRef::Func(reader.string()?),
+                    TARGET_DATA => SymbolRef::Data(reader.string()?),
+                    _ => return None,
+                };
+                relocs.push((offset, target));
+            }
+            literals.push(Literal::new(name, bytes).with_relocs(relocs));
         }
         reader
             .bytes
@@ -284,7 +323,13 @@ mod tests {
                     -8,
                 ),
             ],
-            vec![Literal::new("apus_str_1".to_string(), b"hi\0".to_vec())],
+            vec![
+                Literal::new("apus_str_1".to_string(), b"hi\0".to_vec()),
+                Literal::new("apus_class_C".to_string(), vec![0; 16]).with_relocs(vec![
+                    (0, SymbolRef::Func("apus_drop".to_string())),
+                    (8, SymbolRef::Data("apus_class_P".to_string())),
+                ]),
+            ],
         )
     }
 

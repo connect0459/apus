@@ -257,6 +257,37 @@ impl Encoder<'_> {
                     self.expr(arg);
                 }
             }
+            TExpr::ClassDesc(ty) => {
+                self.tag(56);
+                self.ty(*ty);
+            }
+            TExpr::Descriptor(descriptor) => {
+                self.tag(57);
+                let chain = descriptor.chain();
+                self.usize(chain.len());
+                for link in chain {
+                    self.str(link.name());
+                    self.str(link.drop());
+                    self.usize(link.methods().len());
+                    for method in link.methods() {
+                        self.str(method);
+                    }
+                }
+            }
+            TExpr::VCall { slot, args, ret } => {
+                self.tag(58);
+                self.usize(*slot);
+                self.ty(*ret);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            TExpr::InstanceOf { object, class } => {
+                self.tag(59);
+                self.expr(object);
+                self.expr(class);
+            }
             TExpr::StrOp { op, args } => {
                 self.tag(55);
                 self.tag(op.code());
