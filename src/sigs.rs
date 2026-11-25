@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{Decl, EnumDecl, FuncDecl, StructDecl, TypeRef};
-use crate::tir::TStruct;
+use crate::tir::{TExpr, TStruct};
 use crate::types::{EnumId, StructId, Ty};
 
 pub const PRINT: &str = "print";
@@ -35,7 +35,7 @@ fn identity(generics: &[String]) -> Vec<Ty> {
     (0..generics.len()).map(Ty::Param).collect()
 }
 
-pub const CLASS_TAG: &str = "$class";
+const HEADER_FIELDS: [&str; 3] = ["$class", "$rc", "$drop"];
 
 pub type CResult<T> = Result<T, CheckError>;
 
@@ -116,8 +116,8 @@ impl FieldSig {
         self.mutable
     }
 
-    pub fn is_class_tag(&self) -> bool {
-        self.name == CLASS_TAG
+    pub fn is_hidden(&self) -> bool {
+        self.name.starts_with('$')
     }
 }
 
@@ -144,7 +144,7 @@ impl StructSig {
         self.fields
             .iter()
             .enumerate()
-            .filter(|(_, f)| !f.is_class_tag())
+            .filter(|(_, f)| !f.is_hidden())
     }
 }
 
@@ -676,11 +676,11 @@ impl Signatures {
         let mut fields: Vec<FieldSig> = Vec::new();
         let mut parent = None;
         if decl.is_class() {
-            fields.push(FieldSig {
-                name: CLASS_TAG.to_string(),
+            fields.extend(HEADER_FIELDS.iter().map(|name| FieldSig {
+                name: (*name).to_string(),
                 ty: Ty::Int,
-                mutable: false,
-            });
+                mutable: true,
+            }));
             if let Some(superclass) = decl.superclass() {
                 let id = self.superclass_id(decl, superclass, at)?;
                 let inherited = self.struct_sig(id).ok_or_else(|| {
@@ -752,6 +752,29 @@ impl Signatures {
             ));
         }
         self.instantiate_struct(def, Vec::new(), &[], at)
+    }
+
+    pub fn drop_name(&self, id: StructId) -> String {
+        let name = self
+            .struct_sig(id)
+            .map_or_else(String::new, |s| s.name.clone());
+        format!("{name}.$drop")
+    }
+
+    pub fn construct(&self, ty: Ty, members: Vec<TExpr>) -> TExpr {
+        match ty {
+            Ty::Class(id) => {
+                let tag = i64::try_from(id.index()).unwrap_or(i64::MAX);
+                let header = [
+                    TExpr::Int(tag),
+                    TExpr::Int(1),
+                    TExpr::FuncAddr(self.drop_name(id)),
+                ];
+                let args = header.into_iter().chain(members).collect();
+                TExpr::New { ty, args }
+            }
+            _ => TExpr::StructInit { ty, args: members },
+        }
     }
 
     pub fn superclass(&self, ty: Ty) -> Option<Ty> {

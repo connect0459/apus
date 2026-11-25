@@ -1,0 +1,474 @@
+use crate::sigs::Signatures;
+use crate::tir::{DROP_SLOT, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt};
+use crate::types::{StructId, Ty};
+
+const DESTROYING: i64 = 1 << 40;
+
+pub fn insert(func: &TFunc, sigs: &Signatures) -> (TFunc, Vec<StructId>) {
+    let mut pass = Pass {
+        sigs,
+        locals: func.locals().to_vec(),
+        scopes: Vec::new(),
+        temps: Vec::new(),
+        created: Vec::new(),
+    };
+    let body = pass.block(func.body());
+    let rewritten = TFunc::new(
+        func.name().to_string(),
+        func.param_types().len(),
+        func.ret(),
+        pass.locals,
+        body,
+    );
+    (rewritten, pass.created)
+}
+
+pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
+    let class = Ty::Class(id);
+    let this = LocalId::new(0);
+    let receiver = || TExpr::Local(this, class);
+    let mut body = vec![TStmt::AssignField {
+        local: this,
+        index: RC_SLOT,
+        value: TExpr::Int(DESTROYING),
+    }];
+    let mut chain = Some(class);
+    while let Some(ty) = chain {
+        if let Some(owner) = sigs.owner_name(ty) {
+            let deinit = format!("{owner}.deinit");
+            if sigs.func(&deinit).is_some() {
+                body.push(TStmt::Eval(TExpr::Call {
+                    callee: deinit,
+                    type_args: Vec::new(),
+                    args: vec![receiver()],
+                    ret: Ty::Void,
+                }));
+            }
+        }
+        chain = sigs.superclass(ty);
+    }
+    if let Some(layout) = sigs.struct_sig(id) {
+        for (index, field) in layout.members() {
+            if matches!(field.ty(), Ty::Class(_)) {
+                body.push(TStmt::Release(TExpr::Field {
+                    base: Box::new(receiver()),
+                    index,
+                    ty: field.ty(),
+                }));
+            }
+        }
+    }
+    body.push(TStmt::AssignField {
+        local: this,
+        index: RC_SLOT,
+        value: TExpr::Int(0),
+    });
+    body.push(TStmt::Free(receiver()));
+    TFunc::new(sigs.drop_name(id), 1, Ty::Void, vec![class], body)
+}
+
+struct Pass<'a> {
+    sigs: &'a Signatures,
+    locals: Vec<Ty>,
+    scopes: Vec<Vec<LocalId>>,
+    temps: Vec<LocalId>,
+    created: Vec<StructId>,
+}
+
+impl Pass<'_> {
+    fn needs_rc(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::Class(_) => true,
+            Ty::Struct(id) => self
+                .sigs
+                .struct_sig(id)
+                .is_some_and(|sig| sig.fields().iter().any(|f| matches!(f.ty(), Ty::Class(_)))),
+            _ => false,
+        }
+    }
+
+    fn new_local(&mut self, ty: Ty) -> LocalId {
+        let local = LocalId::new(self.locals.len());
+        self.locals.push(ty);
+        local
+    }
+
+    fn scoped<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, Vec<LocalId>) {
+        let saved = std::mem::take(&mut self.temps);
+        let result = f(self);
+        let temps = std::mem::replace(&mut self.temps, saved);
+        (result, temps)
+    }
+
+    fn release_local(&self, local: LocalId) -> [TStmt; 2] {
+        let ty = self.locals[local.index()];
+        [TStmt::Release(TExpr::Local(local, ty)), TStmt::Clear(local)]
+    }
+
+    fn release_all(&self, locals: impl Iterator<Item = LocalId>) -> Vec<TStmt> {
+        locals.flat_map(|l| self.release_local(l)).collect()
+    }
+
+    fn release_temps(&self, temps: &[LocalId]) -> Vec<TStmt> {
+        self.release_all(temps.iter().rev().copied())
+    }
+
+    fn live_locals(&self) -> Vec<LocalId> {
+        self.scopes.iter().flatten().copied().collect()
+    }
+
+    fn block(&mut self, stmts: &[TStmt]) -> Vec<TStmt> {
+        self.scopes.push(Vec::new());
+        let mut out = Vec::new();
+        for stmt in stmts {
+            self.stmt(stmt, &mut out);
+        }
+        let scope = self.scopes.pop().unwrap_or_default();
+        if !matches!(out.last(), Some(TStmt::Return(_))) {
+            out.extend(self.release_all(scope.into_iter().rev()));
+        }
+        out
+    }
+
+    fn stmt(&mut self, stmt: &TStmt, out: &mut Vec<TStmt>) {
+        match stmt {
+            TStmt::Let { local, init } => self.let_stmt(*local, init, out),
+            TStmt::Assign { local, value } => self.assign(*local, value, out),
+            TStmt::AssignField {
+                local,
+                index,
+                value,
+            } => self.assign_field(*local, *index, value, out),
+            TStmt::Return(value) => self.return_stmt(value.as_ref(), out),
+            TStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let (cond, temps) = self.scoped(|p| p.expr(cond));
+                let cond = self.hold(cond, Ty::Bool, &temps, out);
+                let then_body = self.block(then_body);
+                let else_body = self.block(else_body);
+                out.push(TStmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                });
+            }
+            TStmt::While { cond, body } => {
+                let (cond, temps) = self.scoped(|p| p.expr(cond));
+                let mut body = self.block(body);
+                if temps.is_empty() {
+                    out.push(TStmt::While { cond, body });
+                    return;
+                }
+                let flag = self.new_local(Ty::Bool);
+                out.push(TStmt::Let {
+                    local: flag,
+                    init: cond.clone(),
+                });
+                out.extend(self.release_temps(&temps));
+                body.push(TStmt::Assign {
+                    local: flag,
+                    value: cond,
+                });
+                body.extend(self.release_temps(&temps));
+                out.push(TStmt::While {
+                    cond: TExpr::Local(flag, Ty::Bool),
+                    body,
+                });
+            }
+            TStmt::ForRange {
+                local,
+                lo,
+                hi,
+                inclusive,
+                body,
+            } => {
+                let ((lo, hi), temps) = self.scoped(|p| (p.expr(lo), p.expr(hi)));
+                let (lo, hi) = if temps.is_empty() {
+                    (lo, hi)
+                } else {
+                    let low = self.new_local(Ty::Int);
+                    let high = self.new_local(Ty::Int);
+                    out.push(TStmt::Let {
+                        local: low,
+                        init: lo,
+                    });
+                    out.push(TStmt::Let {
+                        local: high,
+                        init: hi,
+                    });
+                    out.extend(self.release_temps(&temps));
+                    (TExpr::Local(low, Ty::Int), TExpr::Local(high, Ty::Int))
+                };
+                let body = self.block(body);
+                out.push(TStmt::ForRange {
+                    local: *local,
+                    lo,
+                    hi,
+                    inclusive: *inclusive,
+                    body,
+                });
+            }
+            TStmt::Print(expr) => {
+                let (expr, temps) = self.scoped(|p| p.expr(expr));
+                out.push(TStmt::Print(expr));
+                out.extend(self.release_temps(&temps));
+            }
+            TStmt::Eval(expr) => {
+                let (expr, temps) = self.scoped(|p| p.borrowed(expr));
+                out.push(TStmt::Eval(expr));
+                out.extend(self.release_temps(&temps));
+            }
+            TStmt::Release(expr) => {
+                let (expr, temps) = self.scoped(|p| p.expr(expr));
+                out.push(TStmt::Release(expr));
+                out.extend(self.release_temps(&temps));
+            }
+            TStmt::Clear(local) => out.push(TStmt::Clear(*local)),
+            TStmt::Free(expr) => {
+                let (value, temps) = self.scoped(|p| p.expr(expr));
+                out.push(TStmt::Free(value));
+                if let TExpr::Local(local, _) = expr {
+                    out.push(TStmt::Clear(*local));
+                }
+                out.extend(self.release_temps(&temps));
+            }
+        }
+    }
+
+    fn hold(&mut self, value: TExpr, ty: Ty, temps: &[LocalId], out: &mut Vec<TStmt>) -> TExpr {
+        if temps.is_empty() {
+            return value;
+        }
+        let local = self.new_local(ty);
+        out.push(TStmt::Let { local, init: value });
+        out.extend(self.release_temps(temps));
+        TExpr::Local(local, ty)
+    }
+
+    fn let_stmt(&mut self, local: LocalId, init: &TExpr, out: &mut Vec<TStmt>) {
+        let ty = self.locals[local.index()];
+        let counted = self.needs_rc(ty);
+        let (init, temps) = self.scoped(|p| {
+            if counted {
+                p.owned_value(init)
+            } else {
+                p.expr(init)
+            }
+        });
+        out.push(TStmt::Let { local, init });
+        out.extend(self.release_temps(&temps));
+        if counted && let Some(scope) = self.scopes.last_mut() {
+            scope.push(local);
+        }
+    }
+
+    fn assign(&mut self, local: LocalId, value: &TExpr, out: &mut Vec<TStmt>) {
+        let ty = self.locals[local.index()];
+        if !self.needs_rc(ty) {
+            let (value, temps) = self.scoped(|p| p.expr(value));
+            out.push(TStmt::Assign { local, value });
+            out.extend(self.release_temps(&temps));
+            return;
+        }
+        let (value, temps) = self.scoped(|p| p.owned_value(value));
+        let fresh = self.new_local(ty);
+        out.push(TStmt::Let {
+            local: fresh,
+            init: value,
+        });
+        out.extend(self.release_temps(&temps));
+        out.push(TStmt::Release(TExpr::Local(local, ty)));
+        out.push(TStmt::Assign {
+            local,
+            value: TExpr::Local(fresh, ty),
+        });
+    }
+
+    fn assign_field(&mut self, local: LocalId, index: usize, value: &TExpr, out: &mut Vec<TStmt>) {
+        let base = self.locals[local.index()];
+        let field_ty = match base {
+            Ty::Struct(id) | Ty::Class(id) => self
+                .sigs
+                .struct_sig(id)
+                .and_then(|sig| sig.fields().get(index).map(|f| f.ty())),
+            _ => None,
+        }
+        .unwrap_or(Ty::Int);
+        if !self.needs_rc(field_ty) {
+            let (value, temps) = self.scoped(|p| p.expr(value));
+            out.push(TStmt::AssignField {
+                local,
+                index,
+                value,
+            });
+            out.extend(self.release_temps(&temps));
+            return;
+        }
+        let (value, temps) = self.scoped(|p| p.owned_value(value));
+        let fresh = self.new_local(field_ty);
+        out.push(TStmt::Let {
+            local: fresh,
+            init: value,
+        });
+        out.extend(self.release_temps(&temps));
+        out.push(TStmt::Release(TExpr::Field {
+            base: Box::new(TExpr::Local(local, base)),
+            index,
+            ty: field_ty,
+        }));
+        out.push(TStmt::AssignField {
+            local,
+            index,
+            value: TExpr::Local(fresh, field_ty),
+        });
+    }
+
+    fn return_stmt(&mut self, value: Option<&TExpr>, out: &mut Vec<TStmt>) {
+        let live = self.live_locals();
+        let Some(value) = value else {
+            out.extend(self.release_all(live.into_iter().rev()));
+            out.push(TStmt::Return(None));
+            return;
+        };
+        let ty = value.ty();
+        let counted = self.needs_rc(ty);
+        let (result, temps) = self.scoped(|p| {
+            if counted {
+                p.owned_value(value)
+            } else {
+                p.expr(value)
+            }
+        });
+        if temps.is_empty() && live.is_empty() && !counted {
+            out.push(TStmt::Return(Some(result)));
+            return;
+        }
+        let held = self.new_local(ty);
+        out.push(TStmt::Let {
+            local: held,
+            init: result,
+        });
+        out.extend(self.release_temps(&temps));
+        out.extend(self.release_all(live.into_iter().rev()));
+        out.push(TStmt::Return(Some(TExpr::Local(held, ty))));
+    }
+
+    fn is_owned(expr: &TExpr) -> bool {
+        matches!(
+            expr,
+            TExpr::New { .. }
+                | TExpr::Call { .. }
+                | TExpr::Virtual { .. }
+                | TExpr::StructInit { .. }
+                | TExpr::Zero(_)
+                | TExpr::Retain(_)
+                | TExpr::Moved(_)
+        )
+    }
+
+    fn owned_value(&mut self, expr: &TExpr) -> TExpr {
+        let ty = expr.ty();
+        let value = self.expr(expr);
+        if self.needs_rc(ty) && !Self::is_owned(expr) {
+            TExpr::Retain(Box::new(value))
+        } else {
+            value
+        }
+    }
+
+    fn borrowed(&mut self, expr: &TExpr) -> TExpr {
+        let ty = expr.ty();
+        let value = self.expr(expr);
+        if self.needs_rc(ty) && Self::is_owned(expr) {
+            let local = self.new_local(ty);
+            self.temps.push(local);
+            TExpr::Bind {
+                local,
+                init: Box::new(value),
+            }
+        } else {
+            value
+        }
+    }
+
+    fn borrowed_all(&mut self, exprs: &[TExpr]) -> Vec<TExpr> {
+        exprs.iter().map(|e| self.borrowed(e)).collect()
+    }
+
+    fn owned_all(&mut self, exprs: &[TExpr]) -> Vec<TExpr> {
+        exprs.iter().map(|e| self.owned_value(e)).collect()
+    }
+
+    fn expr(&mut self, expr: &TExpr) -> TExpr {
+        match expr {
+            TExpr::Call {
+                callee,
+                type_args,
+                args,
+                ret,
+            } => TExpr::Call {
+                callee: callee.clone(),
+                type_args: type_args.clone(),
+                args: self.borrowed_all(args),
+                ret: *ret,
+            },
+            TExpr::Virtual {
+                cases,
+                default,
+                args,
+                ret,
+            } => TExpr::Virtual {
+                cases: cases.clone(),
+                default: default.clone(),
+                args: self.borrowed_all(args),
+                ret: *ret,
+            },
+            TExpr::StructInit { ty, args } => TExpr::StructInit {
+                ty: *ty,
+                args: self.owned_all(args),
+            },
+            TExpr::New { ty, args } => {
+                let mut args = self.owned_all(args);
+                if let Ty::Class(id) = ty {
+                    if !self.created.contains(id) {
+                        self.created.push(*id);
+                    }
+                    let tag = i64::try_from(id.index()).unwrap_or(i64::MAX);
+                    args[TAG_SLOT] = TExpr::Int(tag);
+                    args[DROP_SLOT] = TExpr::FuncAddr(self.sigs.drop_name(*id));
+                }
+                TExpr::New { ty: *ty, args }
+            }
+            TExpr::Field { base, index, ty } => TExpr::Field {
+                base: Box::new(self.borrowed(base)),
+                index: *index,
+                ty: *ty,
+            },
+            TExpr::Unary { op, expr } => TExpr::Unary {
+                op: *op,
+                expr: Box::new(self.borrowed(expr)),
+            },
+            TExpr::Binary { op, lhs, rhs } => TExpr::Binary {
+                op: *op,
+                lhs: Box::new(self.borrowed(lhs)),
+                rhs: Box::new(self.borrowed(rhs)),
+            },
+            TExpr::Moved(inner) => TExpr::Moved(Box::new(self.expr(inner))),
+            TExpr::Retain(inner) => TExpr::Retain(Box::new(self.expr(inner))),
+            TExpr::Bind { local, init } => TExpr::Bind {
+                local: *local,
+                init: Box::new(self.expr(init)),
+            },
+            TExpr::Int(_)
+            | TExpr::Bool(_)
+            | TExpr::Str(_)
+            | TExpr::Local(..)
+            | TExpr::EnumCase { .. }
+            | TExpr::Zero(_)
+            | TExpr::FuncAddr(_) => expr.clone(),
+        }
+    }
+}

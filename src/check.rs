@@ -162,18 +162,7 @@ fn zero_struct(cx: &FnCx, func: &FuncDecl, id: StructId, ty: Ty) -> CResult<TExp
         .struct_sig(id)
         .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
     let zeros: Vec<TExpr> = sig.members().map(|(_, f)| TExpr::Zero(f.ty())).collect();
-    Ok(construct(ty, zeros))
-}
-
-fn construct(ty: Ty, members: Vec<TExpr>) -> TExpr {
-    match ty {
-        Ty::Class(id) => {
-            let tag = i64::try_from(id.index()).unwrap_or(i64::MAX);
-            let args = std::iter::once(TExpr::Int(tag)).chain(members).collect();
-            TExpr::New { ty, args }
-        }
-        _ => TExpr::StructInit { ty, args: members },
-    }
+    Ok(cx.sigs.construct(ty, zeros))
 }
 
 fn always_returns(stmts: &[Stmt]) -> bool {
@@ -1098,13 +1087,14 @@ impl FnCx<'_> {
             out.push(TStmt::AssignField {
                 local: target,
                 index,
-                value: TExpr::Field {
+                value: TExpr::Moved(Box::new(TExpr::Field {
                     base: Box::new(TExpr::Local(temporary, parent)),
                     index,
                     ty: field.ty(),
-                },
+                })),
             });
         }
+        out.push(TStmt::Free(TExpr::Local(temporary, parent)));
         Ok(())
     }
 
@@ -1644,7 +1634,7 @@ impl FnCx<'_> {
         } else {
             pattern_id
         };
-        Ok(construct(sigs.struct_ty(def, id), values))
+        Ok(sigs.construct(sigs.struct_ty(def, id), values))
     }
 }
 

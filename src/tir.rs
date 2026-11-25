@@ -1,6 +1,11 @@
 use crate::ast::{BinOp, UnaryOp};
 use crate::types::Ty;
 
+pub const TAG_SLOT: usize = 0;
+pub const RC_SLOT: usize = 1;
+pub const DROP_SLOT: usize = 2;
+pub const HEADER_SLOTS: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalId(usize);
 
@@ -115,6 +120,9 @@ pub enum TStmt {
     },
     Print(TExpr),
     Eval(TExpr),
+    Release(TExpr),
+    Clear(LocalId),
+    Free(TExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,6 +170,13 @@ pub enum TExpr {
         index: usize,
     },
     Zero(Ty),
+    Retain(Box<TExpr>),
+    Moved(Box<TExpr>),
+    Bind {
+        local: LocalId,
+        init: Box<TExpr>,
+    },
+    FuncAddr(String),
 }
 
 impl TExpr {
@@ -177,6 +192,9 @@ impl TExpr {
                 _ => Ty::Bool,
             },
             TExpr::Call { ret, .. } | TExpr::Virtual { ret, .. } => *ret,
+            TExpr::Retain(inner) | TExpr::Moved(inner) => inner.ty(),
+            TExpr::Bind { init, .. } => init.ty(),
+            TExpr::FuncAddr(_) => Ty::Int,
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
             | TExpr::Field { ty, .. }
@@ -269,6 +287,9 @@ impl<E> Rewriter<'_, E> {
             },
             TStmt::Print(expr) => TStmt::Print(self.expr(expr)?),
             TStmt::Eval(expr) => TStmt::Eval(self.expr(expr)?),
+            TStmt::Release(expr) => TStmt::Release(self.expr(expr)?),
+            TStmt::Clear(local) => TStmt::Clear(*local),
+            TStmt::Free(expr) => TStmt::Free(self.expr(expr)?),
         })
     }
 
@@ -342,6 +363,13 @@ impl<E> Rewriter<'_, E> {
                 index: *index,
             },
             TExpr::Zero(ty) => TExpr::Zero((self.ty)(*ty)?),
+            TExpr::Retain(inner) => TExpr::Retain(Box::new(self.expr(inner)?)),
+            TExpr::Moved(inner) => TExpr::Moved(Box::new(self.expr(inner)?)),
+            TExpr::Bind { local, init } => TExpr::Bind {
+                local: *local,
+                init: Box::new(self.expr(init)?),
+            },
+            TExpr::FuncAddr(_) => expr.clone(),
         })
     }
 }

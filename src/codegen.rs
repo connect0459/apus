@@ -22,7 +22,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
-use crate::tir::{TExpr, TFunc, TStmt, TStruct};
+use crate::tir::{DROP_SLOT, RC_SLOT, TExpr, TFunc, TStmt, TStruct};
 use crate::types::Ty;
 
 const VARIADIC_PADDING: usize = 7;
@@ -169,7 +169,7 @@ impl Backend {
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
-        for name in ["printf", "puts", "malloc"] {
+        for name in ["printf", "puts", "malloc", "free"] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
         }
@@ -322,8 +322,15 @@ fn emit_function(
     } else {
         None
     };
+    let param_count = params.len();
     for (var, value) in vars.iter().zip(params) {
         builder.def_var(*var, value);
+    }
+    for (var, ty) in vars.iter().zip(func.locals()).skip(param_count) {
+        if matches!(ty, Ty::Class(_) | Ty::Struct(_)) {
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.def_var(*var, zero);
+        }
     }
     let mut emitter = Emitter {
         call_conv: isa.default_call_conv(),
@@ -564,7 +571,134 @@ impl Emitter<'_, '_> {
                 self.expr(expr)?;
                 Ok(false)
             }
+            TStmt::Release(expr) => {
+                let value = self.value(expr)?;
+                self.release(value, expr.ty())?;
+                Ok(false)
+            }
+            TStmt::Clear(local) => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                self.builder.def_var(self.vars[local.index()], zero);
+                Ok(false)
+            }
+            TStmt::Free(expr) => {
+                let value = self.value(expr)?;
+                let mut sig = Signature::new(self.call_conv);
+                sig.params.push(AbiParam::new(types::I64));
+                let free = self.import_func("free", sig, false);
+                self.builder.ins().call(free, &[value]);
+                Ok(false)
+            }
         }
+    }
+
+    fn class_slots(&self, ty: Ty) -> GResult<Vec<usize>> {
+        Ok(self
+            .struct_fields(ty)?
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| matches!(f, Ty::Class(_)))
+            .map(|(index, _)| index)
+            .collect())
+    }
+
+    fn guarded(
+        &mut self,
+        pointer: Value,
+        body: impl FnOnce(&mut Self) -> GResult<()>,
+    ) -> GResult<()> {
+        let live = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.ins().brif(pointer, live, &[], done, &[]);
+        self.builder.switch_to_block(live);
+        body(self)?;
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
+        Ok(())
+    }
+
+    fn retain(&mut self, value: Value, ty: Ty) -> GResult<()> {
+        match ty {
+            Ty::Class(_) => self.retain_reference(value),
+            Ty::Struct(_) => {
+                for field in self.load_class_slots(value, ty)? {
+                    self.retain_reference(field)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn release(&mut self, value: Value, ty: Ty) -> GResult<()> {
+        match ty {
+            Ty::Class(_) => self.release_reference(value),
+            Ty::Struct(_) => {
+                if self.class_slots(ty)?.is_empty() {
+                    return Ok(());
+                }
+                self.guarded(value, |this| {
+                    for field in this.load_class_slots(value, ty)? {
+                        this.release_reference(field)?;
+                    }
+                    Ok(())
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn load_class_slots(&mut self, value: Value, ty: Ty) -> GResult<Vec<Value>> {
+        let flags = MemFlagsData::trusted();
+        Ok(self
+            .class_slots(ty)?
+            .into_iter()
+            .map(|slot| {
+                self.builder
+                    .ins()
+                    .load(types::I64, flags, value, field_offset(slot))
+            })
+            .collect())
+    }
+
+    fn retain_reference(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let offset = field_offset(RC_SLOT);
+            let count = this.builder.ins().load(types::I64, flags, value, offset);
+            let next = this.builder.ins().iadd_imm_s(count, 1);
+            this.builder.ins().store(flags, next, value, offset);
+            Ok(())
+        })
+    }
+
+    fn release_reference(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let offset = field_offset(RC_SLOT);
+            let count = this.builder.ins().load(types::I64, flags, value, offset);
+            let last = this.builder.ins().icmp_imm_s(IntCC::Equal, count, 1);
+            let destroy = this.builder.create_block();
+            let decrement = this.builder.create_block();
+            let merge = this.builder.create_block();
+            this.builder.ins().brif(last, destroy, &[], decrement, &[]);
+            this.builder.switch_to_block(destroy);
+            let drop_fn =
+                this.builder
+                    .ins()
+                    .load(types::I64, flags, value, field_offset(DROP_SLOT));
+            let mut sig = Signature::new(this.call_conv);
+            sig.params.push(AbiParam::new(types::I64));
+            let sig = this.builder.import_signature(sig);
+            this.builder.ins().call_indirect(sig, drop_fn, &[value]);
+            this.builder.ins().jump(merge, &[]);
+            this.builder.switch_to_block(decrement);
+            let next = this.builder.ins().iadd_imm_s(count, -1);
+            this.builder.ins().store(flags, next, value, offset);
+            this.builder.ins().jump(merge, &[]);
+            this.builder.switch_to_block(merge);
+            Ok(())
+        })
     }
 
     fn return_stmt(&mut self, value: Option<&TExpr>) -> GResult<()> {
@@ -765,6 +899,22 @@ impl Emitter<'_, '_> {
                 args,
                 ret,
             } => return self.virtual_call(cases, default, args, *ret),
+            TExpr::Retain(inner) => {
+                let value = self.value(inner)?;
+                self.retain(value, inner.ty())?;
+                value
+            }
+            TExpr::Moved(inner) => return self.expr(inner),
+            TExpr::Bind { local, init } => {
+                let value = self.value(init)?;
+                self.builder.def_var(self.vars[local.index()], value);
+                value
+            }
+            TExpr::FuncAddr(name) => {
+                let sig = signature(self.call_conv, &[Ty::Int], Ty::Void);
+                let func_ref = self.import_func(&symbol(name), sig, true);
+                self.builder.ins().func_addr(types::I64, func_ref)
+            }
             TExpr::StructInit { ty, args } => {
                 let values = args
                     .iter()

@@ -17,8 +17,10 @@ use crate::link::{LinkError, link};
 use crate::memo::ItemMemo;
 use crate::mono::Instantiator;
 use crate::parser::{ParseError, parse_item, parse_signature};
+use crate::rc;
 use crate::stamp::BuildStamp;
 use crate::tir::TFunc;
+use crate::types::StructId;
 
 pub use crate::link::Linker;
 
@@ -207,34 +209,60 @@ pub fn build_with(
             Ok(typed)
         };
         let mut instantiator = Instantiator::new(&sigs, &mut provider);
-        let mut resolved: Vec<(usize, TFunc, Vec<usize>)> = Vec::new();
+        let mut resolved: Vec<(usize, TFunc, Vec<usize>, Vec<StructId>)> = Vec::new();
         for slot in &dirty {
             let Decl::Func(func) = &decls[slots[*slot].item_index] else {
                 continue;
             };
             let typed = check_func(func, &sigs)?;
             let (typed, direct) = instantiator.resolve(&typed).map_err(BuildError::new)?;
-            resolved.push((*slot, typed, direct));
+            let (typed, created) = rc::insert(&typed, &sigs);
+            resolved.push((*slot, typed, direct, created));
         }
         layouts = sigs.layouts();
-        let instance_keys: Vec<u64> = instantiator
+        let counted_instances: Vec<(TFunc, Vec<StructId>)> = instantiator
             .instances()
             .iter()
-            .map(|f| function_key(f, &layouts, compiler_stamp))
+            .map(|f| rc::insert(f, &sigs))
             .collect();
-        for (slot, typed, direct) in resolved {
+        let instance_keys: Vec<u64> = counted_instances
+            .iter()
+            .map(|(f, _)| function_key(f, &layouts, compiler_stamp))
+            .collect();
+        let mut drops: HashMap<StructId, Unit> = HashMap::new();
+        for (slot, typed, direct, created) in resolved {
             let key = function_key(&typed, &layouts, compiler_stamp);
             let mut instances: Vec<usize> = instantiator.closure(&direct);
             instances.sort_unstable();
-            slots[slot].unit = Some((
-                Unit { key, func: typed },
-                instances.iter().map(|id| instance_keys[*id]).collect(),
-            ));
+            let mut keys: Vec<u64> = instances.iter().map(|id| instance_keys[*id]).collect();
+            let mut classes = created;
+            for id in &instances {
+                classes.extend(counted_instances[*id].1.iter().copied());
+            }
+            for class in classes {
+                let unit = drops.entry(class).or_insert_with(|| {
+                    let func = rc::drop_function(&sigs, class);
+                    Unit {
+                        key: function_key(&func, &layouts, compiler_stamp),
+                        func,
+                    }
+                });
+                if !keys.contains(&unit.key) {
+                    keys.push(unit.key);
+                }
+                if !instance_units.iter().any(|u| u.key == unit.key) {
+                    instance_units.push(Unit {
+                        key: unit.key,
+                        func: unit.func.clone(),
+                    });
+                }
+            }
+            slots[slot].unit = Some((Unit { key, func: typed }, keys));
             for id in instances {
                 if !instance_units.iter().any(|u| u.key == instance_keys[id]) {
                     instance_units.push(Unit {
                         key: instance_keys[id],
-                        func: instantiator.instances()[id].clone(),
+                        func: counted_instances[id].0.clone(),
                     });
                 }
             }

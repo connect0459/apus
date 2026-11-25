@@ -142,6 +142,18 @@ impl Encoder<'_> {
                 self.tag(18);
                 self.expr(expr);
             }
+            TStmt::Release(expr) => {
+                self.tag(19);
+                self.expr(expr);
+            }
+            TStmt::Clear(local) => {
+                self.tag(20);
+                self.local(*local);
+            }
+            TStmt::Free(expr) => {
+                self.tag(21);
+                self.expr(expr);
+            }
         }
     }
 
@@ -255,6 +267,23 @@ impl Encoder<'_> {
             TExpr::Zero(ty) => {
                 self.tag(41);
                 self.ty(*ty);
+            }
+            TExpr::Retain(inner) => {
+                self.tag(43);
+                self.expr(inner);
+            }
+            TExpr::Moved(inner) => {
+                self.tag(44);
+                self.expr(inner);
+            }
+            TExpr::Bind { local, init } => {
+                self.tag(45);
+                self.local(*local);
+                self.expr(init);
+            }
+            TExpr::FuncAddr(name) => {
+                self.tag(46);
+                self.str(name);
             }
         }
     }

@@ -1642,3 +1642,279 @@ fn a_subclass_deinitializer_is_not_an_override() {
 fn deinit_outside_a_type_is_rejected_at_the_top_level() {
     assert!(build_error("deinit { }\nfunc main() { }").contains("top level"));
 }
+
+const TRACKED: &str = "class Tracked {\n  var id: Int\n  deinit { print(0 - self.id) }\n}\n";
+
+fn tracked(body: &str) -> String {
+    format!("{TRACKED}{body}")
+}
+
+#[test]
+fn an_instance_is_deinitialized_when_its_last_variable_goes_out_of_scope() {
+    let source = tracked("func main() {\n  let a = Tracked(id: 1)\n  print(10)\n}");
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn variables_are_released_in_reverse_order_of_declaration() {
+    let source = tracked(
+        "func main() {\n  let a = Tracked(id: 1)\n  let b = Tracked(id: 2)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-2\n-1\n");
+}
+
+#[test]
+fn a_copied_reference_keeps_the_instance_alive_until_the_last_copy_goes() {
+    let source = tracked(
+        "func main() {\n  let a = Tracked(id: 1)\n  if true {\n    let b = a\n    print(10)\n  }\n  print(20)\n}",
+    );
+    assert_eq!(run(&source), "10\n20\n-1\n");
+}
+
+#[test]
+fn assigning_a_variable_releases_the_instance_it_held() {
+    let source = tracked(
+        "func main() {\n  var a = Tracked(id: 1)\n  print(10)\n  a = Tracked(id: 2)\n  print(20)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n20\n-2\n");
+}
+
+#[test]
+fn a_block_releases_its_variables_on_every_iteration() {
+    let source = tracked(
+        "func main() {\n  var i = 0\n  while i < 3 {\n    let t = Tracked(id: i + 1)\n    print(i)\n    i += 1\n  }\n}",
+    );
+    assert_eq!(run(&source), "0\n-1\n1\n-2\n2\n-3\n");
+}
+
+#[test]
+fn a_parameter_does_not_own_its_argument() {
+    let source = tracked(
+        "func show(_ t: Tracked) { print(t.id) }\nfunc main() {\n  let a = Tracked(id: 1)\n  show(a)\n  show(a)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n1\n10\n-1\n");
+}
+
+#[test]
+fn a_function_result_transfers_ownership_to_the_caller() {
+    let source = tracked(
+        "func make(_ id: Int) -> Tracked { return Tracked(id: id) }\nfunc main() {\n  let a = make(1)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_returned_local_survives_the_end_of_its_function() {
+    let source = tracked(
+        "func make() -> Tracked {\n  let t = Tracked(id: 1)\n  print(5)\n  return t\n}\nfunc main() {\n  let a = make()\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "5\n10\n-1\n");
+}
+
+#[test]
+fn a_temporary_is_released_at_the_end_of_its_statement() {
+    let source = tracked(
+        "func make() -> Tracked { return Tracked(id: 1) }\nfunc main() {\n  print(make().id)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n10\n");
+}
+
+#[test]
+fn a_discarded_result_is_released_immediately() {
+    let source = tracked(
+        "func make() -> Tracked { return Tracked(id: 1) }\nfunc main() {\n  make()\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n");
+}
+
+#[test]
+fn an_early_return_releases_the_variables_declared_so_far() {
+    let source = tracked(
+        "func f(_ early: Bool) -> Int {\n  let a = Tracked(id: 1)\n  if early { return 5 }\n  let b = Tracked(id: 2)\n  return 6\n}\nfunc main() {\n  print(f(true))\n  print(f(false))\n}",
+    );
+    assert_eq!(run(&source), "-1\n5\n-2\n-1\n6\n");
+}
+
+#[test]
+fn an_instance_releases_the_instances_its_members_refer_to() {
+    let source = tracked(
+        "class Holder {\n  var item: Tracked\n  deinit { print(100) }\n}\nfunc main() {\n  let h = Holder(item: Tracked(id: 1))\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n100\n-1\n");
+}
+
+#[test]
+fn assigning_a_member_releases_the_instance_it_held() {
+    let source = tracked(
+        "class Holder {\n  var item: Tracked\n}\nfunc main() {\n  let h = Holder(item: Tracked(id: 1))\n  h.item = Tracked(id: 2)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}
+
+#[test]
+fn a_subclass_runs_its_deinitializer_before_its_superclass() {
+    let source = "class A {\n  var x: Int\n  deinit { print(1) }\n}\nclass B: A {\n  deinit { print(2) }\n}\n\
+         func main() {\n  let a: A = B(x: 0)\n  print(10)\n}";
+    assert_eq!(run(source), "10\n2\n1\n");
+}
+
+#[test]
+fn a_subclass_initializer_does_not_deinitialize_a_phantom_superclass_instance() {
+    let source = "class A {\n  var x: Int\n  init(x: Int) { self.x = x }\n  deinit { print(1) }\n}\nclass B: A {\n  var y: Int\n  init(y: Int) {\n    self.y = y\n    super.init(x: 5)\n  }\n  deinit { print(2) }\n}\n\
+         func main() {\n  let b = B(y: 1)\n  print(10)\n}";
+    assert_eq!(run(source), "10\n2\n1\n");
+}
+
+#[test]
+fn a_struct_that_holds_an_instance_retains_it_when_copied() {
+    let source = tracked(
+        "struct Pair {\n  var first: Tracked\n  var n: Int\n}\nfunc main() {\n  let p = Pair(first: Tracked(id: 1), n: 0)\n  if true {\n    let q = p\n    print(10)\n  }\n  print(20)\n}",
+    );
+    assert_eq!(run(&source), "10\n20\n-1\n");
+}
+
+#[test]
+fn a_struct_returned_from_a_function_keeps_its_instance_alive() {
+    let source = tracked(
+        "struct Pair {\n  var first: Tracked\n  var n: Int\n}\nfunc make() -> Pair { return Pair(first: Tracked(id: 1), n: 0) }\nfunc main() {\n  let p = make()\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_mutating_method_releases_the_member_it_replaces() {
+    let source = tracked(
+        "struct Slot {\n  var item: Tracked\n  mutating func put(_ t: Tracked) { self.item = t }\n}\nfunc main() {\n  var s = Slot(item: Tracked(id: 1))\n  s.put(Tracked(id: 2))\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}
+
+#[test]
+fn a_generic_container_holds_an_instance_until_it_is_released() {
+    let source = tracked(
+        "class Box<T> {\n  var value: T\n}\nfunc main() {\n  let b = Box(value: Tracked(id: 1))\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_method_called_on_a_temporary_instance_keeps_it_alive_for_the_call() {
+    let source = tracked(
+        "class Counter {\n  var n: Int\n  func read() -> Int { return self.n }\n  deinit { print(99) }\n}\nfunc main() {\n  print(Counter(n: 4).read())\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "4\n99\n10\n");
+}
+
+#[test]
+fn a_condition_that_creates_an_instance_releases_it_before_the_branch() {
+    let source = tracked(
+        "func make() -> Tracked { return Tracked(id: 1) }\nfunc main() {\n  if make().id == 1 {\n    print(10)\n  }\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n");
+}
+
+#[test]
+fn a_loop_condition_releases_its_temporaries_on_every_test() {
+    let source = tracked(
+        "func make(_ n: Int) -> Tracked { return Tracked(id: n) }\nfunc main() {\n  var i = 1\n  while make(i).id < 3 {\n    i += 1\n  }\n}",
+    );
+    assert_eq!(run(&source), "-1\n-2\n-3\n");
+}
+
+#[test]
+fn many_instances_can_be_created_and_released() {
+    let source = "class Node {\n  var v: Int\n}\nfunc main() {\n  var i = 0\n  var total = 0\n  while i < 100000 {\n    let n = Node(v: i)\n    total += n.v - i + 1\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "100000\n");
+}
+
+#[test]
+fn assigning_a_variable_to_itself_keeps_its_instance() {
+    let source = tracked("func main() {\n  var a = Tracked(id: 1)\n  a = a\n  print(a.id)\n}");
+    assert_eq!(run(&source), "1\n-1\n");
+}
+
+#[test]
+fn a_method_can_return_the_instance_held_by_a_member() {
+    let source = tracked(
+        "class Holder {\n  var item: Tracked\n  func get() -> Tracked { return self.item }\n}\nfunc main() {\n  let h = Holder(item: Tracked(id: 1))\n  let t = h.get()\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_member_can_be_assigned_from_another_member() {
+    let source = tracked(
+        "class Pair {\n  var a: Tracked\n  var b: Tracked\n}\nfunc main() {\n  let p = Pair(a: Tracked(id: 1), b: Tracked(id: 2))\n  p.a = p.b\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}
+
+#[test]
+fn a_recursive_function_passes_instances_through_its_frames() {
+    let source = tracked(
+        "func build(_ n: Int) -> Tracked {\n  if n == 0 { return Tracked(id: 100) }\n  let inner = build(n - 1)\n  return inner\n}\nfunc main() {\n  let t = build(3)\n  print(t.id)\n}",
+    );
+    assert_eq!(run(&source), "100\n-100\n");
+}
+
+#[test]
+fn an_instance_passed_to_an_initializer_is_owned_by_the_new_instance() {
+    let source = tracked(
+        "class Holder {\n  var item: Tracked\n  init(item: Tracked) { self.item = item }\n}\nfunc main() {\n  let t = Tracked(id: 1)\n  let h = Holder(item: t)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n");
+}
+
+#[test]
+fn a_virtual_call_keeps_a_temporary_argument_alive() {
+    let source = tracked(
+        "class Base {\n  func use(_ t: Tracked) -> Int { return t.id }\n}\nclass Derived: Base {\n  override func use(_ t: Tracked) -> Int { return t.id + 1 }\n}\nfunc main() {\n  let b: Base = Derived()\n  print(b.use(Tracked(id: 5)))\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "6\n-5\n10\n");
+}
+
+#[test]
+fn an_instance_created_in_a_for_loop_is_released_on_every_iteration() {
+    let source = tracked(
+        "func main() {\n  for i in 1...3 {\n    let t = Tracked(id: i)\n    print(i * 10)\n  }\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n20\n-2\n30\n-3\n");
+}
+
+#[test]
+fn a_for_loop_bound_that_creates_an_instance_releases_it() {
+    let source = tracked(
+        "func make() -> Tracked { return Tracked(id: 3) }\nfunc main() {\n  for i in 1...make().id {\n    print(i)\n  }\n}",
+    );
+    assert_eq!(run(&source), "-3\n1\n2\n3\n");
+}
+
+#[test]
+fn a_printed_expression_that_creates_an_instance_releases_it() {
+    let source = tracked("func main() {\n  print(Tracked(id: 7).id)\n}");
+    assert_eq!(run(&source), "7\n-7\n");
+}
+
+#[test]
+fn a_short_circuit_that_skips_a_temporary_releases_nothing_twice() {
+    let source = tracked(
+        "func make() -> Tracked { return Tracked(id: 1) }\nfunc main() {\n  var i = 0\n  while i < 3 {\n    if i == 0 && make().id == 1 { print(10) }\n    if i == 5 && make().id == 1 { print(20) }\n    i += 1\n  }\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n");
+}
+
+#[test]
+fn a_temporary_struct_holding_an_instance_is_released_after_the_call() {
+    let source = tracked(
+        "struct Pair {\n  var first: Tracked\n  var n: Int\n}\nfunc make() -> Pair { return Pair(first: Tracked(id: 1), n: 5) }\nfunc size(_ p: Pair) -> Int { return p.n }\nfunc main() {\n  print(size(make()))\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "5\n-1\n10\n");
+}
+
+#[test]
+fn assigning_a_struct_variable_releases_the_instance_it_held() {
+    let source = tracked(
+        "struct Pair {\n  var first: Tracked\n  var n: Int\n}\nfunc main() {\n  var p = Pair(first: Tracked(id: 1), n: 0)\n  p = Pair(first: Tracked(id: 2), n: 0)\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}

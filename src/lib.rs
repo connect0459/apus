@@ -13,6 +13,7 @@ pub mod link;
 pub mod memo;
 pub mod mono;
 pub mod parser;
+pub mod rc;
 pub mod sigs;
 pub mod stamp;
 pub mod tir;
