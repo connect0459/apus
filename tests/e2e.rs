@@ -3006,3 +3006,99 @@ fn structs_of_different_types_cannot_be_compared() {
     );
     assert!(build_error(&source).contains("expected"));
 }
+
+#[test]
+fn an_int_switch_runs_the_case_that_lists_the_value() {
+    let source = "func name(_ n: Int) -> Int {\n  switch n {\n  case 1, 2:\n    return 10\n  case 3:\n    return 30\n  default:\n    return 0\n  }\n}\nfunc main() {\n  print(name(1))\n  print(name(2))\n  print(name(3))\n  print(name(4))\n}";
+    assert_eq!(run(source), "10\n10\n30\n0\n");
+}
+
+#[test]
+fn an_int_switch_accepts_negative_literals() {
+    let source = "func main() {\n  let n = 0 - 5\n  switch n {\n  case -5:\n    print(1)\n  default:\n    print(2)\n  }\n}";
+    assert_eq!(run(source), "1\n");
+}
+
+#[test]
+fn an_int_switch_accepts_closed_and_half_open_ranges() {
+    let source = "func kind(_ n: Int) -> Int {\n  switch n {\n  case 0..<3:\n    return 1\n  case 3...5:\n    return 2\n  case -9...-1:\n    return 3\n  default:\n    return 4\n  }\n}\nfunc main() {\n  print(kind(0))\n  print(kind(2))\n  print(kind(3))\n  print(kind(5))\n  print(kind(6))\n  print(kind(-1))\n  print(kind(-10))\n}";
+    assert_eq!(run(source), "1\n1\n2\n2\n4\n3\n4\n");
+}
+
+#[test]
+fn the_first_matching_case_of_a_switch_wins() {
+    let source = "func main() {\n  switch 2 {\n  case 1...3:\n    print(1)\n  case 2:\n    print(2)\n  default:\n    print(3)\n  }\n}";
+    assert_eq!(run(source), "1\n");
+}
+
+#[test]
+fn a_string_switch_compares_by_content() {
+    let source = "func code(_ s: String) -> Int {\n  switch s {\n  case \"a\", \"b\":\n    return 1\n  case \"abc\":\n    return 2\n  default:\n    return 0\n  }\n}\nfunc main() {\n  print(code(\"b\"))\n  print(code(\"abc\"))\n  print(code(\"ab\"))\n}";
+    assert_eq!(run(source), "1\n2\n0\n");
+}
+
+#[test]
+fn a_bool_switch_is_exhaustive_with_true_and_false() {
+    let source = "func word(_ b: Bool) -> Int {\n  switch b {\n  case true:\n    return 1\n  case false:\n    return 2\n  }\n}\nfunc main() {\n  print(word(true))\n  print(word(false))\n}";
+    assert_eq!(run(source), "1\n2\n");
+}
+
+#[test]
+fn a_switch_evaluates_its_subject_once() {
+    let source = "func next() -> Int {\n  print(7)\n  return 2\n}\nfunc main() {\n  switch next() {\n  case 1:\n    print(1)\n  case 2:\n    print(2)\n  default:\n    print(3)\n  }\n}";
+    assert_eq!(run(source), "7\n2\n");
+}
+
+#[test]
+fn break_leaves_a_value_switch() {
+    let source = "func main() {\n  switch 1 {\n  case 1:\n    print(1)\n    break\n  default:\n    print(2)\n  }\n  print(3)\n}";
+    assert_eq!(run(source), "1\n3\n");
+}
+
+#[test]
+fn an_int_switch_needs_a_default() {
+    let source = "func main() {\n  switch 1 {\n  case 1:\n    print(1)\n  }\n}";
+    assert!(build_error(source).contains("default"));
+}
+
+#[test]
+fn a_string_switch_needs_a_default() {
+    let source = "func main() {\n  switch \"a\" {\n  case \"a\":\n    print(1)\n  }\n}";
+    assert!(build_error(source).contains("default"));
+}
+
+#[test]
+fn a_bool_switch_must_cover_both_values_without_a_default() {
+    let source = "func main() {\n  switch true {\n  case true:\n    print(1)\n  }\n}";
+    assert!(build_error(source).contains("exhaustive"));
+}
+
+#[test]
+fn a_case_value_must_have_the_type_of_the_subject() {
+    let source = "func main() {\n  switch 1 {\n  case \"a\":\n    print(1)\n  default:\n    print(2)\n  }\n}";
+    assert!(build_error(source).contains("expected"));
+}
+
+#[test]
+fn a_case_value_must_be_a_literal() {
+    let source = "func main() {\n  let k = 1\n  switch 1 {\n  case k:\n    print(1)\n  default:\n    print(2)\n  }\n}";
+    assert!(build_error(source).contains("literal"));
+}
+
+#[test]
+fn ranges_are_allowed_only_in_int_switches() {
+    let source = "func main() {\n  switch \"a\" {\n  case 1...2:\n    print(1)\n  default:\n    print(2)\n  }\n}";
+    assert!(!build_error(source).is_empty());
+}
+
+#[test]
+fn an_enum_switch_rejects_value_cases() {
+    let source = "enum E { case a }\nfunc main() {\n  let e = E.a\n  switch e {\n  case 1:\n    print(1)\n  default:\n    print(2)\n  }\n}";
+    assert!(!build_error(source).is_empty());
+}
+
+#[test]
+fn a_value_switch_rejects_enum_patterns() {
+    let source = "enum E { case a }\nfunc main() {\n  switch 1 {\n  case .a:\n    print(1)\n  default:\n    print(2)\n  }\n}";
+    assert!(!build_error(source).is_empty());
+}

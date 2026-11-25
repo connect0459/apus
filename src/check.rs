@@ -190,6 +190,24 @@ fn always_returns(stmts: &[Stmt]) -> bool {
     }
 }
 
+fn chain_branches(
+    mut branches: Vec<(TExpr, Vec<TStmt>)>,
+    default_body: Option<Vec<TStmt>>,
+) -> Vec<TStmt> {
+    let mut tail = default_body;
+    while let Some((condition, body)) = branches.pop() {
+        tail = Some(match tail {
+            None => body,
+            Some(else_body) => vec![TStmt::If {
+                cond: condition,
+                then_body: body,
+                else_body,
+            }],
+        });
+    }
+    tail.unwrap_or_default()
+}
+
 fn always_exits(stmts: &[Stmt]) -> bool {
     exits(stmts, false, &[])
 }
@@ -1023,12 +1041,15 @@ impl FnCx<'_> {
     ) -> CResult<()> {
         let subject_value = self.value(subject)?;
         let subject_ty = subject_value.ty();
+        if matches!(subject_ty, Ty::Int | Ty::Bool | Ty::Str) {
+            return self.value_switch(line, subject_value, cases, out);
+        }
         let sigs = self.sigs;
         let Some(sig) = sigs.enum_of(subject_ty) else {
             return Err(CheckError::at(
                 line,
                 format!(
-                    "switch is supported only on enums, not {}",
+                    "switch is supported only on enums, Int, Bool and String, not {}",
                     sigs.type_name(subject_ty)
                 ),
             ));
@@ -1056,6 +1077,12 @@ impl FnCx<'_> {
                         ));
                     }
                     default_body = Some(self.block(case.body())?);
+                }
+                CaseLabel::Values(_) => {
+                    return Err(CheckError::at(
+                        case.line(),
+                        format!("a case of '{}' cannot be a value", sig.base_name()),
+                    ));
                 }
                 CaseLabel::Patterns(patterns) => {
                     let mut condition: Option<TExpr> = None;
@@ -1091,19 +1118,152 @@ impl FnCx<'_> {
                 ),
             ));
         }
-        let mut tail = default_body;
-        while let Some((condition, body)) = branches.pop() {
-            tail = Some(match tail {
-                None => body,
-                Some(else_body) => vec![TStmt::If {
-                    cond: condition,
-                    then_body: body,
-                    else_body,
-                }],
+        out.extend(chain_branches(branches, default_body));
+        Ok(())
+    }
+
+    fn value_switch(
+        &mut self,
+        line: u32,
+        subject: TExpr,
+        cases: &[SwitchCase],
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let ty = subject.ty();
+        if cases.is_empty() {
+            return Err(CheckError::at(line, "a switch needs at least one case"));
+        }
+        let temporary = self.temp(ty);
+        out.push(TStmt::Let {
+            local: temporary,
+            init: subject,
+        });
+        let mut default_body: Option<Vec<TStmt>> = None;
+        let mut branches: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
+        let mut bools = [false, false];
+        for (position, case) in cases.iter().enumerate() {
+            match case.label() {
+                CaseLabel::Default => {
+                    if position + 1 != cases.len() {
+                        return Err(CheckError::at(
+                            case.line(),
+                            "'default' must be the last case of a switch",
+                        ));
+                    }
+                    default_body = Some(self.block(case.body())?);
+                }
+                CaseLabel::Patterns(_) => {
+                    return Err(CheckError::at(
+                        case.line(),
+                        format!("an enum case cannot match a {}", self.name_of(ty)),
+                    ));
+                }
+                CaseLabel::Values(values) => {
+                    let mut condition: Option<TExpr> = None;
+                    for value in values {
+                        let test =
+                            self.value_test(case.line(), temporary, ty, value, &mut bools)?;
+                        condition = Some(match condition {
+                            None => test,
+                            Some(before) => TExpr::Binary {
+                                op: BinOp::Or,
+                                lhs: Box::new(before),
+                                rhs: Box::new(test),
+                            },
+                        });
+                    }
+                    let Some(condition) = condition else {
+                        return Err(CheckError::at(case.line(), "a case needs a pattern"));
+                    };
+                    branches.push((condition, self.block(case.body())?));
+                }
+            }
+        }
+        if default_body.is_none() {
+            if ty == Ty::Bool {
+                if !(bools[0] && bools[1]) {
+                    let missing = if bools[0] { "false" } else { "true" };
+                    return Err(CheckError::at(
+                        line,
+                        format!("switch must be exhaustive: missing case '{missing}'"),
+                    ));
+                }
+            } else {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "switch must be exhaustive: a switch over {} needs a 'default' case",
+                        self.name_of(ty)
+                    ),
+                ));
+            }
+        }
+        out.extend(chain_branches(branches, default_body));
+        Ok(())
+    }
+
+    fn literal_pattern(&mut self, line: u32, expr: &Expr) -> CResult<TExpr> {
+        let value = self.value(expr)?;
+        let literal = match &value {
+            TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) => true,
+            TExpr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => matches!(**expr, TExpr::Int(_)),
+            _ => false,
+        };
+        if literal {
+            Ok(value)
+        } else {
+            Err(CheckError::at(line, "a case value must be a literal"))
+        }
+    }
+
+    fn value_test(
+        &mut self,
+        line: u32,
+        local: LocalId,
+        ty: Ty,
+        pattern: &Expr,
+        bools: &mut [bool; 2],
+    ) -> CResult<TExpr> {
+        let subject = TExpr::Local(local, ty);
+        if let ExprKind::Range { lo, hi, inclusive } = pattern.kind() {
+            if ty != Ty::Int {
+                return Err(CheckError::at(
+                    line,
+                    format!("a range pattern needs an Int, not {}", self.name_of(ty)),
+                ));
+            }
+            let lo = self.literal_pattern(line, lo)?;
+            let hi = self.literal_pattern(line, hi)?;
+            self.expect(line, Ty::Int, lo.ty())?;
+            self.expect(line, Ty::Int, hi.ty())?;
+            let upper = if *inclusive { BinOp::Le } else { BinOp::Lt };
+            return Ok(TExpr::Binary {
+                op: BinOp::And,
+                lhs: Box::new(TExpr::Binary {
+                    op: BinOp::Ge,
+                    lhs: Box::new(subject.clone()),
+                    rhs: Box::new(lo),
+                }),
+                rhs: Box::new(TExpr::Binary {
+                    op: upper,
+                    lhs: Box::new(subject),
+                    rhs: Box::new(hi),
+                }),
             });
         }
-        out.extend(tail.unwrap_or_default());
-        Ok(())
+        let value = self.literal_pattern(line, pattern)?;
+        self.expect(line, ty, value.ty())?;
+        if let TExpr::Bool(b) = value {
+            bools[usize::from(b)] = true;
+        }
+        Ok(TExpr::Binary {
+            op: BinOp::Eq,
+            lhs: Box::new(subject),
+            rhs: Box::new(value),
+        })
     }
 
     fn case_patterns(
@@ -2949,8 +3109,9 @@ mod tests {
     }
 
     #[test]
-    fn switching_on_a_value_that_is_not_an_enum_is_rejected() {
-        assert!(check_all(&with_color("switch 1 {\ndefault: print(2)\n}")).is_err());
+    fn switching_on_a_struct_is_rejected() {
+        let src = "struct P { var x: Int }\nfunc main() {\nlet p = P(x: 1)\nswitch p {\ndefault: print(2)\n}\n}";
+        assert!(check_all(src).is_err());
     }
 
     #[test]

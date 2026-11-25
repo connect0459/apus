@@ -449,16 +449,38 @@ impl Parser<'_> {
         }
     }
 
+    fn at_value_pattern(&self) -> bool {
+        match self.peek() {
+            Some(Token::Int(_) | Token::Str(_)) => true,
+            Some(Token::Punct(p)) => p == "-",
+            Some(Token::Ident(s)) => {
+                s == "true"
+                    || s == "false"
+                    || (!KEYWORDS.contains(&s.as_str())
+                        && !matches!(self.peek_at(1), Some(Token::Punct(p)) if p == "."))
+            }
+            _ => false,
+        }
+    }
+
     fn switch_case(&mut self) -> PResult<SwitchCase> {
         let line = self.line();
         let label = if self.eat_keyword("default") {
             CaseLabel::Default
         } else if self.eat_keyword("case") {
-            let mut patterns = vec![self.pattern()?];
-            while self.eat_punct(",") {
-                patterns.push(self.pattern()?);
+            if self.at_value_pattern() {
+                let mut values = vec![self.range()?];
+                while self.eat_punct(",") {
+                    values.push(self.range()?);
+                }
+                CaseLabel::Values(values)
+            } else {
+                let mut patterns = vec![self.pattern()?];
+                while self.eat_punct(",") {
+                    patterns.push(self.pattern()?);
+                }
+                CaseLabel::Patterns(patterns)
             }
-            CaseLabel::Patterns(patterns)
         } else {
             return self.fail("expected 'case' or 'default' in a switch body");
         };
@@ -1882,6 +1904,35 @@ mod tests {
     #[test]
     fn an_enum_body_accepts_only_cases() {
         assert!(try_parse("enum Color { var x: Int }").is_err());
+    }
+
+    #[test]
+    fn a_case_may_list_literals_and_ranges() {
+        let stmts = body(
+            "switch n {\ncase 1, -2:\nprint(1)\ncase 3...5, 6..<8:\nprint(2)\ncase \"a\":\nprint(3)\ncase true:\nprint(4)\ndefault:\nprint(5)\n}",
+        );
+        let StmtKind::Switch { cases, .. } = stmts[0].kind() else {
+            panic!("expected a switch");
+        };
+        assert_eq!(
+            *cases[0].label(),
+            CaseLabel::Values(vec![int(1), unary(UnaryOp::Neg, int(2))])
+        );
+        assert_eq!(
+            *cases[1].label(),
+            CaseLabel::Values(vec![
+                range(int(3), int(5), true),
+                range(int(6), int(8), false)
+            ])
+        );
+        assert_eq!(
+            *cases[2].label(),
+            CaseLabel::Values(vec![ex(ExprKind::Str("a".to_string()))])
+        );
+        assert_eq!(
+            *cases[3].label(),
+            CaseLabel::Values(vec![ex(ExprKind::Bool(true))])
+        );
     }
 
     #[test]
