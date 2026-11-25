@@ -34,6 +34,9 @@ const NAMESPACE_FUNC: u32 = 0;
 const NAMESPACE_DATA: u32 = 1;
 
 pub const ENTRY_SYMBOL: &str = "apus_main";
+const STRING_HEADER: usize = 16;
+const STRING_RC: i32 = -16;
+const IMMORTAL: i64 = i64::MIN;
 const RUNTIME_FORMAT_INT: &str = "apus_format_int";
 const RUNTIME_TRUE: &str = "apus_true";
 const RUNTIME_FALSE: &str = "apus_false";
@@ -294,6 +297,7 @@ fn define_text(module: &mut ObjectModule, name: &str, bytes: &[u8]) -> GResult<D
     let id = module.declare_data(name, Linkage::Local, false, false)?;
     let mut data = DataDescription::new();
     data.define(bytes.to_vec().into_boxed_slice());
+    data.set_align(8);
     module.define_data(id, &data)?;
     Ok(id)
 }
@@ -334,7 +338,7 @@ fn emit_function(
         builder.def_var(*var, value);
     }
     for (var, ty) in vars.iter().zip(func.locals()).skip(param_count) {
-        if matches!(ty, Ty::Class(_) | Ty::Struct(_)) {
+        if matches!(ty, Ty::Class(_) | Ty::Struct(_) | Ty::Str) {
             let zero = builder.ins().iconst(types::I64, 0);
             builder.def_var(*var, zero);
         }
@@ -451,7 +455,10 @@ impl Emitter<'_, '_> {
     }
 
     fn string_address(&mut self, text: &str) -> Value {
-        let mut bytes = text.as_bytes().to_vec();
+        let mut bytes = Vec::with_capacity(STRING_HEADER + text.len() + 1);
+        bytes.extend_from_slice(&IMMORTAL.to_le_bytes());
+        bytes.extend_from_slice(&i64::try_from(text.len()).unwrap_or(i64::MAX).to_le_bytes());
+        bytes.extend_from_slice(text.as_bytes());
         bytes.push(0);
         let mut hasher = Fnv1a::new();
         hasher.write(&bytes);
@@ -459,7 +466,8 @@ impl Emitter<'_, '_> {
         if !self.literals.iter().any(|l| l.name() == name) {
             self.literals.push(Literal::new(name.clone(), bytes));
         }
-        self.data_address(&name)
+        let base = self.data_address(&name);
+        self.builder.ins().iadd_imm_s(base, STRING_HEADER as i64)
     }
 
     fn struct_fields(&self, ty: Ty) -> GResult<&[Ty]> {
@@ -668,13 +676,13 @@ impl Emitter<'_, '_> {
         }
     }
 
-    fn class_slots(&self, ty: Ty) -> GResult<Vec<usize>> {
+    fn counted_slots(&self, ty: Ty) -> GResult<Vec<(usize, Ty)>> {
         Ok(self
             .struct_fields(ty)?
             .iter()
             .enumerate()
-            .filter(|(_, f)| matches!(f, Ty::Class(_)))
-            .map(|(index, _)| index)
+            .filter(|(_, f)| matches!(f, Ty::Class(_) | Ty::Str))
+            .map(|(index, f)| (index, *f))
             .collect())
     }
 
@@ -753,9 +761,10 @@ impl Emitter<'_, '_> {
     fn retain(&mut self, value: Value, ty: Ty) -> GResult<()> {
         match ty {
             Ty::Class(_) => self.retain_reference(value),
+            Ty::Str => self.retain_string(value),
             Ty::Struct(_) => {
-                for field in self.load_class_slots(value, ty)? {
-                    self.retain_reference(field)?;
+                for (field, slot_ty) in self.load_counted_slots(value, ty)? {
+                    self.retain(field, slot_ty)?;
                 }
                 Ok(())
             }
@@ -766,13 +775,14 @@ impl Emitter<'_, '_> {
     fn release(&mut self, value: Value, ty: Ty) -> GResult<()> {
         match ty {
             Ty::Class(_) => self.release_reference(value),
+            Ty::Str => self.release_string(value),
             Ty::Struct(_) => {
-                if self.class_slots(ty)?.is_empty() {
+                if self.counted_slots(ty)?.is_empty() {
                     return Ok(());
                 }
                 self.guarded(value, |this| {
-                    for field in this.load_class_slots(value, ty)? {
-                        this.release_reference(field)?;
+                    for (field, slot_ty) in this.load_counted_slots(value, ty)? {
+                        this.release(field, slot_ty)?;
                     }
                     Ok(())
                 })
@@ -781,17 +791,68 @@ impl Emitter<'_, '_> {
         }
     }
 
-    fn load_class_slots(&mut self, value: Value, ty: Ty) -> GResult<Vec<Value>> {
+    fn load_counted_slots(&mut self, value: Value, ty: Ty) -> GResult<Vec<(Value, Ty)>> {
         let flags = MemFlagsData::trusted();
         Ok(self
-            .class_slots(ty)?
+            .counted_slots(ty)?
             .into_iter()
-            .map(|slot| {
-                self.builder
+            .map(|(slot, slot_ty)| {
+                let loaded = self
+                    .builder
                     .ins()
-                    .load(types::I64, flags, value, field_offset(slot))
+                    .load(types::I64, flags, value, field_offset(slot));
+                (loaded, slot_ty)
             })
             .collect())
+    }
+
+    fn retain_string(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let count = this.builder.ins().load(types::I64, flags, value, STRING_RC);
+            let immortal = this
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, count, 0);
+            let bump = this.builder.create_block();
+            let merge = this.builder.create_block();
+            this.builder.ins().brif(immortal, merge, &[], bump, &[]);
+            this.builder.switch_to_block(bump);
+            let next = this.builder.ins().iadd_imm_s(count, 1);
+            this.builder.ins().store(flags, next, value, STRING_RC);
+            this.builder.ins().jump(merge, &[]);
+            this.builder.switch_to_block(merge);
+            Ok(())
+        })
+    }
+
+    fn release_string(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let count = this.builder.ins().load(types::I64, flags, value, STRING_RC);
+            let immortal = this
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::SignedLessThan, count, 0);
+            let counted = this.builder.create_block();
+            let merge = this.builder.create_block();
+            this.builder.ins().brif(immortal, merge, &[], counted, &[]);
+            this.builder.switch_to_block(counted);
+            let last = this.builder.ins().icmp_imm_s(IntCC::Equal, count, 1);
+            let destroy = this.builder.create_block();
+            let decrement = this.builder.create_block();
+            this.builder.ins().brif(last, destroy, &[], decrement, &[]);
+            this.builder.switch_to_block(destroy);
+            let block = this.builder.ins().iadd_imm_s(value, i64::from(STRING_RC));
+            this.free_pointer(block);
+            this.builder.ins().jump(merge, &[]);
+            this.builder.switch_to_block(decrement);
+            let next = this.builder.ins().iadd_imm_s(count, -1);
+            this.builder.ins().store(flags, next, value, STRING_RC);
+            this.builder.ins().jump(merge, &[]);
+            this.builder.switch_to_block(merge);
+            Ok(())
+        })
     }
 
     fn retain_reference(&mut self, value: Value) -> GResult<()> {

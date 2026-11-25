@@ -4016,3 +4016,15 @@ fn an_initializer_that_does_not_delegate_still_initializes_every_member() {
     let source = "struct P {\n  var x: Int\n  var y: Int\n  init(x: Int, y: Int) {\n    self.x = x\n    self.y = y\n  }\n  init(x: Int) {\n    self.x = x\n  }\n}\nfunc main() { }";
     assert!(build_error(source).contains("'y'"));
 }
+
+#[test]
+fn a_payload_enum_may_carry_a_string_and_another_type_at_the_same_position() {
+    let source = "enum Value {\n  case number(Int)\n  case text(String)\n  case flag(Bool)\n  case pair(String, Int)\n}\nfunc show(_ v: Value) {\n  switch v {\n  case .number(let n): print(n)\n  case .text(let s): print(s)\n  case .flag(let b): print(b)\n  case .pair(let s, let n):\n    print(s)\n    print(n)\n  }\n}\nfunc main() {\n  show(Value.number(7))\n  show(Value.text(\"hi\"))\n  show(Value.flag(true))\n  show(Value.pair(\"k\", 3))\n}";
+    assert_eq!(run(source), "7\nhi\ntrue\nk\n3\n");
+}
+
+#[test]
+fn a_string_can_be_stored_copied_and_returned_through_every_kind_of_owner() {
+    let source = "struct Label {\n  var text: String\n  var n: Int\n}\nclass Holder {\n  var label: Label\n  var name: String\n}\nfunc pick(_ flag: Bool) -> String {\n  let a = \"first\"\n  let b = \"second\"\n  if flag { return a }\n  return b\n}\nfunc main() {\n  var l = Label(text: \"x\", n: 1)\n  let copy = l\n  l.text = \"y\"\n  let h = Holder(label: copy, name: pick(false))\n  var o: String? = pick(true)\n  print(l.text)\n  print(copy.text)\n  print(h.label.text)\n  print(h.name)\n  if let s = o { print(s) }\n  o = nil\n  if o == nil { print(0) }\n}";
+    assert_eq!(run(source), "y\nx\nx\nsecond\nfirst\n0\n");
+}

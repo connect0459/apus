@@ -1503,14 +1503,14 @@ impl FnCx<'_> {
             ));
         }
         let (temporary, subject_ty) = subject;
-        for (slot, (binding, ty)) in bindings.iter().zip(case.payload()).enumerate() {
+        for (position, (binding, ty)) in bindings.iter().zip(case.payload()).enumerate() {
             let Some(name) = binding else { continue };
             let local = self.declare(line, name, *ty, false)?;
             prelude.push(TStmt::Let {
                 local,
                 init: TExpr::Field {
                     base: Box::new(TExpr::Local(temporary, subject_ty)),
-                    index: 1 + slot,
+                    index: case.slots()[position],
                     ty: *ty,
                 },
             });
@@ -2761,13 +2761,18 @@ impl FnCx<'_> {
             values = coerced;
             pattern_id
         };
-        let mut slots = vec![TExpr::Int(index as i64)];
-        slots.extend(values);
         let ty = sigs.enum_ty(id);
-        Ok(TExpr::StructInit {
-            ty,
-            args: self.pad_payload(ty, slots),
-        })
+        let placed = sigs
+            .enum_sig(id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown enum"))?
+            .cases()[index]
+            .slots()
+            .to_vec();
+        let mut args = self.pad_payload(ty, vec![TExpr::Int(index as i64)]);
+        for (value, slot) in values.into_iter().zip(placed) {
+            args[slot] = value;
+        }
+        Ok(TExpr::StructInit { ty, args })
     }
 
     fn nil_comparison(&mut self, line: u32, op: BinOp, lhs: &Expr, rhs: &Expr) -> CResult<TExpr> {

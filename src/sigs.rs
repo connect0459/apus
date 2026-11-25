@@ -297,9 +297,14 @@ impl StructSig {
 pub struct CaseSig {
     name: String,
     payload: Vec<Ty>,
+    slots: Vec<usize>,
 }
 
 impl CaseSig {
+    pub fn slots(&self) -> &[usize] {
+        &self.slots
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1785,7 +1790,7 @@ impl Signatures {
         }
         let cases = self.enum_cases(decl, &key.1, &name, line);
         self.instances.borrow_mut().enum_pending.remove(&key);
-        let cases = cases?;
+        let mut cases = cases?;
         let has_payload = decl.has_payload();
         let at = if line == 0 { decl.line() } else { line };
         let mut instances = self.instances.borrow_mut();
@@ -1799,8 +1804,10 @@ impl Signatures {
                 unowned: false,
                 weak: false,
             }];
-            for slot in 0..widest {
-                let ty = Self::slot_type(&cases, slot).ok_or_else(|| {
+            let mut string_slots: Vec<Option<usize>> = vec![None; widest];
+            let mut extra = 0;
+            for (slot, string_slot) in string_slots.iter_mut().enumerate() {
+                let (ty, mixed) = Self::slot_plan(&cases, slot).ok_or_else(|| {
                     CheckError::at(
                         at,
                         format!(
@@ -1808,6 +1815,10 @@ impl Signatures {
                         ),
                     )
                 })?;
+                if mixed {
+                    *string_slot = Some(1 + widest + extra);
+                    extra += 1;
+                }
                 fields.push(FieldSig {
                     name: format!("payload{slot}"),
                     ty,
@@ -1815,6 +1826,28 @@ impl Signatures {
                     unowned: false,
                     weak: false,
                 });
+            }
+            for (slot, string_slot) in string_slots.iter().enumerate() {
+                if string_slot.is_some() {
+                    fields.push(FieldSig {
+                        name: format!("payload_string{slot}"),
+                        ty: Ty::Str,
+                        mutable: false,
+                        unowned: false,
+                        weak: false,
+                    });
+                }
+            }
+            for case in &mut cases {
+                case.slots = case
+                    .payload
+                    .iter()
+                    .enumerate()
+                    .map(|(position, ty)| match (ty, string_slots[position]) {
+                        (Ty::Str, Some(slot)) => slot,
+                        _ => 1 + position,
+                    })
+                    .collect();
             }
             let layout = StructId::new(instances.structs.len());
             instances.structs.push(Rc::new(StructSig {
@@ -1839,21 +1872,27 @@ impl Signatures {
         Ok(id)
     }
 
-    fn slot_type(cases: &[CaseSig], slot: usize) -> Option<Ty> {
+    fn slot_plan(cases: &[CaseSig], slot: usize) -> Option<(Ty, bool)> {
         let types: Vec<Ty> = cases
             .iter()
             .filter_map(|c| c.payload.get(slot).copied())
             .collect();
         let first = *types.first()?;
         if types.iter().all(|t| *t == first) {
-            Some(first)
-        } else if types
+            return Some((first, false));
+        }
+        let mixed = types.contains(&Ty::Str);
+        let others: Vec<Ty> = types.into_iter().filter(|t| *t != Ty::Str).collect();
+        let head = *others.first()?;
+        if others.iter().all(|t| *t == head) {
+            Some((head, mixed))
+        } else if others
             .iter()
             .any(|t| matches!(t, Ty::Class(_) | Ty::Struct(_)))
         {
             None
         } else {
-            Some(Ty::Int)
+            Some((Ty::Int, mixed))
         }
     }
 
@@ -1881,9 +1920,11 @@ impl Signatures {
             for tr in case.payload() {
                 payload.push(self.resolve_type(tr, &own_scope, at)?);
             }
+            let slots = (0..payload.len()).map(|position| 1 + position).collect();
             cases.push(CaseSig {
                 name: case.name().to_string(),
                 payload,
+                slots,
             });
         }
         Ok(cases)

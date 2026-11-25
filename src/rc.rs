@@ -27,7 +27,7 @@ pub fn insert(func: &TFunc, sigs: &Signatures) -> (TFunc, Vec<StructId>) {
 
 fn needs_rc(sigs: &Signatures, ty: Ty) -> bool {
     match ty {
-        Ty::Class(_) => true,
+        Ty::Class(_) | Ty::Str => true,
         Ty::Struct(id) => sigs
             .struct_sig(id)
             .is_some_and(|sig| sig.fields().iter().any(|f| needs_rc(sigs, f.ty()))),
@@ -362,7 +362,7 @@ impl Pass<'_> {
             }
             TStmt::Fatal(text) => out.push(TStmt::Fatal(text.clone())),
             TStmt::Print(expr) => {
-                let (expr, temps) = self.scoped(|p| p.expr(expr));
+                let (expr, temps) = self.scoped(|p| p.borrowed(expr));
                 out.push(TStmt::Print(expr));
                 out.extend(self.release_temps(&temps));
             }
