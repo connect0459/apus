@@ -45,6 +45,8 @@
   - [x] M6b: associated types: `associatedtype`, `typealias` bindings in struct, class and enum bodies, `T.Item` in signatures, annotations and members of generic types
   - [x] M6c: protocols as types: `let x: P`, parameters, results and members, optionals of them, requirement calls through a tag comparison chain, `is` and `as?` to a class conformer
 
+- [x] M7: `fatalError()` and `fatalError("message")` as a statement that ends the path
+
 ## Open decisions
 
 - Rebuild timings were measured on 2026-11-20 with `just bench-vs-swiftc` (10 cores, load average 2.7 to 3.3, best of 5 runs for apus and 3 for `swiftc -Onone`; wall ms):
@@ -232,7 +234,7 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 
 **Decision.** `ExprKind::OptionalChain` holds the subject and a link whose base is `ChainValue`; a nested `?.` inside the link starts a nested chain. The checker evaluates the subject once with `Bind`, pushes the unwrapped value for `ChainValue`, checks the link, and wraps the result once (an optional result is not wrapped again), through `Select`. As a statement, a chain becomes an `if` on the tag, so a call that returns nothing can be chained. `guard let` lowers to a hidden holder, an `if` on the tag whose body is the `else` body, and a binding declared in the current scope; `require_exit` accepts the `else` body only when every path returns. `while let` keeps a flag and re-evaluates its subject at the top of every iteration. A `switch` is lowered inside its own block, so its subject is released where the `switch` ends. `is`, `as?` and `as!` bind the operand once and compare its class tag with the tags of the target class and of every subclass (`Signatures::class_tags`); a cast between unrelated classes is rejected. `as?` yields `Optional<Target>`, `as!` unwraps it and traps on nil, an optional operand is looked through, and casts bind tighter than `??` and looser than ranges. A local declared with a type annotation now has the annotated type, which a subclass instance assigned to a superclass annotation needs for casts to see the declared type.
 
-**Consequences.** A cast costs one comparison per class in the family of the target. Casts work on class references only: no protocols, no `Any`, no casts of values. A mutating call inside a chain is rejected because the unwrapped value is a copy. `guard` accepts `return`, `break` and `continue` as a way out; `fatalError` does not exist yet.
+**Consequences.** A cast costs one comparison per class in the family of the target. Casts work on class references only: no protocols, no `Any`, no casts of values. A mutating call inside a chain is rejected because the unwrapped value is a copy. `guard` accepts `return`, `break`, `continue` and `fatalError` as a way out.
 
 ### break and continue are depth-indexed jumps over loops and switch blocks (2026-11-25)
 
@@ -295,3 +297,13 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `associatedtype Item` in a protocol registers a global identifier (`Signatures::assoc_types`). A conforming struct, class or enum binds it with `typealias Item = Type` in its body, and `check_conformances` rejects a missing binding. `Ty::Assoc` packs the type parameter index and the identifier into one word, so that `Ty` stays two words: a third word made `TExpr` larger and the checker overflowed the default thread stack on a 120-term expression, so a unit test now guards the size. Inside a protocol, a bare name resolves to the projection of `Self`; in a signature or a body, `T.Item` is a scope entry that `scope_for` adds for every type parameter whose constraints declare `Item`, and `type_scope` does the same for the members of a generic type, projecting a concrete argument through its binding at once. The projection is opaque (copy, pass, return and store) and compares equal only to itself; `unify` ignores it and `coerce` checks it after the other parameters are inferred. `subst` replaces it by the binding of a concrete argument (`assoc_binding`, which follows the superclass chain) or by the projection of the caller's own parameter. Inside the type's own members, its aliases are in scope, so a member may write `Item` for the bound type.
 
 **Consequences.** `mono` needs no change: types of a generic body are substituted by `subst`, and a missing binding is reported there. An associated type has no constraints of its own (`associatedtype Item: P` and `where` clauses are not supported), so its values support no operation, and a nested projection (`C.Item.Item`) is rejected. A protocol with associated types must stay a constraint, which the existential plan already assumes. The binding is part of the type item, so editing a typealias rechecks every function through the signature digest.
+
+### fatalError is a statement that writes to standard error and traps (2026-11-25)
+
+**Problem.** A path that must never run needs a diagnostic, and a function that returns a value has to be allowed to end in one without a dummy `return`.
+
+**Options.** Write to standard output with `puts`; write to standard error and trap; trap silently. A `Never` type usable in expressions versus a statement.
+
+**Decision.** `fatalError()` and `fatalError("literal")` are statements, checked like `print` (a reserved name, no value). The checker turns them into `TStmt::Fatal(text)` holding `Fatal error: <message>` and a newline. The backend flushes every C stream with `fflush(NULL)`, so output printed before the call survives, writes the text with `write(2, ...)` and traps. `always_returns` and the `guard` exit analysis treat it as the end of a path, as they treat `return`.
+
+**Consequences.** The message must be a string literal, because a `String` has no operations yet. There is no `Never` type, so `x ?? fatalError()` and `-> Never` are rejected. Live objects are not released, so their `deinit` does not run. The process ends with a trap signal and not with a status code.
