@@ -759,6 +759,12 @@ impl Emitter<'_, '_> {
             TExpr::Call {
                 callee, args, ret, ..
             } => return self.call(callee, args, *ret),
+            TExpr::Virtual {
+                cases,
+                default,
+                args,
+                ret,
+            } => return self.virtual_call(cases, default, args, *ret),
             TExpr::StructInit { ty, args } => {
                 let values = args
                     .iter()
@@ -838,6 +844,67 @@ impl Emitter<'_, '_> {
         self.builder.ins().jump(merge, &[BlockArg::Value(rhs)]);
         self.builder.switch_to_block(merge);
         Ok(Some(self.builder.block_params(merge)[0]))
+    }
+
+    fn virtual_call(
+        &mut self,
+        cases: &[(i64, String)],
+        default: &str,
+        args: &[TExpr],
+        ret: Ty,
+    ) -> GResult<Option<Value>> {
+        let param_types: Vec<Ty> = args.iter().map(TExpr::ty).collect();
+        let sig = signature(self.call_conv, &param_types, ret);
+        let result_slot = if ret.is_struct() {
+            Some(self.alloc_struct(ret)?)
+        } else {
+            None
+        };
+        let mut values: Vec<Value> = result_slot.into_iter().collect();
+        for arg in args {
+            values.push(self.value(arg)?);
+        }
+        let receiver = *values
+            .get(usize::from(result_slot.is_some()))
+            .ok_or_else(|| CodegenError::from("a virtual call has no receiver"))?;
+        let tag = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), receiver, 0);
+        let merge = self.builder.create_block();
+        let result_type = return_type(ret);
+        if let Some(clif) = result_type {
+            self.builder.append_block_param(merge, clif);
+        }
+        let targets = cases
+            .iter()
+            .map(|(id, callee)| (Some(*id), callee.as_str()))
+            .chain(std::iter::once((None, default)));
+        for (id, callee) in targets {
+            let func_ref = self.import_func(&symbol(callee), sig.clone(), true);
+            let next = match id {
+                Some(id) => {
+                    let hit = self.builder.create_block();
+                    let next = self.builder.create_block();
+                    let expected = self.builder.ins().iconst(types::I64, id);
+                    let matches = self.builder.ins().icmp(IntCC::Equal, tag, expected);
+                    self.builder.ins().brif(matches, hit, &[], next, &[]);
+                    self.builder.switch_to_block(hit);
+                    Some(next)
+                }
+                None => None,
+            };
+            let call = self.builder.ins().call(func_ref, &values);
+            let result = result_type
+                .and_then(|_| self.builder.inst_results(call).first().copied())
+                .map(BlockArg::Value);
+            self.builder.ins().jump(merge, result.as_slice());
+            if let Some(next) = next {
+                self.builder.switch_to_block(next);
+            }
+        }
+        self.builder.switch_to_block(merge);
+        Ok(result_slot.or_else(|| self.builder.block_params(merge).first().copied()))
     }
 
     fn call(&mut self, callee: &str, args: &[TExpr], ret: Ty) -> GResult<Option<Value>> {

@@ -266,6 +266,11 @@ impl Signatures {
                 sigs.register_func(func)?;
             }
         }
+        for decl in decls {
+            if let Decl::Func(func) = decl {
+                sigs.check_override(func)?;
+            }
+        }
         Ok(sigs)
     }
 
@@ -386,6 +391,85 @@ impl Signatures {
         Ok(())
     }
 
+    fn check_override(&self, func: &FuncDecl) -> CResult<()> {
+        let Some(owner) = func.owner().filter(|_| !func.is_init()) else {
+            return Ok(());
+        };
+        let (ty, _) = self.member_owner(func, owner)?;
+        let name = func.name().strip_prefix(owner).map_or("", |n| &n[1..]);
+        let inherited = self
+            .superclass(ty)
+            .and_then(|parent| self.resolve_method(parent, name));
+        let line = func.line();
+        match (func.is_override(), inherited) {
+            (true, None) => Err(CheckError::at(
+                line,
+                format!("'{name}' is marked 'override', but no superclass of '{owner}' has it"),
+            )),
+            (false, Some(_)) => Err(CheckError::at(
+                line,
+                format!("'{name}' overrides an inherited method: write 'override'"),
+            )),
+            (true, Some(inherited)) => {
+                let (Some(mine), Some(theirs)) =
+                    (self.funcs.get(func.name()), self.funcs.get(&inherited))
+                else {
+                    return Ok(());
+                };
+                let same = mine.ret == theirs.ret
+                    && mine.params.len() == theirs.params.len()
+                    && mine
+                        .params
+                        .iter()
+                        .zip(&theirs.params)
+                        .skip(1)
+                        .all(|(a, b)| a.ty == b.ty && a.label == b.label);
+                if same {
+                    Ok(())
+                } else {
+                    Err(CheckError::at(
+                        line,
+                        format!("'{name}' must keep the signature of '{inherited}' to override it"),
+                    ))
+                }
+            }
+            (false, None) => Ok(()),
+        }
+    }
+
+    pub fn resolve_method(&self, ty: Ty, name: &str) -> Option<String> {
+        let mut current = Some(ty);
+        while let Some(t) = current {
+            let qualified = format!("{}.{name}", self.owner_name(t)?);
+            if self
+                .funcs
+                .get(&qualified)
+                .is_some_and(FuncSig::has_receiver)
+            {
+                return Some(qualified);
+            }
+            current = self.superclass(t);
+        }
+        None
+    }
+
+    pub fn dispatch_cases(&self, ty: Ty, name: &str) -> Vec<(i64, String)> {
+        let Some(default) = self.resolve_method(ty, name) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<StructId> = self.instances.borrow().superclass.keys().copied().collect();
+        ids.sort_by_key(|id| id.index());
+        ids.into_iter()
+            .map(Ty::Class)
+            .filter(|class| *class != ty && self.is_subclass(*class, ty))
+            .filter_map(|class| {
+                let Ty::Class(id) = class else { return None };
+                let target = self.resolve_method(class, name)?;
+                (target != default).then(|| (i64::try_from(id.index()).unwrap_or(i64::MAX), target))
+            })
+            .collect()
+    }
+
     fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<(Ty, Vec<String>)> {
         let line = func.line();
         let (ty, generics) = if let Some(def) = self.struct_def_ids.get(owner).copied() {
@@ -400,6 +484,12 @@ impl Signatures {
         } else {
             return Err(CheckError::at(line, format!("unknown type '{owner}'")));
         };
+        if func.is_override() && !ty.is_class() {
+            return Err(CheckError::at(
+                line,
+                format!("'override' applies only to methods of a class, not of '{owner}'"),
+            ));
+        }
         if func.is_mutating() && ty.is_class() {
             return Err(CheckError::at(
                 line,
@@ -409,13 +499,22 @@ impl Signatures {
         Ok((ty, generics))
     }
 
-    pub fn method_names(&self, owner: &str) -> Vec<String> {
-        let prefix = format!("{owner}.");
-        self.funcs
-            .iter()
-            .filter(|(_, sig)| sig.has_receiver())
-            .filter_map(|(name, _)| name.strip_prefix(&prefix).map(str::to_string))
-            .collect()
+    pub fn method_names(&self, ty: Ty) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut current = Some(ty);
+        while let Some(t) = current {
+            if let Some(owner) = self.owner_name(t) {
+                let prefix = format!("{owner}.");
+                names.extend(
+                    self.funcs
+                        .iter()
+                        .filter(|(_, sig)| sig.has_receiver())
+                        .filter_map(|(name, _)| name.strip_prefix(&prefix).map(str::to_string)),
+                );
+            }
+            current = self.superclass(t);
+        }
+        names
     }
 
     pub fn owner_name(&self, ty: Ty) -> Option<String> {

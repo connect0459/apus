@@ -9,6 +9,8 @@ use crate::sigs::{CResult, EnumSig, FieldSig, FuncSig, PRINT, ParamSig, scope_of
 use crate::tir::{LocalId, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
+const SUPER: &str = "super";
+
 pub use crate::sigs::{CheckError, Signatures};
 
 pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
@@ -106,8 +108,7 @@ impl CellSelf {
 }
 
 fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
-    let owner = cx.sigs.owner_name(ty).unwrap_or_default();
-    let methods = cx.sigs.method_names(&owner);
+    let methods = cx.sigs.method_names(ty);
     let methods: Vec<&str> = methods.iter().map(String::as_str).collect();
     let params: Vec<&str> = func.params().iter().map(|p| p.name()).collect();
     let init = if cx.sigs.is_enum_ty(ty) {
@@ -960,21 +961,26 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
-        let receiver = self.value(base)?;
         let sigs = self.sigs;
-        let owner = sigs.owner_name(receiver.ty()).ok_or_else(|| {
+        let (receiver, lookup_ty, dispatching) = if self.is_super(base) {
+            let (receiver, parent) = self.super_receiver(line)?;
+            (receiver, parent, false)
+        } else {
+            let receiver = self.value(base)?;
+            let ty = receiver.ty();
+            (receiver, ty, true)
+        };
+        let owner = sigs.owner_name(lookup_ty).ok_or_else(|| {
             CheckError::at(
                 line,
-                format!(
-                    "a value of type {} has no methods",
-                    self.name_of(receiver.ty())
-                ),
+                format!("a value of type {} has no methods", self.name_of(lookup_ty)),
             )
         })?;
-        let qualified = format!("{owner}.{name}");
+        let qualified = sigs
+            .resolve_method(lookup_ty, name)
+            .ok_or_else(|| CheckError::at(line, format!("'{owner}' has no method '{name}'")))?;
         let sig = sigs
             .func(&qualified)
-            .filter(|sig| sig.has_receiver())
             .ok_or_else(|| CheckError::at(line, format!("'{owner}' has no method '{name}'")))?;
         if sig.is_mutating() && !self.is_mutable_variable(base) {
             return Err(CheckError::at(
@@ -1007,7 +1013,43 @@ impl FnCx<'_> {
             self.expect_label(line, arg, param.label())?;
             checked.push(self.value(arg.value())?);
         }
-        self.finish_call(line, &qualified, sig, checked, expected, None)
+        let call = self.finish_call(line, &qualified, sig, checked, expected, None)?;
+        let cases = if dispatching {
+            sigs.dispatch_cases(lookup_ty, name)
+        } else {
+            Vec::new()
+        };
+        Ok(match call {
+            TExpr::Call {
+                callee, args, ret, ..
+            } if !cases.is_empty() => TExpr::Virtual {
+                cases,
+                default: callee,
+                args,
+                ret,
+            },
+            other => other,
+        })
+    }
+
+    fn is_super(&self, base: &Expr) -> bool {
+        matches!(base.kind(), ExprKind::Ident(name) if name == SUPER && self.lookup(name, base.line()).is_err())
+    }
+
+    fn super_receiver(&self, line: u32) -> CResult<(TExpr, Ty)> {
+        let binding = self.lookup("self", line).map_err(|_| {
+            CheckError::at(line, "'super' can only be used inside a method of a class")
+        })?;
+        let parent = self.sigs.superclass(binding.ty).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'super' needs a superclass, but {} has none",
+                    self.name_of(binding.ty)
+                ),
+            )
+        })?;
+        Ok((TExpr::Local(binding.local, binding.ty), parent))
     }
 
     fn enum_cell_receiver(
@@ -1339,10 +1381,7 @@ impl FnCx<'_> {
         let sigs = self.sigs;
         if explicit.is_none()
             && let Some(receiver) = self.lookup("self", line).ok()
-            && let Some(owner) = sigs.owner_name(receiver.ty)
-            && sigs
-                .func(&format!("{owner}.{callee}"))
-                .is_some_and(FuncSig::has_receiver)
+            && sigs.resolve_method(receiver.ty, callee).is_some()
         {
             let base = Expr::new(line, ExprKind::Ident("self".to_string()));
             return self.method_call(line, &base, callee, args, expected);

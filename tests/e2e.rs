@@ -1383,3 +1383,116 @@ fn generic_classes_cannot_take_part_in_inheritance() {
     let sup = "class A<T> { var x: T }\nclass B: A<Int> { var y: Int }\nfunc main() { }";
     assert!(build_error(sup).contains("generic"));
 }
+
+const ANIMALS: &str = "class Animal {\n  var legs: Int\n  func sound() -> Int { return 1 }\n  func describe() -> Int { return self.sound() * 100 + legs }\n}\n\
+class Dog: Animal {\n  override func sound() -> Int { return 2 }\n}\n\
+class Puppy: Dog {\n  override func sound() -> Int { return super.sound() + 10 }\n}\n\
+class Fish: Animal {\n  var fins: Int\n}\n";
+
+#[test]
+fn a_subclass_inherits_the_methods_of_its_superclass() {
+    let source = format!(
+        "{ANIMALS}func main() {{\n  let f = Fish(legs: 0, fins: 3)\n  print(f.sound())\n  print(f.describe())\n}}"
+    );
+    assert_eq!(run(&source), "1\n100\n");
+}
+
+#[test]
+fn an_override_replaces_the_method_for_instances_of_the_subclass() {
+    let source = format!("{ANIMALS}func main() {{\n  let d = Dog(legs: 4)\n  print(d.sound())\n}}");
+    assert_eq!(run(&source), "2\n");
+}
+
+#[test]
+fn a_call_through_the_superclass_type_runs_the_override_of_the_actual_class() {
+    let source = format!(
+        "{ANIMALS}func sound(of a: Animal) -> Int {{ return a.sound() }}\n\
+         func main() {{\n  print(sound(of: Animal(legs: 4)))\n  print(sound(of: Dog(legs: 4)))\n  print(sound(of: Puppy(legs: 4)))\n  print(sound(of: Fish(legs: 0, fins: 1)))\n}}"
+    );
+    assert_eq!(run(&source), "1\n2\n12\n1\n");
+}
+
+#[test]
+fn an_inherited_method_dispatches_on_self_to_the_override() {
+    let source = format!(
+        "{ANIMALS}func main() {{\n  print(Animal(legs: 4).describe())\n  print(Dog(legs: 4).describe())\n  print(Puppy(legs: 3).describe())\n}}"
+    );
+    assert_eq!(run(&source), "104\n204\n1203\n");
+}
+
+#[test]
+fn super_calls_the_method_of_the_superclass_without_dispatching() {
+    let source = format!("{ANIMALS}func main() {{\n  print(Puppy(legs: 4).sound())\n}}");
+    assert_eq!(run(&source), "12\n");
+}
+
+#[test]
+fn an_override_may_take_arguments_and_return_a_bool() {
+    let source = "class A {\n  func fits(_ n: Int, limit: Int) -> Bool { return n < limit }\n}\n\
+         class B: A {\n  override func fits(_ n: Int, limit: Int) -> Bool { return n <= limit }\n}\n\
+         func check(_ a: A) -> Bool { return a.fits(5, limit: 5) }\n\
+         func main() {\n  print(check(A()))\n  print(check(B()))\n}";
+    assert_eq!(run(source), "false\ntrue\n");
+}
+
+#[test]
+fn an_override_that_returns_nothing_runs_for_its_side_effects() {
+    let source = "class Counter {\n  var n: Int\n  func bump() { self.n += 1 }\n}\n\
+         class Double: Counter {\n  override func bump() { self.n += 2 }\n}\n\
+         func twice(_ c: Counter) {\n  c.bump()\n  c.bump()\n}\n\
+         func main() {\n  let a = Counter(n: 0)\n  let b = Double(n: 0)\n  twice(a)\n  twice(b)\n  print(a.n)\n  print(b.n)\n}";
+    assert_eq!(run(source), "2\n4\n");
+}
+
+#[test]
+fn an_override_without_an_overridden_method_is_rejected() {
+    let source =
+        "class A { var x: Int }\nclass B: A {\n  override func f() { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("override"));
+}
+
+#[test]
+fn a_method_that_hides_an_inherited_one_must_say_override() {
+    let source = "class A {\n  func f() { }\n}\nclass B: A {\n  func f() { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("override"));
+}
+
+#[test]
+fn an_override_must_keep_the_signature() {
+    let source = "class A {\n  func f() -> Int { return 1 }\n}\nclass B: A {\n  override func f() -> Bool { return true }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("signature"));
+}
+
+#[test]
+fn override_is_rejected_outside_a_class() {
+    let source = "struct S {\n  var x: Int\n  override func f() { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("class"));
+}
+
+#[test]
+fn super_is_rejected_in_a_class_without_a_superclass() {
+    let source = "class A {\n  func f() { super.f() }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("super"));
+}
+
+#[test]
+fn super_must_name_a_method_of_the_superclass() {
+    let source = "class A {\n  func f() { }\n}\nclass B: A {\n  override func f() { super.g() }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("g"));
+}
+
+#[test]
+fn super_is_rejected_outside_a_method() {
+    let source = "class A {\n  func f() { }\n}\nfunc g() { super.f() }\nfunc main() { }";
+    assert!(build_error(source).contains("super"));
+}
+
+#[test]
+fn an_override_may_return_a_struct() {
+    let source = "struct P { var x: Int\n var y: Int }\n\
+         class A {\n  func at() -> P { return P(x: 1, y: 2) }\n}\n\
+         class B: A {\n  override func at() -> P { return P(x: 3, y: 4) }\n}\n\
+         func sum(_ a: A) -> Int {\n  let p = a.at()\n  return p.x + p.y\n}\n\
+         func main() {\n  print(sum(A()))\n  print(sum(B()))\n}";
+    assert_eq!(run(source), "3\n7\n");
+}

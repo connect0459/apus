@@ -206,6 +206,25 @@ impl Encoder<'_> {
                     self.expr(arg);
                 }
             }
+            TExpr::Virtual {
+                cases,
+                default,
+                args,
+                ret,
+            } => {
+                self.tag(42);
+                self.usize(cases.len());
+                for (tag, callee) in cases {
+                    self.hasher.write(&tag.to_le_bytes());
+                    self.str(callee);
+                }
+                self.str(default);
+                self.ty(*ret);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
             TExpr::StructInit { ty, args } => {
                 self.tag(37);
                 self.ty(*ty);

@@ -138,6 +138,12 @@ pub enum TExpr {
         args: Vec<TExpr>,
         ret: Ty,
     },
+    Virtual {
+        cases: Vec<(i64, String)>,
+        default: String,
+        args: Vec<TExpr>,
+        ret: Ty,
+    },
     StructInit {
         ty: Ty,
         args: Vec<TExpr>,
@@ -170,7 +176,7 @@ impl TExpr {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => Ty::Int,
                 _ => Ty::Bool,
             },
-            TExpr::Call { ret, .. } => *ret,
+            TExpr::Call { ret, .. } | TExpr::Virtual { ret, .. } => *ret,
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
             | TExpr::Field { ty, .. }
@@ -297,6 +303,23 @@ impl<E> Rewriter<'_, E> {
                 TExpr::Call {
                     callee,
                     type_args,
+                    args: self.exprs(args)?,
+                    ret: (self.ty)(*ret)?,
+                }
+            }
+            TExpr::Virtual {
+                cases,
+                default,
+                args,
+                ret,
+            } => {
+                let mut renamed = Vec::with_capacity(cases.len());
+                for (tag, callee) in cases {
+                    renamed.push((*tag, (self.call)(callee.clone(), Vec::new())?.0));
+                }
+                TExpr::Virtual {
+                    cases: renamed,
+                    default: (self.call)(default.clone(), Vec::new())?.0,
                     args: self.exprs(args)?,
                     ret: (self.ty)(*ret)?,
                 }
