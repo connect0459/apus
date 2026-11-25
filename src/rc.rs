@@ -1,5 +1,6 @@
+use crate::ast::BinOp;
 use crate::sigs::Signatures;
-use crate::tir::{DROP_SLOT, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt};
+use crate::tir::{DROP_SLOT, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
 use crate::types::{StructId, Ty};
 
 const DESTROYING: i64 = 1 << 40;
@@ -49,13 +50,19 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
     }
     if let Some(layout) = sigs.struct_sig(id) {
         for (index, field) in layout.members() {
-            if matches!(field.ty(), Ty::Class(_)) {
-                body.push(TStmt::Release(TExpr::Field {
-                    base: Box::new(receiver()),
-                    index,
-                    ty: field.ty(),
-                }));
+            if !matches!(field.ty(), Ty::Class(_)) {
+                continue;
             }
+            let member = TExpr::Field {
+                base: Box::new(receiver()),
+                index,
+                ty: field.ty(),
+            };
+            body.push(if field.is_unowned() {
+                TStmt::ReleaseUnowned(member)
+            } else {
+                TStmt::Release(member)
+            });
         }
     }
     body.push(TStmt::AssignField {
@@ -63,7 +70,19 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
         index: RC_SLOT,
         value: TExpr::Int(0),
     });
-    body.push(TStmt::Free(receiver()));
+    body.push(TStmt::If {
+        cond: TExpr::Binary {
+            op: BinOp::Eq,
+            lhs: Box::new(TExpr::Field {
+                base: Box::new(receiver()),
+                index: UNOWNED_SLOT,
+                ty: Ty::Int,
+            }),
+            rhs: Box::new(TExpr::Int(0)),
+        },
+        then_body: vec![TStmt::Free(receiver())],
+        else_body: Vec::new(),
+    });
     TFunc::new(sigs.drop_name(id), 1, Ty::Void, vec![class], body)
 }
 
@@ -85,6 +104,16 @@ impl Pass<'_> {
                 .is_some_and(|sig| sig.fields().iter().any(|f| matches!(f.ty(), Ty::Class(_)))),
             _ => false,
         }
+    }
+
+    fn is_unowned_field(&self, base: Ty, index: usize) -> bool {
+        let (Ty::Struct(id) | Ty::Class(id)) = base else {
+            return false;
+        };
+        self.sigs
+            .struct_sig(id)
+            .and_then(|sig| sig.fields().get(index).map(|f| f.is_unowned()))
+            .unwrap_or(false)
     }
 
     fn new_local(&mut self, ty: Ty) -> LocalId {
@@ -226,6 +255,11 @@ impl Pass<'_> {
                 out.push(TStmt::Release(expr));
                 out.extend(self.release_temps(&temps));
             }
+            TStmt::ReleaseUnowned(expr) => {
+                let (expr, temps) = self.scoped(|p| p.expr(expr));
+                out.push(TStmt::ReleaseUnowned(expr));
+                out.extend(self.release_temps(&temps));
+            }
             TStmt::Clear(local) => out.push(TStmt::Clear(*local)),
             TStmt::Free(expr) => {
                 let (value, temps) = self.scoped(|p| p.expr(expr));
@@ -297,6 +331,10 @@ impl Pass<'_> {
             _ => None,
         }
         .unwrap_or(Ty::Int);
+        if self.is_unowned_field(base, index) {
+            self.assign_unowned_field(local, index, value, out);
+            return;
+        }
         if !self.needs_rc(field_ty) {
             let (value, temps) = self.scoped(|p| p.expr(value));
             out.push(TStmt::AssignField {
@@ -315,6 +353,42 @@ impl Pass<'_> {
         });
         out.extend(self.release_temps(&temps));
         out.push(TStmt::Release(TExpr::Field {
+            base: Box::new(TExpr::Local(local, base)),
+            index,
+            ty: field_ty,
+        }));
+        out.push(TStmt::AssignField {
+            local,
+            index,
+            value: TExpr::Local(fresh, field_ty),
+        });
+    }
+
+    fn assign_unowned_field(
+        &mut self,
+        local: LocalId,
+        index: usize,
+        value: &TExpr,
+        out: &mut Vec<TStmt>,
+    ) {
+        let base = self.locals[local.index()];
+        let field_ty = value.ty();
+        let moved = matches!(value, TExpr::Moved(_));
+        let (value, temps) = self.scoped(|p| {
+            let value = p.borrowed(value);
+            if moved {
+                value
+            } else {
+                TExpr::RetainUnowned(Box::new(value))
+            }
+        });
+        let fresh = self.new_local(field_ty);
+        out.push(TStmt::Let {
+            local: fresh,
+            init: value,
+        });
+        out.extend(self.release_temps(&temps));
+        out.push(TStmt::ReleaseUnowned(TExpr::Field {
             base: Box::new(TExpr::Local(local, base)),
             index,
             ty: field_ty,
@@ -356,7 +430,10 @@ impl Pass<'_> {
         out.push(TStmt::Return(Some(TExpr::Local(held, ty))));
     }
 
-    fn is_owned(expr: &TExpr) -> bool {
+    fn is_owned(&self, expr: &TExpr) -> bool {
+        if let TExpr::Field { base, index, .. } = expr {
+            return self.is_unowned_field(base.ty(), *index);
+        }
         matches!(
             expr,
             TExpr::New { .. }
@@ -366,13 +443,15 @@ impl Pass<'_> {
                 | TExpr::Zero(_)
                 | TExpr::Retain(_)
                 | TExpr::Moved(_)
+                | TExpr::LoadUnowned(_)
+                | TExpr::RetainUnowned(_)
         )
     }
 
     fn owned_value(&mut self, expr: &TExpr) -> TExpr {
         let ty = expr.ty();
         let value = self.expr(expr);
-        if self.needs_rc(ty) && !Self::is_owned(expr) {
+        if self.needs_rc(ty) && !self.is_owned(expr) {
             TExpr::Retain(Box::new(value))
         } else {
             value
@@ -382,7 +461,7 @@ impl Pass<'_> {
     fn borrowed(&mut self, expr: &TExpr) -> TExpr {
         let ty = expr.ty();
         let value = self.expr(expr);
-        if self.needs_rc(ty) && Self::is_owned(expr) {
+        if self.needs_rc(ty) && self.is_owned(expr) {
             let local = self.new_local(ty);
             self.temps.push(local);
             TExpr::Bind {
@@ -431,7 +510,17 @@ impl Pass<'_> {
                 args: self.owned_all(args),
             },
             TExpr::New { ty, args } => {
-                let mut args = self.owned_all(args);
+                let mut args: Vec<TExpr> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        if self.is_unowned_field(*ty, index) && !matches!(arg, TExpr::Moved(_)) {
+                            TExpr::RetainUnowned(Box::new(self.borrowed(arg)))
+                        } else {
+                            self.owned_value(arg)
+                        }
+                    })
+                    .collect();
                 if let Ty::Class(id) = ty {
                     if !self.created.contains(id) {
                         self.created.push(*id);
@@ -442,11 +531,18 @@ impl Pass<'_> {
                 }
                 TExpr::New { ty: *ty, args }
             }
-            TExpr::Field { base, index, ty } => TExpr::Field {
-                base: Box::new(self.borrowed(base)),
-                index: *index,
-                ty: *ty,
-            },
+            TExpr::Field { base, index, ty } => {
+                let field = TExpr::Field {
+                    base: Box::new(self.borrowed(base)),
+                    index: *index,
+                    ty: *ty,
+                };
+                if self.is_unowned_field(base.ty(), *index) {
+                    TExpr::LoadUnowned(Box::new(field))
+                } else {
+                    field
+                }
+            }
             TExpr::Unary { op, expr } => TExpr::Unary {
                 op: *op,
                 expr: Box::new(self.borrowed(expr)),
@@ -456,7 +552,16 @@ impl Pass<'_> {
                 lhs: Box::new(self.borrowed(lhs)),
                 rhs: Box::new(self.borrowed(rhs)),
             },
-            TExpr::Moved(inner) => TExpr::Moved(Box::new(self.expr(inner))),
+            TExpr::Moved(inner) => TExpr::Moved(Box::new(match &**inner {
+                TExpr::Field { base, index, ty } => TExpr::Field {
+                    base: Box::new(self.borrowed(base)),
+                    index: *index,
+                    ty: *ty,
+                },
+                other => self.expr(other),
+            })),
+            TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner))),
+            TExpr::LoadUnowned(inner) => TExpr::LoadUnowned(Box::new(self.expr(inner))),
             TExpr::Retain(inner) => TExpr::Retain(Box::new(self.expr(inner))),
             TExpr::Bind { local, init } => TExpr::Bind {
                 local: *local,

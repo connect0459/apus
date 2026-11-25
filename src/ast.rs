@@ -340,6 +340,7 @@ pub struct Field {
     name: String,
     mutable: bool,
     ty: TypeName,
+    unowned: bool,
 }
 
 impl Field {
@@ -348,7 +349,17 @@ impl Field {
             name,
             mutable,
             ty: ty.into(),
+            unowned: false,
         }
+    }
+
+    pub fn as_unowned(mut self) -> Self {
+        self.unowned = true;
+        self
+    }
+
+    pub fn is_unowned(&self) -> bool {
+        self.unowned
     }
 
     pub fn name(&self) -> &str {

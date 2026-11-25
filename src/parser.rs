@@ -19,9 +19,10 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 21] = [
-    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "case", "switch",
-    "default", "var", "let", "if", "else", "while", "for", "in", "return", "true", "false",
+const KEYWORDS: [&str; 22] = [
+    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "case",
+    "switch", "default", "var", "let", "if", "else", "while", "for", "in", "return", "true",
+    "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -340,6 +341,10 @@ impl Parser<'_> {
             if self.eat_punct("}") {
                 break;
             }
+            let unowned = self.eat_keyword("unowned");
+            if unowned && !class {
+                return self.fail("'unowned' applies only to a member of a class");
+            }
             let mutable = if self.eat_keyword("var") {
                 true
             } else if self.eat_keyword("let") {
@@ -350,7 +355,8 @@ impl Parser<'_> {
             let field_name = self.name()?;
             self.expect_punct(":")?;
             let ty = self.type_ref()?;
-            fields.push(Field::new(field_name, mutable, ty));
+            let field = Field::new(field_name, mutable, ty);
+            fields.push(if unowned { field.as_unowned() } else { field });
             self.end_of_statement()?;
         }
         let decl = StructDecl::new(line, name, fields).with_generics(generics);
@@ -868,6 +874,26 @@ mod tests {
     #[test]
     fn override_must_be_followed_by_func() {
         assert!(try_parse("override init() { }").is_err());
+    }
+
+    #[test]
+    fn unowned_marks_a_class_member() {
+        let Decl::Struct(class) = try_parse("class C { unowned var p: P\n var n: Int }").unwrap()
+        else {
+            panic!("expected a class");
+        };
+        assert!(class.fields()[0].is_unowned());
+        assert!(!class.fields()[1].is_unowned());
+    }
+
+    #[test]
+    fn unowned_is_rejected_in_a_struct() {
+        assert!(try_parse("struct S { unowned var p: P }").is_err());
+    }
+
+    #[test]
+    fn unowned_must_be_followed_by_var_or_let() {
+        assert!(try_parse("class C { unowned p: P }").is_err());
     }
 
     #[test]

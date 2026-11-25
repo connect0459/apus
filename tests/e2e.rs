@@ -1918,3 +1918,90 @@ fn assigning_a_struct_variable_releases_the_instance_it_held() {
     );
     assert_eq!(run(&source), "-1\n10\n-2\n");
 }
+
+const FAMILY: &str = "class Parent {\n  var id: Int\n  deinit { print(0 - self.id) }\n}\nclass Child {\n  unowned var parent: Parent\n  var id: Int\n  deinit { print(0 - self.id) }\n}\n";
+
+fn family(body: &str) -> String {
+    format!("{FAMILY}{body}")
+}
+
+#[test]
+fn an_unowned_member_reads_the_instance_it_refers_to() {
+    let source = family(
+        "func main() {\n  let p = Parent(id: 1)\n  let c = Child(parent: p, id: 2)\n  print(c.parent.id)\n}",
+    );
+    assert_eq!(run(&source), "1\n-2\n-1\n");
+}
+
+#[test]
+fn an_unowned_member_does_not_keep_its_instance_alive() {
+    let source =
+        family("func main() {\n  let c = Child(parent: Parent(id: 1), id: 2)\n  print(10)\n}");
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}
+
+#[test]
+fn reading_an_unowned_member_after_its_instance_died_traps() {
+    let source = family(
+        "func make() -> Child {\n  let p = Parent(id: 1)\n  return Child(parent: p, id: 2)\n}\nfunc main() {\n  let c = make()\n  print(c.parent.id)\n}",
+    );
+    run_expecting_a_crash(&source);
+}
+
+#[test]
+fn an_unowned_reference_to_a_dead_instance_can_be_released_without_reading_it() {
+    let source = family(
+        "func make() -> Child {\n  let p = Parent(id: 1)\n  return Child(parent: p, id: 2)\n}\nfunc main() {\n  let c = make()\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
+}
+
+#[test]
+fn assigning_an_unowned_member_switches_the_instance_it_refers_to() {
+    let source = family(
+        "func main() {\n  let a = Parent(id: 1)\n  let b = Parent(id: 3)\n  let c = Child(parent: a, id: 2)\n  c.parent = b\n  print(c.parent.id)\n}",
+    );
+    assert_eq!(run(&source), "3\n-2\n-3\n-1\n");
+}
+
+#[test]
+fn a_variable_initialized_from_an_unowned_member_keeps_the_instance_alive() {
+    let source = family(
+        "func make() -> Child {\n  let p = Parent(id: 1)\n  return Child(parent: p, id: 2)\n}\nfunc main() {\n  let p = Parent(id: 5)\n  let c = Child(parent: p, id: 6)\n  let q = c.parent\n  print(q.id)\n}",
+    );
+    assert_eq!(run(&source), "5\n-6\n-5\n");
+}
+
+#[test]
+fn an_unowned_member_can_be_passed_to_a_function() {
+    let source = family(
+        "func read(_ p: Parent) -> Int { return p.id }\nfunc main() {\n  let p = Parent(id: 4)\n  let c = Child(parent: p, id: 6)\n  print(read(c.parent))\n}",
+    );
+    assert_eq!(run(&source), "4\n-6\n-4\n");
+}
+
+#[test]
+fn an_unowned_member_is_inherited_by_subclasses() {
+    let source = "class Parent {\n  var id: Int\n}\nclass Child {\n  unowned let parent: Parent\n}\nclass Grandchild: Child {\n  var n: Int\n}\n\
+         func main() {\n  let p = Parent(id: 7)\n  let g = Grandchild(parent: p, n: 1)\n  print(g.parent.id)\n}";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn an_unowned_member_is_released_by_an_initializer_that_sets_it() {
+    let source = "class Parent {\n  var id: Int\n}\nclass Child {\n  unowned var parent: Parent\n  init(of p: Parent) { self.parent = p }\n}\n\
+         func main() {\n  let p = Parent(id: 8)\n  let c = Child(of: p)\n  print(c.parent.id)\n}";
+    assert_eq!(run(source), "8\n");
+}
+
+#[test]
+fn unowned_is_rejected_on_a_struct_member() {
+    let source = "class P { var x: Int }\nstruct S {\n  unowned var p: P\n}\nfunc main() { }";
+    assert!(build_error(source).contains("unowned"));
+}
+
+#[test]
+fn unowned_is_rejected_on_a_member_that_is_not_a_class() {
+    let source = "class C {\n  unowned var n: Int\n}\nfunc main() { }";
+    assert!(build_error(source).contains("unowned"));
+}

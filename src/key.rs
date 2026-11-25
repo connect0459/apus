@@ -154,6 +154,10 @@ impl Encoder<'_> {
                 self.tag(21);
                 self.expr(expr);
             }
+            TStmt::ReleaseUnowned(expr) => {
+                self.tag(22);
+                self.expr(expr);
+            }
         }
     }
 
@@ -284,6 +288,14 @@ impl Encoder<'_> {
             TExpr::FuncAddr(name) => {
                 self.tag(46);
                 self.str(name);
+            }
+            TExpr::RetainUnowned(inner) => {
+                self.tag(47);
+                self.expr(inner);
+            }
+            TExpr::LoadUnowned(inner) => {
+                self.tag(48);
+                self.expr(inner);
             }
         }
     }

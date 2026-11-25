@@ -35,7 +35,7 @@ fn identity(generics: &[String]) -> Vec<Ty> {
     (0..generics.len()).map(Ty::Param).collect()
 }
 
-const HEADER_FIELDS: [&str; 3] = ["$class", "$rc", "$drop"];
+const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
 
 pub type CResult<T> = Result<T, CheckError>;
 
@@ -101,6 +101,7 @@ pub struct FieldSig {
     name: String,
     ty: Ty,
     mutable: bool,
+    unowned: bool,
 }
 
 impl FieldSig {
@@ -114,6 +115,10 @@ impl FieldSig {
 
     pub fn is_mutable(&self) -> bool {
         self.mutable
+    }
+
+    pub fn is_unowned(&self) -> bool {
+        self.unowned
     }
 
     pub fn is_hidden(&self) -> bool {
@@ -680,6 +685,7 @@ impl Signatures {
                 name: (*name).to_string(),
                 ty: Ty::Int,
                 mutable: true,
+                unowned: false,
             }));
             if let Some(superclass) = decl.superclass() {
                 let id = self.superclass_id(decl, superclass, at)?;
@@ -707,10 +713,21 @@ impl Signatures {
                     format!("duplicate field '{}' in '{name}'", field.name()),
                 ));
             }
+            if field.is_unowned() && !ty.is_class() {
+                return Err(CheckError::at(
+                    at,
+                    format!(
+                        "'unowned' needs a class type, but '{}' in '{name}' is {}",
+                        field.name(),
+                        self.display(ty, scope)
+                    ),
+                ));
+            }
             fields.push(FieldSig {
                 name: field.name().to_string(),
                 ty,
                 mutable: field.is_mutable(),
+                unowned: field.is_unowned(),
             });
         }
         Ok((fields, parent))
@@ -769,6 +786,7 @@ impl Signatures {
                     TExpr::Int(tag),
                     TExpr::Int(1),
                     TExpr::FuncAddr(self.drop_name(id)),
+                    TExpr::Int(0),
                 ];
                 let args = header.into_iter().chain(members).collect();
                 TExpr::New { ty, args }
@@ -825,12 +843,14 @@ impl Signatures {
                 name: "tag".to_string(),
                 ty: Ty::Int,
                 mutable: false,
+                unowned: false,
             }];
             for slot in 0..widest {
                 fields.push(FieldSig {
                     name: format!("payload{slot}"),
                     ty: Ty::Int,
                     mutable: false,
+                    unowned: false,
                 });
             }
             let layout = StructId::new(instances.structs.len());
@@ -929,6 +949,7 @@ impl Signatures {
                 name: "value".to_string(),
                 ty: Ty::Int,
                 mutable: true,
+                unowned: false,
             }],
         }));
         instances.struct_origin.push(Origin::EnumCell(id));

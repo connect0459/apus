@@ -22,12 +22,13 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
-use crate::tir::{DROP_SLOT, RC_SLOT, TExpr, TFunc, TStmt, TStruct};
+use crate::tir::{DROP_SLOT, RC_SLOT, TExpr, TFunc, TStmt, TStruct, UNOWNED_SLOT};
 use crate::types::Ty;
 
 const VARIADIC_PADDING: usize = 7;
 const FIELD_SIZE: u32 = 8;
 const UNREACHABLE: TrapCode = TrapCode::unwrap_user(1);
+const UNOWNED_DEAD: TrapCode = TrapCode::unwrap_user(2);
 const NAMESPACE_FUNC: u32 = 0;
 const NAMESPACE_DATA: u32 = 1;
 
@@ -583,10 +584,12 @@ impl Emitter<'_, '_> {
             }
             TStmt::Free(expr) => {
                 let value = self.value(expr)?;
-                let mut sig = Signature::new(self.call_conv);
-                sig.params.push(AbiParam::new(types::I64));
-                let free = self.import_func("free", sig, false);
-                self.builder.ins().call(free, &[value]);
+                self.free_pointer(value);
+                Ok(false)
+            }
+            TStmt::ReleaseUnowned(expr) => {
+                let value = self.value(expr)?;
+                self.release_unowned(value)?;
                 Ok(false)
             }
         }
@@ -615,6 +618,63 @@ impl Emitter<'_, '_> {
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
         Ok(())
+    }
+
+    fn free_pointer(&mut self, value: Value) {
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        let free = self.import_func("free", sig, false);
+        self.builder.ins().call(free, &[value]);
+    }
+
+    fn retain_unowned(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let offset = field_offset(UNOWNED_SLOT);
+            let count = this.builder.ins().load(types::I64, flags, value, offset);
+            let next = this.builder.ins().iadd_imm_s(count, 1);
+            this.builder.ins().store(flags, next, value, offset);
+            Ok(())
+        })
+    }
+
+    fn release_unowned(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let offset = field_offset(UNOWNED_SLOT);
+            let count = this.builder.ins().load(types::I64, flags, value, offset);
+            let next = this.builder.ins().iadd_imm_s(count, -1);
+            this.builder.ins().store(flags, next, value, offset);
+            let none_left = this.builder.ins().icmp_imm_s(IntCC::Equal, next, 0);
+            let check = this.builder.create_block();
+            let release = this.builder.create_block();
+            let done = this.builder.create_block();
+            this.builder.ins().brif(none_left, check, &[], done, &[]);
+            this.builder.switch_to_block(check);
+            let strong = this
+                .builder
+                .ins()
+                .load(types::I64, flags, value, field_offset(RC_SLOT));
+            let dead = this.builder.ins().icmp_imm_s(IntCC::Equal, strong, 0);
+            this.builder.ins().brif(dead, release, &[], done, &[]);
+            this.builder.switch_to_block(release);
+            this.free_pointer(value);
+            this.builder.ins().jump(done, &[]);
+            this.builder.switch_to_block(done);
+            Ok(())
+        })
+    }
+
+    fn load_unowned(&mut self, value: Value) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        self.guarded(value, |this| {
+            let offset = field_offset(RC_SLOT);
+            let count = this.builder.ins().load(types::I64, flags, value, offset);
+            this.builder.ins().trapz(count, UNOWNED_DEAD);
+            let next = this.builder.ins().iadd_imm_s(count, 1);
+            this.builder.ins().store(flags, next, value, offset);
+            Ok(())
+        })
     }
 
     fn retain(&mut self, value: Value, ty: Ty) -> GResult<()> {
@@ -905,6 +965,16 @@ impl Emitter<'_, '_> {
                 value
             }
             TExpr::Moved(inner) => return self.expr(inner),
+            TExpr::RetainUnowned(inner) => {
+                let value = self.value(inner)?;
+                self.retain_unowned(value)?;
+                value
+            }
+            TExpr::LoadUnowned(inner) => {
+                let value = self.value(inner)?;
+                self.load_unowned(value)?;
+                value
+            }
             TExpr::Bind { local, init } => {
                 let value = self.value(init)?;
                 self.builder.def_var(self.vars[local.index()], value);

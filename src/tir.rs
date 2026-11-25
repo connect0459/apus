@@ -4,7 +4,8 @@ use crate::types::Ty;
 pub const TAG_SLOT: usize = 0;
 pub const RC_SLOT: usize = 1;
 pub const DROP_SLOT: usize = 2;
-pub const HEADER_SLOTS: usize = 3;
+pub const UNOWNED_SLOT: usize = 3;
+pub const HEADER_SLOTS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalId(usize);
@@ -123,6 +124,7 @@ pub enum TStmt {
     Release(TExpr),
     Clear(LocalId),
     Free(TExpr),
+    ReleaseUnowned(TExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +179,8 @@ pub enum TExpr {
         init: Box<TExpr>,
     },
     FuncAddr(String),
+    RetainUnowned(Box<TExpr>),
+    LoadUnowned(Box<TExpr>),
 }
 
 impl TExpr {
@@ -192,7 +196,10 @@ impl TExpr {
                 _ => Ty::Bool,
             },
             TExpr::Call { ret, .. } | TExpr::Virtual { ret, .. } => *ret,
-            TExpr::Retain(inner) | TExpr::Moved(inner) => inner.ty(),
+            TExpr::Retain(inner)
+            | TExpr::Moved(inner)
+            | TExpr::RetainUnowned(inner)
+            | TExpr::LoadUnowned(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::FuncAddr(_) => Ty::Int,
             TExpr::StructInit { ty, .. }
@@ -290,6 +297,7 @@ impl<E> Rewriter<'_, E> {
             TStmt::Release(expr) => TStmt::Release(self.expr(expr)?),
             TStmt::Clear(local) => TStmt::Clear(*local),
             TStmt::Free(expr) => TStmt::Free(self.expr(expr)?),
+            TStmt::ReleaseUnowned(expr) => TStmt::ReleaseUnowned(self.expr(expr)?),
         })
     }
 
@@ -370,6 +378,8 @@ impl<E> Rewriter<'_, E> {
                 init: Box::new(self.expr(init)?),
             },
             TExpr::FuncAddr(_) => expr.clone(),
+            TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner)?)),
+            TExpr::LoadUnowned(inner) => TExpr::LoadUnowned(Box::new(self.expr(inner)?)),
         })
     }
 }

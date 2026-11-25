@@ -500,3 +500,33 @@ fn adding_an_override_checks_every_function_again() {
     assert!(report.checked() > 1);
     assert_eq!(project.run(), "3\n");
 }
+
+fn tracked_program(body: i64) -> String {
+    format!(
+        "class Tracked {{\n  var id: Int\n  deinit {{ print(0 - self.id) }}\n}}\n\
+         func other() -> Int {{ return {body} }}\n\
+         func main() {{\n  let t = Tracked(id: 1)\n  print(other())\n}}\n"
+    )
+}
+
+#[test]
+fn editing_a_function_that_never_touches_a_class_leaves_the_class_entries_cached() {
+    let project = Project::new();
+    project.build(&tracked_program(5));
+    assert_eq!(project.run(), "5\n-1\n");
+    let report = project.build(&tracked_program(6));
+    assert_eq!(report.checked(), 1);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "6\n-1\n");
+}
+
+#[test]
+fn editing_a_deinit_body_compiles_only_that_deinit() {
+    let project = Project::new();
+    project.build(&tracked_program(5));
+    let edited = tracked_program(5).replace("0 - self.id", "self.id");
+    let report = project.build(&edited);
+    assert_eq!(report.checked(), 1);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "5\n1\n");
+}
