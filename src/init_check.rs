@@ -348,6 +348,7 @@ impl Scan<'_> {
             ExprKind::OptionalChain { subject, link } => {
                 self.expr_uses_self(subject) || self.expr_uses_self(link)
             }
+            ExprKind::Cast { expr, .. } => self.expr_uses_self(expr),
             ExprKind::ChainValue => false,
             ExprKind::Nil
             | ExprKind::Int(_)

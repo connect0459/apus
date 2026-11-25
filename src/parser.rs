@@ -19,18 +19,19 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 25] = [
+const KEYWORDS: [&str; 27] = [
     "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "weak",
-    "nil", "guard", "case", "switch", "default", "var", "let", "if", "else", "while", "for", "in",
-    "return", "true", "false",
+    "nil", "guard", "as", "is", "case", "switch", "default", "var", "let", "if", "else", "while",
+    "for", "in", "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
 const LEVEL_COALESCE: usize = 3;
-const LEVEL_RANGE: usize = 4;
-const LEVEL_UNARY: usize = 7;
+const LEVEL_CAST: usize = 4;
+const LEVEL_RANGE: usize = 5;
+const LEVEL_UNARY: usize = 8;
 
-const BINARY_LEVELS: [&[(&str, BinOp)]; 7] = [
+const BINARY_LEVELS: [&[(&str, BinOp)]; 8] = [
     &[("||", BinOp::Or)],
     &[("&&", BinOp::And)],
     &[
@@ -43,6 +44,7 @@ const BINARY_LEVELS: [&[(&str, BinOp)]; 7] = [
         ("<", BinOp::Lt),
         (">", BinOp::Gt),
     ],
+    &[],
     &[],
     &[],
     &[("+", BinOp::Add), ("-", BinOp::Sub)],
@@ -690,6 +692,9 @@ impl Parser<'_> {
         if level == LEVEL_COALESCE {
             return self.coalesce();
         }
+        if level == LEVEL_CAST {
+            return self.cast();
+        }
         if level == LEVEL_RANGE {
             return self.range();
         }
@@ -733,6 +738,42 @@ impl Parser<'_> {
                     rhs: Box::new(rhs),
                 },
             ));
+        }
+        Ok(lhs)
+    }
+
+    fn cast(&mut self) -> PResult<Expr> {
+        let mut lhs = self.binary(LEVEL_CAST + 1)?;
+        while self.on_same_line() {
+            let line = lhs.line();
+            let (forced, checked) = if self.eat_keyword("is") {
+                (false, false)
+            } else if self.eat_keyword("as") {
+                if self.eat_punct("?") {
+                    (false, true)
+                } else if self.eat_punct("!") {
+                    (true, true)
+                } else {
+                    return self.fail("expected '?' or '!' after 'as'");
+                }
+            } else {
+                break;
+            };
+            let name = self.name()?;
+            let args = if self.is_punct("<") {
+                self.type_args()?
+            } else {
+                Vec::new()
+            };
+            lhs = Expr::new(
+                line,
+                ExprKind::Cast {
+                    expr: Box::new(lhs),
+                    ty: TypeRef::new(name, args),
+                    forced,
+                    checked,
+                },
+            );
         }
         Ok(lhs)
     }
@@ -1077,6 +1118,49 @@ mod tests {
     #[test]
     fn guard_needs_an_else_body() {
         assert!(try_parse("func f() { guard x > 0 { } }").is_err());
+    }
+
+    #[test]
+    fn casts_bind_tighter_than_nil_coalescing_and_looser_than_range() {
+        let e = expr("a as? B ?? c");
+        let ExprKind::Coalesce { lhs, .. } = e.kind() else {
+            panic!("expected a coalescing");
+        };
+        assert!(matches!(
+            lhs.kind(),
+            ExprKind::Cast {
+                forced: false,
+                checked: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn is_as_question_and_as_exclamation_differ_in_their_flags() {
+        for (src, forced, checked) in [
+            ("a is B", false, false),
+            ("a as? B", false, true),
+            ("a as! B", true, true),
+        ] {
+            let e = expr(src);
+            let ExprKind::Cast {
+                forced: f,
+                checked: c,
+                ty,
+                ..
+            } = e.kind()
+            else {
+                panic!("expected a cast");
+            };
+            assert_eq!((*f, *c), (forced, checked), "{src}");
+            assert_eq!(ty.name(), "B");
+        }
+    }
+
+    #[test]
+    fn as_needs_a_question_mark_or_an_exclamation_mark() {
+        assert!(try_parse("func f() { let x = a as B }").is_err());
     }
 
     #[test]

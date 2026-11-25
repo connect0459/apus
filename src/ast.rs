@@ -568,6 +568,12 @@ pub enum ExprKind {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    Cast {
+        expr: Box<Expr>,
+        ty: TypeRef,
+        forced: bool,
+        checked: bool,
+    },
     OptionalChain {
         subject: Box<Expr>,
         link: Box<Expr>,

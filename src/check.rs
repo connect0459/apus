@@ -8,7 +8,7 @@ use crate::init_check::{InitScope, check_enum_initialization, check_initializati
 use crate::sigs::{
     CResult, EnumSig, FieldSig, FuncSig, NONE_CASE, PRINT, ParamSig, SOME_CASE, scope_of,
 };
-use crate::tir::{LocalId, TExpr, TFunc, TStmt};
+use crate::tir::{LocalId, TAG_SLOT, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
 const SUPER: &str = "super";
@@ -265,6 +265,139 @@ impl FnCx<'_> {
             index,
             ty,
         })
+    }
+
+    fn instance_test(&mut self, subject: TExpr, target: Ty) -> (TExpr, LocalId) {
+        let object = self.temp(subject.ty());
+        let tag = self.temp(Ty::Int);
+        let tags = self.sigs.class_tags(target);
+        let first = tags.first().copied().unwrap_or(-1);
+        let mut condition = TExpr::Binary {
+            op: BinOp::Eq,
+            lhs: Box::new(TExpr::Bind {
+                local: tag,
+                init: Box::new(TExpr::Field {
+                    base: Box::new(TExpr::Bind {
+                        local: object,
+                        init: Box::new(subject),
+                    }),
+                    index: TAG_SLOT,
+                    ty: Ty::Int,
+                }),
+            }),
+            rhs: Box::new(TExpr::Int(first)),
+        };
+        for other in tags.iter().skip(1) {
+            condition = TExpr::Binary {
+                op: BinOp::Or,
+                lhs: Box::new(condition),
+                rhs: Box::new(TExpr::Binary {
+                    op: BinOp::Eq,
+                    lhs: Box::new(TExpr::Local(tag, Ty::Int)),
+                    rhs: Box::new(TExpr::Int(*other)),
+                }),
+            };
+        }
+        (condition, object)
+    }
+
+    fn cast(
+        &mut self,
+        line: u32,
+        expr: &Expr,
+        ty: &TypeRef,
+        forced: bool,
+        checked: bool,
+    ) -> CResult<TExpr> {
+        let value = self.value(expr)?;
+        let target = self.sigs.resolve_type(ty, &self.scope, line)?;
+        if !target.is_class() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'is' and 'as' cast class references, but {} is not a class",
+                    self.name_of(target)
+                ),
+            ));
+        }
+        let source = value.ty();
+        let (class, through_optional) = if source.is_class() {
+            (source, false)
+        } else if let Some(inner) = self.sigs.unwrapped(source).filter(|t| t.is_class()) {
+            (inner, true)
+        } else {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'is' and 'as' cast class references, but found {}",
+                    self.name_of(source)
+                ),
+            ));
+        };
+        if !self.sigs.is_subclass(class, target) && !self.sigs.is_subclass(target, class) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "cannot cast {} to {}: the classes are unrelated",
+                    self.name_of(class),
+                    self.name_of(target)
+                ),
+            ));
+        }
+        let optional_target = self.sigs.optional_of(target)?;
+        let result = if through_optional {
+            let held = self.temp(source);
+            let payload = TExpr::Field {
+                base: Box::new(TExpr::Local(held, source)),
+                index: 1,
+                ty: class,
+            };
+            let present = Self::is_some(held, value);
+            let inner = self.cast_class(payload, target, optional_target, checked);
+            let otherwise = if checked {
+                self.none_of(optional_target)
+            } else {
+                TExpr::Bool(false)
+            };
+            TExpr::Select {
+                cond: Box::new(present),
+                ty: otherwise.ty(),
+                then: Box::new(inner),
+                otherwise: Box::new(otherwise),
+            }
+        } else {
+            self.cast_class(value, target, optional_target, checked)
+        };
+        Ok(if forced {
+            TExpr::Unwrap {
+                base: Box::new(result),
+                ty: target,
+            }
+        } else {
+            result
+        })
+    }
+
+    fn cast_class(
+        &mut self,
+        subject: TExpr,
+        target: Ty,
+        optional_target: Ty,
+        checked: bool,
+    ) -> TExpr {
+        let (condition, object) = self.instance_test(subject, target);
+        if !checked {
+            return condition;
+        }
+        TExpr::Select {
+            cond: Box::new(condition),
+            then: Box::new(TExpr::StructInit {
+                ty: optional_target,
+                args: vec![TExpr::Int(SOME_CASE as i64), TExpr::Local(object, target)],
+            }),
+            otherwise: Box::new(self.none_of(optional_target)),
+            ty: optional_target,
+        }
     }
 
     fn optional_chain(&mut self, line: u32, subject: &Expr) -> CResult<(LocalId, TExpr, TExpr)> {
@@ -990,7 +1123,8 @@ impl FnCx<'_> {
                 if let Some(annotated) = annotated {
                     value = self.coerce(line, annotated, value)?;
                 }
-                let local = self.declare(line, name, value.ty(), *mutable)?;
+                let declared = annotated.unwrap_or_else(|| value.ty());
+                let local = self.declare(line, name, declared, *mutable)?;
                 Ok(TStmt::Let { local, init: value })
             }
             StmtKind::Assign { target, op, value } => self.assign(line, target, *op, value),
@@ -1455,6 +1589,12 @@ impl FnCx<'_> {
                 self.field_of(line, base, name)
             }
             ExprKind::Coalesce { lhs, rhs } => self.coalesce(line, lhs, rhs),
+            ExprKind::Cast {
+                expr,
+                ty,
+                forced,
+                checked,
+            } => self.cast(line, expr, ty, *forced, *checked),
             ExprKind::OptionalChain { subject, link } => {
                 let (held, value, payload) = self.optional_chain(line, subject)?;
                 let condition = Self::is_some(held, value);

@@ -495,6 +495,20 @@ impl Signatures {
         None
     }
 
+    pub fn class_tags(&self, target: Ty) -> Vec<i64> {
+        let Ty::Class(root) = target else {
+            return Vec::new();
+        };
+        let mut ids: Vec<StructId> = self.instances.borrow().superclass.keys().copied().collect();
+        ids.push(root);
+        ids.sort_by_key(|id| id.index());
+        ids.dedup();
+        ids.into_iter()
+            .filter(|id| self.is_subclass(Ty::Class(*id), target))
+            .map(|id| i64::try_from(id.index()).unwrap_or(i64::MAX))
+            .collect()
+    }
+
     pub fn dispatch_cases(&self, ty: Ty, name: &str) -> Vec<(i64, String)> {
         let Some(default) = self.resolve_method(ty, name) else {
             return Vec::new();

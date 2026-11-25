@@ -2676,3 +2676,108 @@ fn an_early_exit_from_guard_releases_what_was_declared_before_it() {
     );
     assert_eq!(run(&source), "-1\n0\n5\n-1\n1\n");
 }
+
+const PETS: &str = "class Animal {\n  var legs: Int\n}\nclass Dog: Animal {\n  var tricks: Int\n}\nclass Puppy: Dog {\n  var age: Int\n}\nclass Cat: Animal {\n  var lives: Int\n}\n";
+
+fn pets(body: &str) -> String {
+    format!("{PETS}{body}")
+}
+
+#[test]
+fn is_tests_the_class_of_an_instance_and_its_superclasses() {
+    let source = pets(
+        "func main() {\n  let d: Animal = Dog(legs: 4, tricks: 2)\n  let c: Animal = Cat(legs: 4, lives: 9)\n  print(d is Dog)\n  print(d is Cat)\n  print(c is Cat)\n  print(d is Animal)\n}",
+    );
+    assert_eq!(run(&source), "true\nfalse\ntrue\ntrue\n");
+}
+
+#[test]
+fn is_accepts_instances_of_a_subclass_of_the_tested_class() {
+    let source = pets(
+        "func main() {\n  let p: Animal = Puppy(legs: 4, tricks: 1, age: 1)\n  print(p is Dog)\n  print(p is Puppy)\n  print(p is Cat)\n}",
+    );
+    assert_eq!(run(&source), "true\ntrue\nfalse\n");
+}
+
+#[test]
+fn as_question_yields_the_instance_or_nil() {
+    let source = pets(
+        "func main() {\n  let a: Animal = Dog(legs: 4, tricks: 7)\n  let b: Animal = Cat(legs: 4, lives: 9)\n  print(a as? Dog == nil)\n  print((b as? Dog) == nil)\n  print((a as? Dog)!.tricks)\n}",
+    );
+    assert_eq!(run(&source), "false\ntrue\n7\n");
+}
+
+#[test]
+fn as_question_works_with_if_let_and_chaining() {
+    let source = pets(
+        "func tricks(_ a: Animal) -> Int {\n  if let d = a as? Dog {\n    return d.tricks\n  }\n  return 0 - 1\n}\nfunc main() {\n  print(tricks(Dog(legs: 4, tricks: 3)))\n  print(tricks(Cat(legs: 4, lives: 9)))\n  let a: Animal = Dog(legs: 4, tricks: 5)\n  print((a as? Dog)?.tricks ?? 0)\n  print((a as? Cat)?.lives ?? 0)\n}",
+    );
+    assert_eq!(run(&source), "3\n-1\n5\n0\n");
+}
+
+#[test]
+fn as_exclamation_returns_the_instance_or_traps() {
+    let ok = pets(
+        "func main() {\n  let a: Animal = Dog(legs: 4, tricks: 7)\n  let d = a as! Dog\n  print(d.tricks)\n}",
+    );
+    assert_eq!(run(&ok), "7\n");
+    let bad = pets(
+        "func main() {\n  let a: Animal = Cat(legs: 4, lives: 9)\n  let d = a as! Dog\n  print(d.tricks)\n}",
+    );
+    run_expecting_a_crash(&bad);
+}
+
+#[test]
+fn a_cast_to_the_class_of_a_subclass_instance_accepts_deeper_instances() {
+    let source = pets(
+        "func main() {\n  let p: Animal = Puppy(legs: 4, tricks: 1, age: 2)\n  let d = p as! Dog\n  print(d.tricks)\n  let u = p as! Puppy\n  print(u.age)\n}",
+    );
+    assert_eq!(run(&source), "1\n2\n");
+}
+
+#[test]
+fn a_cast_up_to_a_superclass_always_succeeds() {
+    let source = pets(
+        "func main() {\n  let d = Dog(legs: 4, tricks: 7)\n  print((d as? Animal)!.legs)\n  print(d is Animal)\n}",
+    );
+    assert_eq!(run(&source), "4\ntrue\n");
+}
+
+#[test]
+fn a_cast_looks_through_an_optional_source() {
+    let source = pets(
+        "func main() {\n  let a: Animal? = Dog(legs: 4, tricks: 7)\n  let b: Animal? = Cat(legs: 4, lives: 9)\n  let n: Animal? = nil\n  print(a is Dog)\n  print(b is Dog)\n  print(n is Dog)\n  print((a as? Dog)!.tricks)\n  print((b as? Dog) == nil)\n  print((n as? Dog) == nil)\n}",
+    );
+    assert_eq!(run(&source), "true\nfalse\nfalse\n7\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_cast_result_keeps_the_instance_alive() {
+    let source = "class Base {\n  var id: Int\n  deinit { print(0 - self.id) }\n}\nclass Derived: Base {\n  var n: Int\n}\nfunc main() {\n  var a: Base? = Derived(id: 1, n: 2)\n  let d = a as? Derived\n  a = nil\n  print(10)\n  print(d!.n)\n}";
+    assert_eq!(run(source), "10\n2\n-1\n");
+}
+
+#[test]
+fn a_failed_cast_creates_nothing_to_release() {
+    let source = "class Base {\n  var id: Int\n  deinit { print(0 - self.id) }\n}\nclass A: Base {\n  var n: Int\n}\nclass B: Base {\n  var m: Int\n}\nfunc main() {\n  let x: Base = A(id: 1, n: 2)\n  let y = x as? B\n  print(y == nil)\n}";
+    assert_eq!(run(source), "true\n-1\n");
+}
+
+#[test]
+fn is_works_as_a_condition_and_dispatch_still_follows_the_instance() {
+    let source = "class Shape {\n  func area() -> Int { return 1 }\n}\nclass Square: Shape {\n  override func area() -> Int { return 4 }\n}\nfunc main() {\n  let s: Shape = Square()\n  if s is Square {\n    print(s.area())\n  }\n  print((s as! Square).area())\n}";
+    assert_eq!(run(source), "4\n4\n");
+}
+
+#[test]
+fn a_cast_between_unrelated_classes_is_rejected() {
+    let source = "class A { var x: Int }\nclass B { var y: Int }\nfunc main() {\n  let a = A(x: 1)\n  print(a is B)\n}";
+    assert!(build_error(source).contains("unrelated"));
+}
+
+#[test]
+fn a_cast_needs_a_class_on_both_sides() {
+    assert!(build_error("func main() {\n  let n = 1\n  print(n is Int)\n}").contains("class"));
+    let target = "class A { var x: Int }\nfunc main() {\n  let a = A(x: 1)\n  print(a is Int)\n}";
+    assert!(build_error(target).contains("class"));
+}
