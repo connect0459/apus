@@ -26,6 +26,10 @@
   - [x] Simple class: reference semantics, memberwise init, mutable members, generic classes
   - [x] Reference counting for classes, with `deinit` and `unowned` members (see the reference counting decision)
   - [x] Optionals (`T?`, `nil`, `== nil`, `!`, `??`, `if let`, `?.`), structs as members of structs and classes, and `weak` class members (see the optional decision)
+  - [ ] Optional chaining that continues past the first `?.` (`a?.b.c`, `a?.b.m()`, `a?.b!`): Swift short-circuits the rest of the postfix chain and wraps the result once
+  - [ ] `if var`, `while let` and `guard let` (a binding that stays in scope after the `guard`; the `else` body must leave the scope)
+  - [ ] Patterns on optionals in `switch` (`case .some(let v)`, `case .none`): they already work through the enum machinery, so this needs tests and a note, not code
+  - [ ] Downcasts: `as?`, `as!` and `is` on class references, by comparing the class tag with the target class and its subclasses
   - [x] Methods and `mutating` methods on structs, classes and enums; `init` on structs and classes with definite initialization
   - [x] Methods and initializers in generic types
   - [x] Implicit `self` for member reads, member assignments and method calls
