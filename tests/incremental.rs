@@ -467,3 +467,36 @@ fn editing_a_caller_of_a_generic_method_of_a_plain_type_reuses_the_instance() {
     assert_eq!(report.compiled(), 1);
     assert_eq!(project.run(), "43\n");
 }
+
+fn zoo_program(dog: i64) -> String {
+    format!(
+        "class Animal {{\n  var legs: Int\n  func sound() -> Int {{ return 1 }}\n}}\n\
+         class Dog: Animal {{\n  override func sound() -> Int {{ return {dog} }}\n}}\n\
+         func hear(_ a: Animal) -> Int {{ return a.sound() }}\n\
+         func main() {{\n  print(hear(Animal(legs: 4)) + hear(Dog(legs: 4)))\n}}\n"
+    )
+}
+
+#[test]
+fn editing_an_override_body_checks_and_compiles_only_that_override() {
+    let project = Project::new();
+    project.build(&zoo_program(2));
+    assert_eq!(project.run(), "3\n");
+    let report = project.build(&zoo_program(5));
+    assert_eq!(report.checked(), 1);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "6\n");
+}
+
+#[test]
+fn adding_an_override_checks_every_function_again() {
+    let project = Project::new();
+    project.build(&zoo_program(2));
+    let extended = format!(
+        "{}class Cat: Animal {{\n  override func sound() -> Int {{ return 7 }}\n}}\n",
+        zoo_program(2)
+    );
+    let report = project.build(&extended);
+    assert!(report.checked() > 1);
+    assert_eq!(project.run(), "3\n");
+}
