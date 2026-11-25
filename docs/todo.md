@@ -53,6 +53,7 @@
   - [x] assignment to a member of a member (`c.a.b = 1`, `s.inner.n += 1`)
   - [x] several initializers per type, chosen by labels and argument types, and delegation with `self.init(...)`
   - [x] generic classes in inheritance: `class D<T>: B<T>`, `class C: B<Int>`, with override, `super` and the casts `is`, `as?`, `as!`, through class descriptors
+  - [x] `==` and `!=` on optionals, `Optional` as `Equatable`, and optional members in an `Equatable` struct
   - [x] `deinit` in a generic class
   - [x] several patterns in one `case` that bind the same names (`case .circle(let r), .square(let r):`)
   - [x] labels on payload values (`case rect(width: Int, height: Int)`), required where a case is built and optional in a pattern
@@ -407,3 +408,11 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `Signatures::deinit_of` and `deinit_name` give, for a class instance, the function `Owner.deinit` with the type arguments of that instance and the name that `mono` gives its instance (`mangled_call`, shared by `Instantiator::instance_for`, so the two cannot differ). `describe`, which already runs for every class that an object of the program belongs to, creates the instance for every class in the chain of superclasses that has one and records it as a dependency of the function that creates the object, so the instance is compiled, keyed and listed in the item memo like a method. `rc::drop_function` calls it by that name, walking from the class up through its superclasses as before. The restriction on a `deinit` in a generic class is gone.
 
 **Consequences.** Editing the body of a `deinit` of a generic class rechecks every function, as editing any generic body does, and recompiles only its instances. A `deinit` is part of the object whenever any descriptor of the class exists, even for a class that is only cast to.
+
+### An optional comparison is a lowering over the tag and the payload (2026-11-26)
+
+**Problem.** Equality was supported for scalars, strings and structs, but `a == b` on `T?` was rejected: an optional is a payload enum, and a payload enum has no equality.
+
+**Decision.** `==` and `!=` with an optional on either side coerce both operands to that optional type (a plain value is wrapped, so `a == 5` and `5 == a` work, and so does `c == .red`) and `optional_equality` lowers the comparison: both operands are bound once, left before right, and the result is `tags are equal && (tag is none || payload equal)`. The payload goes through `equality_of`, which picks the comparison of the payload type: the operator for `Int`, `Bool`, `String` and enums without payloads, `struct_equality` for a struct, `optional_equality` again for a nested optional, and a `Witness` for a type parameter that is `Equatable`, so `Optional<T>` works in a generic body. `struct_equality` compares its leaves with `equality_of`, and `equality_leaves` accepts an optional leaf whose wrapped type is comparable, so an `Equatable` struct may have optional members. `conforms` makes `Optional<T>` `Equatable` when `T` is, and the instance that `mono` builds for it (`equality_function`) uses the same lowering. `.some` and `.none` of an optional context now mean the cases of the optional itself, even when the wrapped type is an optional.
+
+**Consequences.** An optional of a class, of a struct with a class member, or of a payload enum cannot be compared, as the wrapped type cannot. The comparison of an optional string allocates nothing and keeps the resident set flat in a loop of 2 million comparisons.
