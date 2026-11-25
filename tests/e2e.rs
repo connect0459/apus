@@ -3710,3 +3710,59 @@ fn print_does_not_break_a_loop_label_inside_an_enum_print() {
     let source = "enum Color { case red }\nfunc main() {\n  outer: for i in 0..<3 {\n    for j in 0..<3 {\n      print(Color.red)\n      if j == 1 { continue outer }\n    }\n  }\n}";
     assert_eq!(run(source), "red\nred\nred\nred\nred\nred\n");
 }
+
+#[test]
+fn a_generic_function_accepts_explicit_type_arguments() {
+    let source = "func id<T>(_ x: T) -> T { return x }\nfunc none<T>() -> T? { return nil }\nfunc main() {\n  print(id<Int>(5))\n  print(id<String>(\"a\"))\n  let x = none<Int>()\n  print(x == nil)\n  let y: Bool? = none<Bool>()\n  print(y == nil)\n}";
+    assert_eq!(run(source), "5\na\ntrue\ntrue\n");
+}
+
+#[test]
+fn explicit_type_arguments_are_checked_against_the_arguments() {
+    let source = "func id<T>(_ x: T) -> T { return x }\nfunc main() {\n  print(id<Int>(\"a\"))\n}";
+    assert!(build_error(source).contains("expected Int"));
+}
+
+#[test]
+fn the_number_of_explicit_type_arguments_must_match() {
+    let two = "func id<T>(_ x: T) -> T { return x }\nfunc main() {\n  print(id<Int, Bool>(1))\n}";
+    assert!(build_error(two).contains("expects 1 type argument"));
+    let none = "func plain() -> Int { return 1 }\nfunc main() {\n  print(plain<Int>())\n}";
+    assert!(build_error(none).contains("expects 0 type argument"));
+}
+
+#[test]
+fn explicit_type_arguments_must_satisfy_the_constraints() {
+    let source = "protocol Shape {\n  func area() -> Int\n}\nstruct Other {\n  var x: Int\n}\nfunc area_of<T: Shape>(_ s: T) -> Int { return s.area() }\nfunc main() {\n  print(area_of<Other>(Other(x: 1)))\n}";
+    let message = build_error(source);
+    assert!(
+        message.contains("Other") && message.contains("Shape"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_generic_method_accepts_explicit_type_arguments() {
+    let source = "struct Box<T> {\n  var v: T\n  func pick<U>(_ x: U) -> U { return x }\n  func none<U>() -> U? { return nil }\n  func note<U>(_ x: U) { print(1) }\n}\nfunc main() {\n  let b = Box(v: 7)\n  print(b.pick<Bool>(true))\n  let n = b.none<Int>()\n  print(n == nil)\n  b.note<String>(\"s\")\n}";
+    assert_eq!(run(source), "true\ntrue\n1\n");
+}
+
+#[test]
+fn explicit_type_arguments_work_on_a_method_of_a_plain_type_and_on_self() {
+    let source = "struct Tool {\n  var k: Int\n  func twice<U>(_ x: U) -> U { return x }\n  func call() -> Int {\n    let a = self.twice<Int>(k)\n    let b = twice<Int>(a)\n    return b + 1\n  }\n}\nfunc main() {\n  let t = Tool(k: 4)\n  print(t.twice<Int>(2))\n  print(t.call())\n}";
+    assert_eq!(run(source), "2\n5\n");
+}
+
+#[test]
+fn explicit_method_type_arguments_are_counted_without_those_of_the_type() {
+    let wrong = "struct Box<T> {\n  var v: T\n  func pick<U>(_ x: U) -> U { return x }\n}\nfunc main() {\n  let b = Box(v: 1)\n  print(b.pick<Int, Bool>(1))\n}";
+    assert!(build_error(wrong).contains("expects 1 type argument"));
+    let none = "struct Tool {\n  var k: Int\n  func get() -> Int { return k }\n}\nfunc main() {\n  let t = Tool(k: 1)\n  print(t.get<Int>())\n}";
+    assert!(build_error(none).contains("expects 0 type argument"));
+}
+
+#[test]
+fn explicit_type_arguments_cannot_be_given_to_a_requirement() {
+    let source = "protocol P {\n  func a() -> Int\n}\nfunc f<T: P>(_ x: T) -> Int { return x.a<Int>() }\nfunc main() { }";
+    assert!(!build_error(source).is_empty());
+}

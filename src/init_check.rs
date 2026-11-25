@@ -370,7 +370,8 @@ impl Scan<'_> {
                 args.iter().any(|a| self.expr_uses_self(a.value()))
             }
             ExprKind::Member { base, .. } => self.expr_uses_self(base),
-            ExprKind::MemberCall { base, args, .. } => {
+            ExprKind::MemberCall { base, args, .. }
+            | ExprKind::GenericMemberCall { base, args, .. } => {
                 self.expr_uses_self(base) || args.iter().any(|a| self.expr_uses_self(a.value()))
             }
         }

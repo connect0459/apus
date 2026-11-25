@@ -1825,7 +1825,17 @@ impl FnCx<'_> {
     }
 
     fn expr_stmt(&mut self, expr: &Expr) -> CResult<TStmt> {
-        if let ExprKind::MemberCall { base, name, args } = expr.kind()
+        let member_call = match expr.kind() {
+            ExprKind::MemberCall { base, name, args } => Some((base, name, args, None)),
+            ExprKind::GenericMemberCall {
+                base,
+                name,
+                type_args,
+                args,
+            } => Some((base, name, args, Some(type_args.as_slice()))),
+            _ => None,
+        };
+        if let Some((base, name, args, explicit)) = member_call
             && self.enum_target(base).is_none()
         {
             return Ok(TStmt::Eval(self.method_call(
@@ -1834,6 +1844,7 @@ impl FnCx<'_> {
                 name,
                 args,
                 None,
+                explicit,
             )?));
         }
         let ExprKind::Call { callee, args } = expr.kind() else {
@@ -2062,7 +2073,7 @@ impl FnCx<'_> {
                 callee,
                 type_args,
                 args,
-            } => self.generic_call(line, callee, type_args, args),
+            } => self.generic_call(line, callee, type_args, args, expected),
             ExprKind::GenericName { name, .. } => Err(CheckError::at(
                 line,
                 format!("'{name}' with type arguments is not a value"),
@@ -2074,8 +2085,14 @@ impl FnCx<'_> {
                 self.enum_construct(line, base, name, args, expected)
             }
             ExprKind::MemberCall { base, name, args } => {
-                self.method_call(line, base, name, args, expected)
+                self.method_call(line, base, name, args, expected, None)
             }
+            ExprKind::GenericMemberCall {
+                base,
+                name,
+                type_args,
+                args,
+            } => self.method_call(line, base, name, args, expected, Some(type_args)),
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 self.field_of(line, base, name)
@@ -2114,6 +2131,7 @@ impl FnCx<'_> {
         name: &str,
         args: &[Arg],
         expected: Option<Ty>,
+        explicit: Option<&[TypeRef]>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
         let (receiver, lookup_ty, dispatching) = if self.is_super(base) {
@@ -2122,6 +2140,14 @@ impl FnCx<'_> {
         } else {
             let receiver = self.value(base)?;
             let ty = receiver.ty();
+            let requirement_call =
+                matches!(ty, Ty::Param(_)) || sigs.existential_protocol(ty).is_some();
+            if requirement_call && explicit.is_some() {
+                return Err(CheckError::at(
+                    line,
+                    "a protocol requirement takes no explicit type arguments",
+                ));
+            }
             if let Ty::Param(index) = ty {
                 return self.witness_call(line, base, receiver, index, name, args);
             }
@@ -2176,7 +2202,16 @@ impl FnCx<'_> {
             }
             checked.push(self.value(arg.value())?);
         }
-        let call = self.finish_call(line, &qualified, sig, checked, expected, None)?;
+        let explicit = match explicit {
+            Some(given) => {
+                let mut all = sigs.type_arguments(lookup_ty);
+                let own = sig.generics().len().saturating_sub(all.len());
+                all.extend(self.explicit_args(line, &qualified, own, given)?);
+                Some(all)
+            }
+            None => None,
+        };
+        let call = self.finish_call(line, &qualified, sig, checked, expected, explicit)?;
         let cases = if dispatching {
             sigs.dispatch_cases(lookup_ty, name)
         } else {
@@ -2870,12 +2905,11 @@ impl FnCx<'_> {
         explicit: Option<&[TypeRef]>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
-        if explicit.is_none()
-            && let Some(receiver) = self.lookup("self", line).ok()
+        if let Some(receiver) = self.lookup("self", line).ok()
             && sigs.resolve_method(receiver.ty, callee).is_some()
         {
             let base = Expr::new(line, ExprKind::Ident("self".to_string()));
-            return self.method_call(line, &base, callee, args, expected);
+            return self.method_call(line, &base, callee, args, expected, explicit);
         }
         let init_name = format!("{callee}.init");
         let is_type = sigs.struct_def(callee).is_some() || sigs.enum_def(callee).is_some();
@@ -2984,16 +3018,14 @@ impl FnCx<'_> {
         callee: &str,
         type_args: &[TypeRef],
         args: &[Arg],
+        expected: Option<Ty>,
     ) -> CResult<TExpr> {
         let init_name = format!("{callee}.init");
         let has_init = self.sigs.func(&init_name).is_some();
         match self.sigs.struct_def(callee) {
             _ if has_init => self.call_with(line, &init_name, args, None, Some(type_args)),
             Some(def) => self.struct_init(line, def, Some(type_args), args, None),
-            None => Err(CheckError::at(
-                line,
-                format!("'{callee}' does not take explicit type arguments"),
-            )),
+            None => self.call_with(line, callee, args, expected, Some(type_args)),
         }
     }
 
@@ -3664,9 +3696,12 @@ mod tests {
     }
 
     #[test]
-    fn a_generic_function_does_not_take_explicit_type_arguments() {
+    fn a_generic_function_takes_explicit_type_arguments() {
         let source = "func id<T>(_ x: T) -> T { return x }\nfunc main() { let a = id<Int>(1) }";
-        assert!(check_all(source).is_err());
+        assert!(check_all(source).is_ok());
+        let mismatch =
+            "func id<T>(_ x: T) -> T { return x }\nfunc main() { let a = id<Int>(true) }";
+        assert!(check_all(mismatch).is_err());
     }
 
     #[test]

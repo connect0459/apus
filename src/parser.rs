@@ -1128,6 +1128,26 @@ impl Parser<'_> {
                 } else {
                     self.name()?
                 };
+                if self.is_punct("<") && self.on_same_line() {
+                    let start = self.pos;
+                    if let Some(type_args) = self.generic_name_args()
+                        && self.is_punct("(")
+                    {
+                        let args = self.args()?;
+                        expr = Expr::new(
+                            line,
+                            ExprKind::GenericMemberCall {
+                                base: Box::new(expr),
+                                name,
+                                type_args,
+                                args,
+                            },
+                        );
+                        self.check_depth(expr.depth())?;
+                        continue;
+                    }
+                    self.pos = start;
+                }
                 expr = Expr::new(
                     line,
                     ExprKind::Member {
@@ -2203,6 +2223,41 @@ mod tests {
             "}".repeat(200)
         );
         assert!(parse_on_a_large_stack(source).is_err());
+    }
+
+    #[test]
+    fn a_method_call_may_carry_explicit_type_arguments() {
+        assert_eq!(
+            expr("a.map<Int, Bool>(1)"),
+            ex(ExprKind::GenericMemberCall {
+                base: Box::new(id("a")),
+                name: "map".to_string(),
+                type_args: vec![TypeRef::from("Int"), TypeRef::from("Bool")],
+                args: vec![Arg::new(None, int(1))],
+            })
+        );
+    }
+
+    #[test]
+    fn a_comparison_after_a_member_is_not_taken_for_type_arguments() {
+        assert_eq!(
+            expr("a.b < c"),
+            bin(BinOp::Lt, member(id("a"), "b"), id("c"))
+        );
+        assert_eq!(
+            expr("a.b < c.d"),
+            bin(BinOp::Lt, member(id("a"), "b"), member(id("c"), "d"))
+        );
+    }
+
+    #[test]
+    fn type_arguments_may_be_followed_by_a_member_chain_on_the_result() {
+        let call = expr("a.map<Int>(1).x");
+        let ExprKind::Member { base, name } = call.kind() else {
+            panic!("expected a member access");
+        };
+        assert_eq!(name, "x");
+        assert!(matches!(base.kind(), ExprKind::GenericMemberCall { .. }));
     }
 
     #[test]
