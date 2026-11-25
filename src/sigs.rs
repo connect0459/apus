@@ -89,6 +89,7 @@ impl Requirement {
 pub struct ProtocolSig {
     name: String,
     requirements: Vec<Requirement>,
+    associated: Vec<String>,
 }
 
 impl ProtocolSig {
@@ -98,6 +99,10 @@ impl ProtocolSig {
 
     pub fn requirements(&self) -> &[Requirement] {
         &self.requirements
+    }
+
+    pub fn associated(&self) -> &[String] {
+        &self.associated
     }
 
     pub fn requirement(&self, name: &str) -> Option<&Requirement> {
@@ -122,6 +127,7 @@ fn standard_protocols() -> HashMap<String, ProtocolSig> {
     let equatable = ProtocolSig {
         name: EQUATABLE.to_string(),
         requirements: vec![operator_requirement("==")],
+        associated: Vec::new(),
     };
     let comparable = ProtocolSig {
         name: COMPARABLE.to_string(),
@@ -129,6 +135,7 @@ fn standard_protocols() -> HashMap<String, ProtocolSig> {
             .iter()
             .map(|op| operator_requirement(op))
             .collect(),
+        associated: Vec::new(),
     };
     [equatable, comparable]
         .into_iter()
@@ -350,6 +357,7 @@ pub struct Signatures {
     enum_defs: Vec<EnumDecl>,
     enum_def_ids: HashMap<String, usize>,
     protocols: HashMap<String, ProtocolSig>,
+    assoc_types: Vec<(String, String)>,
     instances: RefCell<Instances>,
 }
 
@@ -362,6 +370,7 @@ impl Signatures {
             enum_defs: Vec::new(),
             enum_def_ids: HashMap::new(),
             protocols: standard_protocols(),
+            assoc_types: Vec::new(),
             instances: RefCell::new(Instances::default()),
         };
         let mut protocol_decls: Vec<&ProtocolDecl> = Vec::new();
@@ -435,6 +444,7 @@ impl Signatures {
         let placeholder = ProtocolSig {
             name: decl.name().to_string(),
             requirements: Vec::new(),
+            associated: decl.associated().to_vec(),
         };
         if self
             .protocols
@@ -445,6 +455,10 @@ impl Signatures {
                 decl.line(),
                 format!("duplicate protocol '{}'", decl.name()),
             ));
+        }
+        for name in decl.associated() {
+            self.assoc_types
+                .push((decl.name().to_string(), name.clone()));
         }
         Ok(())
     }
@@ -484,7 +498,12 @@ impl Signatures {
     }
 
     fn resolve_protocol(&mut self, decl: &ProtocolDecl) -> CResult<()> {
-        let scope = vec![(SELF_TYPE.to_string(), Ty::Param(0))];
+        let mut scope = vec![(SELF_TYPE.to_string(), Ty::Param(0))];
+        for name in decl.associated() {
+            if let Some(id) = self.assoc_id(decl.name(), name) {
+                scope.push((name.clone(), Ty::assoc(0, id)));
+            }
+        }
         let mut requirements: Vec<Requirement> = Vec::new();
         for requirement in decl.requirements() {
             if requirements.iter().any(|r| r.name == requirement.name()) {
@@ -522,9 +541,119 @@ impl Signatures {
             ProtocolSig {
                 name: decl.name().to_string(),
                 requirements,
+                associated: decl.associated().to_vec(),
             },
         );
         Ok(())
+    }
+
+    fn assoc_id(&self, protocol: &str, name: &str) -> Option<usize> {
+        self.assoc_types
+            .iter()
+            .position(|(p, n)| p == protocol && n == name)
+    }
+
+    pub fn scope_for(&self, generics: &[String], bounds: &[Vec<String>]) -> Vec<(String, Ty)> {
+        let mut scope = scope_of(generics);
+        for (index, name) in generics.iter().enumerate() {
+            for protocol in bounds.get(index).map_or(&[][..], Vec::as_slice) {
+                let Some(sig) = self.protocols.get(protocol) else {
+                    continue;
+                };
+                for item in sig.associated() {
+                    if let Some(id) = self.assoc_id(protocol, item) {
+                        scope.push((format!("{name}.{item}"), Ty::assoc(index, id)));
+                    }
+                }
+            }
+        }
+        scope
+    }
+
+    fn type_scope(
+        &self,
+        decl_generics: &[String],
+        bounds: &[Vec<String>],
+        args: &[Ty],
+    ) -> Vec<(String, Ty)> {
+        let mut scope: Vec<(String, Ty)> = decl_generics
+            .iter()
+            .cloned()
+            .zip(args.iter().copied())
+            .collect();
+        for (index, name) in decl_generics.iter().enumerate() {
+            let Some(arg) = args.get(index) else { continue };
+            for protocol in bounds.get(index).map_or(&[][..], Vec::as_slice) {
+                let Some(sig) = self.protocols.get(protocol) else {
+                    continue;
+                };
+                for item in sig.associated() {
+                    let Some(id) = self.assoc_id(protocol, item) else {
+                        continue;
+                    };
+                    let projected = match arg {
+                        Ty::Param(p) => Some(Ty::assoc(*p, id)),
+                        other => self.assoc_binding(*other, id),
+                    };
+                    if let Some(projected) = projected {
+                        scope.push((format!("{name}.{item}"), projected));
+                    }
+                }
+            }
+        }
+        scope
+    }
+
+    pub fn assoc_binding(&self, ty: Ty, id: usize) -> Option<Ty> {
+        let (_, name) = self.assoc_types.get(id)?;
+        let mut current = Some(ty);
+        while let Some(t) = current {
+            if let Some((kind, def, args)) = self.origin_of(t) {
+                let (generics, aliases) = match kind {
+                    Kind::Struct => (
+                        self.struct_defs[def].generics(),
+                        self.struct_defs[def].aliases(),
+                    ),
+                    Kind::Enum => (
+                        self.enum_defs[def].generics(),
+                        self.enum_defs[def].aliases(),
+                    ),
+                };
+                if let Some((_, alias)) = aliases.iter().find(|(n, _)| n == name) {
+                    let scope: Vec<(String, Ty)> =
+                        generics.iter().cloned().zip(args.iter().copied()).collect();
+                    return self.resolve_type(alias, &scope, 0).ok();
+                }
+            }
+            current = self.superclass(t);
+        }
+        None
+    }
+
+    pub fn member_scope(
+        &self,
+        owner: Option<&str>,
+        generics: &[String],
+        bounds: &[Vec<String>],
+        line: u32,
+    ) -> CResult<Vec<(String, Ty)>> {
+        let mut scope = self.scope_for(generics, bounds);
+        let aliases = owner.map_or(&[][..], |owner| self.owner_aliases(owner));
+        for (name, alias) in aliases {
+            let ty = self.resolve_type(alias, &scope, line)?;
+            scope.push((name.clone(), ty));
+        }
+        Ok(scope)
+    }
+
+    fn owner_aliases(&self, owner: &str) -> &[(String, TypeRef)] {
+        if let Some(def) = self.struct_def_ids.get(owner) {
+            self.struct_defs[*def].aliases()
+        } else if let Some(def) = self.enum_def_ids.get(owner) {
+            self.enum_defs[*def].aliases()
+        } else {
+            &[]
+        }
     }
 
     pub fn protocol(&self, name: &str) -> Option<&ProtocolSig> {
@@ -756,6 +885,19 @@ impl Signatures {
             return Ok(());
         };
         let owner_generics = self.owner_generics(name);
+        for item in sig.associated() {
+            let bound = self
+                .assoc_id(protocol, item)
+                .and_then(|id| self.assoc_binding(ty, id));
+            if bound.is_none() {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "'{name}' does not define the associated type '{item}' of '{protocol}': add 'typealias {item} = ...'"
+                    ),
+                ));
+            }
+        }
         for requirement in sig.requirements() {
             let mismatch = |why: &str| {
                 CheckError::at(
@@ -926,7 +1068,7 @@ impl Signatures {
             }
             bounds.push(func.bound(index).to_vec());
         }
-        let scope = scope_of(&generics);
+        let scope = self.member_scope(func.owner(), &generics, &bounds, func.line())?;
         let receiver = owner_ty.filter(|_| !func.is_init());
         let receiver_param = receiver.map(|ty| match ty {
             Ty::Enum(id) if func.is_mutating() => self.enum_cell(id),
@@ -1280,12 +1422,10 @@ impl Signatures {
         scope: &Scope,
         line: u32,
     ) -> CResult<(Vec<FieldSig>, Option<StructId>)> {
-        let own_scope: Vec<(String, Ty)> = decl
-            .generics()
-            .iter()
-            .cloned()
-            .zip(args.iter().copied())
+        let bounds: Vec<Vec<String>> = (0..decl.generics().len())
+            .map(|i| decl.bound(i).to_vec())
             .collect();
+        let own_scope = self.type_scope(decl.generics(), &bounds, args);
         let at = if line == 0 { decl.line() } else { line };
         let mut fields: Vec<FieldSig> = Vec::new();
         let mut parent = None;
@@ -1533,12 +1673,10 @@ impl Signatures {
         name: &str,
         line: u32,
     ) -> CResult<Vec<CaseSig>> {
-        let own_scope: Vec<(String, Ty)> = decl
-            .generics()
-            .iter()
-            .cloned()
-            .zip(args.iter().copied())
+        let bounds: Vec<Vec<String>> = (0..decl.generics().len())
+            .map(|i| decl.bound(i).to_vec())
             .collect();
+        let own_scope = self.type_scope(decl.generics(), &bounds, args);
         let at = if line == 0 { decl.line() } else { line };
         let mut cases: Vec<CaseSig> = Vec::new();
         for case in decl.cases() {
@@ -1681,6 +1819,16 @@ impl Signatures {
                 .iter()
                 .find(|(_, t)| *t == Ty::Param(index))
                 .map_or_else(|| format!("T{index}"), |(name, _)| name.clone()),
+            Ty::Assoc(packed) => {
+                let (index, id) = Ty::split_assoc(packed);
+                scope.iter().find(|(_, t)| *t == ty).map_or_else(
+                    || {
+                        let name = self.assoc_types.get(id).map_or("?", |(_, n)| n.as_str());
+                        format!("T{index}.{name}")
+                    },
+                    |(name, _)| name.clone(),
+                )
+            }
             Ty::Struct(id) | Ty::Class(id) => self
                 .struct_sig(id)
                 .map_or_else(String::new, |s| s.name.clone()),
@@ -1710,7 +1858,7 @@ impl Signatures {
 
     pub fn has_param(&self, ty: Ty) -> bool {
         match ty {
-            Ty::Param(_) => true,
+            Ty::Param(_) | Ty::Assoc(_) => true,
             _ => self
                 .origin_of(ty)
                 .is_some_and(|(_, _, args)| args.iter().any(|a| self.has_param(*a))),
@@ -1718,6 +1866,9 @@ impl Signatures {
     }
 
     pub fn unify(&self, pattern: Ty, actual: Ty, bound: &mut [Option<Ty>]) -> bool {
+        if matches!(pattern, Ty::Assoc(_)) {
+            return true;
+        }
         if let Ty::Param(index) = pattern {
             return match bound.get_mut(index) {
                 Some(slot @ None) => {
@@ -1738,6 +1889,33 @@ impl Signatures {
     }
 
     pub fn subst(&self, ty: Ty, args: &[Ty], scope: &Scope, line: u32) -> CResult<Ty> {
+        if let Ty::Assoc(packed) = ty {
+            let (index, id) = Ty::split_assoc(packed);
+            let base = args
+                .get(index)
+                .copied()
+                .ok_or_else(|| CheckError::at(line, "internal error: unbound type parameter"))?;
+            return match base {
+                Ty::Param(p) => Ok(Ty::assoc(p, id)),
+                Ty::Assoc(_) => Err(CheckError::at(
+                    line,
+                    "an associated type of an associated type is not supported yet",
+                )),
+                concrete => self.assoc_binding(concrete, id).ok_or_else(|| {
+                    let (protocol, name) = self
+                        .assoc_types
+                        .get(id)
+                        .map_or(("?", "?"), |(p, n)| (p.as_str(), n.as_str()));
+                    CheckError::at(
+                        line,
+                        format!(
+                            "'{}' does not define the associated type '{name}' of '{protocol}'",
+                            self.type_name(concrete)
+                        ),
+                    )
+                }),
+            };
+        }
         if let Ty::Param(index) = ty {
             return args
                 .get(index)

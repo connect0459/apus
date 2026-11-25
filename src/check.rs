@@ -25,7 +25,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     })?;
     let mut cx = FnCx {
         sigs,
-        scope: scope_of(sig.generics()),
+        scope: sigs.member_scope(func.owner(), sig.generics(), sig.bounds(), func.line())?,
         expected: None,
         ret: sig.ret(),
         locals: Vec::new(),

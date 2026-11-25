@@ -3284,3 +3284,97 @@ fn a_protocol_can_only_be_used_as_a_constraint_for_now() {
     let source = "protocol P {\n  func a() -> Int\n}\nfunc f(_ x: P) { }\nfunc main() { }";
     assert!(!build_error(source).is_empty());
 }
+
+const CONTAINER: &str = "protocol Container {\n  associatedtype Item\n  func first() -> Item\n  func count() -> Int\n}\nstruct IntBox: Container {\n  typealias Item = Int\n  var v: Int\n  func first() -> Int { return v }\n  func count() -> Int { return 1 }\n}\nstruct Label: Container {\n  typealias Item = String\n  var text: String\n  func first() -> String { return text }\n  func count() -> Int { return 2 }\n}\n";
+
+#[test]
+fn a_function_may_return_the_associated_type_of_its_parameter() {
+    let source = format!(
+        "{CONTAINER}func head<C: Container>(_ c: C) -> C.Item {{ return c.first() }}\nfunc main() {{\n  print(head(IntBox(v: 5)))\n  print(head(Label(text: \"hi\")))\n}}"
+    );
+    assert_eq!(run(&source), "5\nhi\n");
+}
+
+#[test]
+fn an_associated_type_may_be_a_parameter_type() {
+    let source = "protocol Sink {\n  associatedtype Item\n  func put(_ x: Item) -> Int\n}\nstruct Adder: Sink {\n  typealias Item = Int\n  var base: Int\n  func put(_ x: Int) -> Int { return base + x }\n}\nfunc feed<S: Sink>(_ s: S, _ x: S.Item) -> Int { return s.put(x) }\nfunc main() {\n  print(feed(Adder(base: 10), 5))\n}";
+    assert_eq!(run(source), "15\n");
+}
+
+#[test]
+fn a_local_may_have_the_associated_type_as_its_annotation() {
+    let source = format!(
+        "{CONTAINER}func twice<C: Container>(_ c: C) -> Int {{\n  let x: C.Item = c.first()\n  let y: C.Item = c.first()\n  return c.count() * 2\n}}\nfunc main() {{\n  print(twice(IntBox(v: 1)))\n}}"
+    );
+    assert_eq!(run(&source), "2\n");
+}
+
+#[test]
+fn a_generic_type_may_bind_the_associated_type_to_its_parameter() {
+    let source = "protocol Holder {\n  associatedtype Item\n  func get() -> Item\n}\nstruct Box<T>: Holder {\n  typealias Item = T\n  var value: T\n  func get() -> T { return value }\n}\nfunc open<H: Holder>(_ h: H) -> H.Item { return h.get() }\nfunc main() {\n  print(open(Box(value: 7)))\n  print(open(Box(value: true)))\n}";
+    assert_eq!(run(source), "7\ntrue\n");
+}
+
+#[test]
+fn a_class_and_an_enum_can_bind_associated_types() {
+    let source = "protocol Source {\n  associatedtype Out\n  func make() -> Out\n}\nclass Counter: Source {\n  typealias Out = Int\n  var n: Int\n  func make() -> Int { return n }\n}\nenum Flag: Source {\n  typealias Out = Bool\n  case on\n  func make() -> Bool { return true }\n}\nfunc run<S: Source>(_ s: S) -> S.Out { return s.make() }\nfunc main() {\n  print(run(Counter(n: 3)))\n  print(run(Flag.on))\n}";
+    assert_eq!(run(source), "3\ntrue\n");
+}
+
+#[test]
+fn the_associated_type_flows_through_another_constrained_function() {
+    let source = format!(
+        "{CONTAINER}func head<C: Container>(_ c: C) -> C.Item {{ return c.first() }}\nfunc again<D: Container>(_ d: D) -> D.Item {{ return head(d) }}\nfunc main() {{\n  print(again(IntBox(v: 9)))\n}}"
+    );
+    assert_eq!(run(&source), "9\n");
+}
+
+#[test]
+fn a_struct_member_may_have_the_associated_type() {
+    let source = format!(
+        "{CONTAINER}struct Wrapper<C: Container> {{\n  var item: C.Item\n  var tag: Int\n}}\nfunc main() {{\n  let w = Wrapper<IntBox>(item: 4, tag: 1)\n  print(w.item + w.tag)\n}}"
+    );
+    assert_eq!(run(&source), "5\n");
+}
+
+#[test]
+fn a_type_may_use_its_own_typealias_in_a_member_signature() {
+    let source = "protocol Container {\n  associatedtype Item\n  func first() -> Item\n}\nstruct IntBox: Container {\n  typealias Item = Int\n  var v: Int\n  func first() -> Item { return v }\n}\nfunc main() {\n  print(IntBox(v: 6).first())\n}";
+    assert_eq!(run(source), "6\n");
+}
+
+#[test]
+fn a_conforming_type_must_bind_every_associated_type() {
+    let source = "protocol Container {\n  associatedtype Item\n  func count() -> Int\n}\nstruct S: Container {\n  var v: Int\n  func count() -> Int { return 1 }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("'Item'"));
+}
+
+#[test]
+fn a_method_must_agree_with_the_bound_associated_type() {
+    let source = "protocol Container {\n  associatedtype Item\n  func first() -> Item\n}\nstruct S: Container {\n  typealias Item = Int\n  func first() -> Bool { return true }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("'first'"));
+}
+
+#[test]
+fn an_unknown_associated_type_is_rejected() {
+    let source = format!(
+        "{CONTAINER}func f<C: Container>(_ c: C) -> C.Nope {{ return c.first() }}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&source).contains("Nope"));
+    let unconstrained = "func f<C>(_ c: C) -> C.Item { return c }\nfunc main() { }";
+    assert!(build_error(unconstrained).contains("Item"));
+}
+
+#[test]
+fn the_associated_type_is_opaque_inside_a_generic_body() {
+    let source = format!(
+        "{CONTAINER}func bad<C: Container>(_ c: C) -> Int {{ return c.first() }}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&source).contains("expected"));
+}
+
+#[test]
+fn an_associated_type_name_cannot_be_declared_twice() {
+    let source = "protocol P {\n  associatedtype Item\n  associatedtype Item\n}\nfunc main() { }";
+    assert!(build_error(source).contains("Item"));
+}

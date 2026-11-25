@@ -315,7 +315,7 @@ impl Parser<'_> {
             if self.eat_keyword("associatedtype") {
                 let item = self.name()?;
                 if associated.contains(&item) {
-                    return self.fail("duplicate associated type");
+                    return self.fail(&format!("duplicate associated type '{item}'"));
                 }
                 associated.push(item);
                 self.end_of_statement()?;

@@ -258,7 +258,7 @@ fn clif_type(ty: Ty) -> Option<Type> {
     match ty {
         Ty::Int | Ty::Str | Ty::Struct(_) | Ty::Class(_) | Ty::Enum(_) => Some(types::I64),
         Ty::Bool => Some(types::I8),
-        Ty::Void | Ty::Param(_) => None,
+        Ty::Void | Ty::Param(_) | Ty::Assoc(_) => None,
     }
 }
 

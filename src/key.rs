@@ -54,6 +54,12 @@ impl Encoder<'_> {
                 self.tag(7);
                 self.usize(index);
             }
+            Ty::Assoc(packed) => {
+                let (index, id) = Ty::split_assoc(packed);
+                self.tag(9);
+                self.usize(index);
+                self.usize(id);
+            }
             Ty::Struct(id) | Ty::Class(id) => {
                 self.tag(if ty.is_class() { 8 } else { 5 });
                 let layout = self.structs.get(id.index());
