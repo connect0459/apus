@@ -456,6 +456,12 @@ impl FnCx<'_> {
                 });
                 Ok(())
             }
+            StmtKind::WhileLet {
+                name,
+                mutable,
+                value,
+                body,
+            } => self.while_let(stmt.line(), name, *mutable, value, body, out),
             StmtKind::Expr(expr) if matches!(expr.kind(), ExprKind::OptMemberCall { .. }) => {
                 self.optional_call_stmt(stmt.line(), expr, out)
             }
@@ -484,6 +490,7 @@ impl FnCx<'_> {
         &mut self,
         line: u32,
         name: &str,
+        mutable: bool,
         value: &Expr,
         then_body: &[Stmt],
         else_body: Option<&[Stmt]>,
@@ -501,7 +508,7 @@ impl FnCx<'_> {
         })?;
         let held = self.temp(optional);
         self.scopes.push(HashMap::new());
-        let bound = self.declare(line, name, inner, false);
+        let bound = self.declare(line, name, inner, mutable);
         let body = bound.and_then(|local| {
             let mut body = vec![TStmt::Let {
                 local,
@@ -544,6 +551,81 @@ impl FnCx<'_> {
             ],
             else_body: Vec::new(),
         })
+    }
+
+    fn while_let(
+        &mut self,
+        line: u32,
+        name: &str,
+        mutable: bool,
+        value: &Expr,
+        body: &[Stmt],
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let value = self.value(value)?;
+        let optional = value.ty();
+        let inner = self.sigs.unwrapped(optional).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'while let' needs an optional, but found {}",
+                    self.name_of(optional)
+                ),
+            )
+        })?;
+        let running = self.temp(Ty::Bool);
+        let held = self.temp(optional);
+        self.scopes.push(HashMap::new());
+        let bound = self.declare(line, name, inner, mutable);
+        let checked = bound.and_then(|local| {
+            let mut checked = vec![TStmt::Let {
+                local,
+                init: TExpr::Field {
+                    base: Box::new(TExpr::Local(held, optional)),
+                    index: 1,
+                    ty: inner,
+                },
+            }];
+            checked.extend(self.block(body)?);
+            Ok(checked)
+        });
+        self.scopes.pop();
+        let checked = checked?;
+        let test = TStmt::If {
+            cond: TExpr::Binary {
+                op: BinOp::Ne,
+                lhs: Box::new(TExpr::Field {
+                    base: Box::new(TExpr::Local(held, optional)),
+                    index: 0,
+                    ty: Ty::Int,
+                }),
+                rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+            },
+            then_body: checked,
+            else_body: vec![TStmt::Assign {
+                local: running,
+                value: TExpr::Bool(false),
+            }],
+        };
+        out.push(TStmt::Let {
+            local: running,
+            init: TExpr::Bool(true),
+        });
+        out.push(TStmt::While {
+            cond: TExpr::Local(running, Ty::Bool),
+            body: vec![TStmt::If {
+                cond: TExpr::Bool(true),
+                then_body: vec![
+                    TStmt::Let {
+                        local: held,
+                        init: value,
+                    },
+                    test,
+                ],
+                else_body: Vec::new(),
+            }],
+        });
+        Ok(())
     }
 
     fn optional_call_stmt(&mut self, line: u32, expr: &Expr, out: &mut Vec<TStmt>) -> CResult<()> {
@@ -851,7 +933,8 @@ impl FnCx<'_> {
                 value,
                 then_body,
                 else_body,
-            } => self.if_let(line, name, value, then_body, else_body.as_deref()),
+                mutable,
+            } => self.if_let(line, name, *mutable, value, then_body, else_body.as_deref()),
             StmtKind::While { cond, body } => {
                 let cond = self.condition(cond)?;
                 Ok(TStmt::While {
@@ -861,9 +944,9 @@ impl FnCx<'_> {
             }
             StmtKind::For { var, iter, body } => self.for_stmt(line, var, iter, body),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
-            StmtKind::Switch { .. } => Err(CheckError::at(
+            StmtKind::Switch { .. } | StmtKind::WhileLet { .. } => Err(CheckError::at(
                 line,
-                "internal error: a switch must be lowered into a block",
+                "internal error: this statement must be lowered into a block",
             )),
         }
     }

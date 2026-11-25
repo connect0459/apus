@@ -264,11 +264,22 @@ impl Scan<'_> {
                 }
                 used
             }
+            StmtKind::WhileLet {
+                name, value, body, ..
+            } => {
+                let mut used = self.expr_uses_self(value);
+                self.locals.push(HashSet::new());
+                self.declare(name);
+                used |= self.stmts_use_self(body);
+                self.locals.pop();
+                used
+            }
             StmtKind::IfLet {
                 name,
                 value,
                 then_body,
                 else_body,
+                ..
             } => {
                 let mut used = self.expr_uses_self(value);
                 self.locals.push(HashSet::new());
@@ -363,7 +374,9 @@ fn returns(stmt: &Stmt) -> bool {
             else_body,
             ..
         } => any_returns(then_body) || else_body.as_deref().is_some_and(any_returns),
-        StmtKind::While { body, .. } | StmtKind::For { body, .. } => any_returns(body),
+        StmtKind::While { body, .. }
+        | StmtKind::WhileLet { body, .. }
+        | StmtKind::For { body, .. } => any_returns(body),
         StmtKind::Switch { cases, .. } => cases.iter().any(|c| any_returns(c.body())),
         StmtKind::Let { .. } | StmtKind::Assign { .. } | StmtKind::Expr(_) => false,
     }

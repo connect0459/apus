@@ -433,12 +433,19 @@ pub enum StmtKind {
     },
     IfLet {
         name: String,
+        mutable: bool,
         value: Expr,
         then_body: Vec<Stmt>,
         else_body: Option<Vec<Stmt>>,
     },
     While {
         cond: Expr,
+        body: Vec<Stmt>,
+    },
+    WhileLet {
+        name: String,
+        mutable: bool,
+        value: Expr,
         body: Vec<Stmt>,
     },
     For {

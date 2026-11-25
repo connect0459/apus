@@ -546,9 +546,19 @@ impl Parser<'_> {
         } else if self.eat_keyword("switch") {
             self.switch_kind()?
         } else if self.eat_keyword("while") {
-            let cond = self.expr()?;
-            let body = self.block()?;
-            StmtKind::While { cond, body }
+            if let Some((name, mutable, value)) = self.optional_binding()? {
+                let body = self.block()?;
+                StmtKind::WhileLet {
+                    name,
+                    mutable,
+                    value,
+                    body,
+                }
+            } else {
+                let cond = self.expr()?;
+                let body = self.block()?;
+                StmtKind::While { cond, body }
+            }
         } else if self.eat_keyword("for") {
             let var = self.name()?;
             self.expect_keyword("in")?;
@@ -586,14 +596,21 @@ impl Parser<'_> {
         })
     }
 
-    fn if_kind(&mut self) -> PResult<StmtKind> {
-        let binding = if self.eat_keyword("let") {
-            let name = self.name()?;
-            self.expect_punct("=")?;
-            Some((name, self.expr()?))
+    fn optional_binding(&mut self) -> PResult<Option<(String, bool, Expr)>> {
+        let mutable = if self.eat_keyword("let") {
+            false
+        } else if self.eat_keyword("var") {
+            true
         } else {
-            None
+            return Ok(None);
         };
+        let name = self.name()?;
+        self.expect_punct("=")?;
+        Ok(Some((name, mutable, self.expr()?)))
+    }
+
+    fn if_kind(&mut self) -> PResult<StmtKind> {
+        let binding = self.optional_binding()?;
         let cond = match &binding {
             Some(_) => None,
             None => Some(self.expr()?),
@@ -610,8 +627,9 @@ impl Parser<'_> {
             None
         };
         Ok(match (binding, cond) {
-            (Some((name, value)), _) => StmtKind::IfLet {
+            (Some((name, mutable, value)), _) => StmtKind::IfLet {
                 name,
+                mutable,
                 value,
                 then_body,
                 else_body,
@@ -996,6 +1014,28 @@ mod tests {
         assert_eq!(param.ty().name(), "Optional");
         assert_eq!(param.ty().args()[0].name(), "Optional");
         assert_eq!(f.ret().map(|t| t.name()), Some("Optional"));
+    }
+
+    #[test]
+    fn if_var_and_while_var_bind_a_mutable_name() {
+        let stmts = body("if var v = x { }\nwhile var w = y { }");
+        assert!(matches!(
+            stmts[0].kind(),
+            StmtKind::IfLet { mutable: true, .. }
+        ));
+        assert!(matches!(
+            stmts[1].kind(),
+            StmtKind::WhileLet { mutable: true, .. }
+        ));
+        let lets = body("if let v = x { }\nwhile let w = y { }");
+        assert!(matches!(
+            lets[0].kind(),
+            StmtKind::IfLet { mutable: false, .. }
+        ));
+        assert!(matches!(
+            lets[1].kind(),
+            StmtKind::WhileLet { mutable: false, .. }
+        ));
     }
 
     #[test]

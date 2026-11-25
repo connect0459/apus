@@ -2472,3 +2472,62 @@ fn a_switch_on_an_optional_instance_binds_it_with_ownership() {
     );
     assert_eq!(run(&source), "1\n-1\n10\n");
 }
+
+#[test]
+fn if_var_binds_a_variable_that_can_be_changed() {
+    let source = "func main() {\n  let x: Int? = 4\n  if var v = x {\n    v += 1\n    print(v)\n  }\n  print(x!)\n}";
+    assert_eq!(run(source), "5\n4\n");
+}
+
+#[test]
+fn if_let_binds_a_constant() {
+    let source = "func main() {\n  let x: Int? = 4\n  if let v = x {\n    v = 1\n  }\n}";
+    assert!(build_error(source).contains("constant"));
+}
+
+#[test]
+fn while_let_runs_until_the_value_is_nil() {
+    let source = "class Node {\n  var value: Int\n  var next: Node?\n}\nfunc main() {\n  let c = Node(value: 3, next: nil)\n  let b = Node(value: 2, next: c)\n  let a = Node(value: 1, next: b)\n  var cursor: Node? = a\n  while let node = cursor {\n    print(node.value)\n    cursor = node.next\n  }\n  print(10)\n}";
+    assert_eq!(run(source), "1\n2\n3\n10\n");
+}
+
+#[test]
+fn while_let_does_not_run_for_nil() {
+    let source =
+        "func main() {\n  let x: Int? = nil\n  while let v = x { print(v) }\n  print(1)\n}";
+    assert_eq!(run(source), "1\n");
+}
+
+#[test]
+fn while_let_evaluates_its_subject_on_every_iteration() {
+    let source = "func next(_ n: Int) -> Int? {\n  print(100 + n)\n  if n < 3 { return n }\n  return nil\n}\nfunc main() {\n  var i = 0\n  while let v = next(i) {\n    print(v)\n    i += 1\n  }\n}";
+    assert_eq!(run(source), "100\n0\n101\n1\n102\n2\n103\n");
+}
+
+#[test]
+fn while_let_releases_its_binding_on_every_iteration() {
+    let source = tracked(
+        "func make(_ n: Int) -> Tracked? {\n  if n < 3 { return Tracked(id: n + 1) }\n  return nil\n}\nfunc main() {\n  var i = 0\n  while let t = make(i) {\n    print(10 + i)\n    i += 1\n  }\n  print(99)\n}",
+    );
+    assert_eq!(run(&source), "10\n-1\n11\n-2\n12\n-3\n99\n");
+}
+
+#[test]
+fn a_function_may_return_from_inside_while_let() {
+    let source = "func first(_ x: Int?) -> Int {\n  while let v = x {\n    return v\n  }\n  return 0 - 1\n}\nfunc main() {\n  print(first(7))\n  print(first(nil))\n}";
+    assert_eq!(run(source), "7\n-1\n");
+}
+
+#[test]
+fn while_var_binds_a_variable_that_can_be_changed() {
+    let source = "func main() {\n  var x: Int? = 2\n  while var v = x {\n    v += 10\n    print(v)\n    x = nil\n  }\n}";
+    assert_eq!(run(source), "12\n");
+}
+
+#[test]
+fn while_let_needs_an_optional() {
+    assert!(
+        build_error("func main() {\n  let a = 1\n  while let v = a { print(v) }\n}")
+            .contains("optional")
+    );
+}
