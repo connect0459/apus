@@ -1294,7 +1294,15 @@ impl Emitter<'_, '_> {
             BinOp::Sub => self.builder.ins().ssub_overflow(lhs, rhs),
             BinOp::Mul => self.builder.ins().smul_overflow(lhs, rhs),
             BinOp::Div => return self.builder.ins().sdiv(lhs, rhs),
-            _ => return self.builder.ins().srem(lhs, rhs),
+            _ => {
+                let smallest = self.builder.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
+                let minus_one = self.builder.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
+                let overflow = self.builder.ins().band(smallest, minus_one);
+                self.builder
+                    .ins()
+                    .trapnz(overflow, TrapCode::INTEGER_OVERFLOW);
+                return self.builder.ins().srem(lhs, rhs);
+            }
         };
         self.builder
             .ins()

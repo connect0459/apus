@@ -3665,3 +3665,48 @@ fn a_long_chain_of_method_calls_builds_and_runs() {
     );
     assert_eq!(run(&source), "3000\n");
 }
+
+#[test]
+fn the_remainder_of_the_smallest_integer_by_minus_one_traps() {
+    run_expecting_a_crash(
+        "func main() {\n  let m = -9223372036854775807 - 1\n  let d = -1\n  print(m % d)\n}",
+    );
+}
+
+#[test]
+fn the_remainder_by_minus_one_is_zero_for_every_other_value() {
+    let source = "func main() {\n  let d = -1\n  print(7 % d)\n  print(0 % d)\n  let m = -9223372036854775807 - 1\n  print(m % 2)\n  print((m + 1) % d)\n}";
+    assert_eq!(run(source), "0\n0\n0\n0\n");
+}
+
+#[test]
+fn an_enum_without_payloads_prints_the_name_of_its_case() {
+    let source = format!(
+        "{LIGHT}func main() {{\n  print(Light.red)\n  var l = Light.green\n  print(l)\n  l.next()\n  print(l)\n}}"
+    );
+    assert_eq!(run(&source), "red\ngreen\nblue\n");
+}
+
+#[test]
+fn an_enum_member_and_a_call_result_can_be_printed() {
+    let source = "enum Color { case red, green }\nstruct Pixel {\n  var color: Color\n}\nfunc pick(_ n: Int) -> Color {\n  print(100 + n)\n  if n == 0 { return Color.red }\n  return Color.green\n}\nfunc main() {\n  let p = Pixel(color: Color.green)\n  print(p.color)\n  print(pick(0))\n  print(pick(1))\n}";
+    assert_eq!(run(source), "green\n100\nred\n101\ngreen\n");
+}
+
+#[test]
+fn printing_an_enum_evaluates_the_expression_once_and_works_in_a_loop() {
+    let source = "enum Color { case red, green }\nfunc next(_ n: Int) -> Color {\n  print(n)\n  if n == 0 { return Color.red }\n  return Color.green\n}\nfunc main() {\n  var i = 0\n  while i < 2 {\n    print(next(i))\n    i += 1\n  }\n}";
+    assert_eq!(run(source), "0\nred\n1\ngreen\n");
+}
+
+#[test]
+fn an_enum_with_payloads_still_cannot_be_printed() {
+    let source = "enum Shape { case circle(Int), empty }\nfunc main() {\n  print(Shape.empty)\n}";
+    assert!(build_error(source).contains("cannot print"));
+}
+
+#[test]
+fn print_does_not_break_a_loop_label_inside_an_enum_print() {
+    let source = "enum Color { case red }\nfunc main() {\n  outer: for i in 0..<3 {\n    for j in 0..<3 {\n      print(Color.red)\n      if j == 1 { continue outer }\n    }\n  }\n}";
+    assert_eq!(run(source), "red\nred\nred\nred\nred\nred\n");
+}

@@ -1878,6 +1878,39 @@ impl FnCx<'_> {
         Ok(TStmt::Fatal(text))
     }
 
+    fn print_enum(&mut self, value: TExpr) -> TStmt {
+        let ty = value.ty();
+        let names: Vec<String> = self
+            .sigs
+            .enum_of(ty)
+            .map(|sig| sig.cases().iter().map(|c| c.name().to_string()).collect())
+            .unwrap_or_default();
+        let held = self.temp(ty);
+        let shown = |name: &str| TStmt::Print(TExpr::Str(name.to_string()));
+        let mut chain = vec![names.last().map_or_else(|| shown(""), |last| shown(last))];
+        for (index, name) in names.iter().enumerate().rev().skip(1) {
+            chain = vec![TStmt::If {
+                cond: TExpr::Binary {
+                    op: BinOp::Eq,
+                    lhs: Box::new(TExpr::Local(held, ty)),
+                    rhs: Box::new(TExpr::EnumCase { ty, index }),
+                },
+                then_body: vec![shown(name)],
+                else_body: chain,
+            }];
+        }
+        let mut body = vec![TStmt::Let {
+            local: held,
+            init: value,
+        }];
+        body.extend(chain);
+        TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: body,
+            else_body: Vec::new(),
+        }
+    }
+
     fn print(&mut self, line: u32, args: &[Arg]) -> CResult<TStmt> {
         let [arg] = args else {
             return Err(CheckError::at(
@@ -1892,6 +1925,9 @@ impl FnCx<'_> {
             ));
         }
         let value = self.value(arg.value())?;
+        if matches!(value.ty(), Ty::Enum(_)) {
+            return Ok(self.print_enum(value));
+        }
         if !matches!(value.ty(), Ty::Int | Ty::Bool | Ty::Str) {
             return Err(CheckError::at(
                 line,
@@ -3371,8 +3407,8 @@ mod tests {
     }
 
     #[test]
-    fn an_enum_value_cannot_be_printed() {
-        assert!(check_all(&with_color("print(Color.red)")).is_err());
+    fn an_enum_without_payloads_can_be_printed() {
+        assert!(check_all(&with_color("print(Color.red)")).is_ok());
     }
 
     #[test]
