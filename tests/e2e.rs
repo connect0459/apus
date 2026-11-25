@@ -1593,3 +1593,52 @@ fn a_subclass_of_a_class_with_an_initializer_must_declare_its_own() {
     );
     assert!(build_error(&source).contains("initializer"));
 }
+
+#[test]
+fn a_class_may_declare_a_deinitializer() {
+    let source =
+        "class Node {\n  var v: Int\n  deinit { print(self.v) }\n}\nfunc main() { print(1) }";
+    assert_eq!(run(source), "1\n");
+}
+
+#[test]
+fn a_deinitializer_may_use_members_without_writing_self() {
+    let source = "class Node {\n  var v: Int\n  deinit { print(v) }\n}\nfunc main() { }";
+    assert_eq!(run(source), "");
+}
+
+#[test]
+fn a_struct_cannot_declare_a_deinitializer() {
+    let source = "struct S {\n  var v: Int\n  deinit { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("class"));
+}
+
+#[test]
+fn an_enum_cannot_declare_a_deinitializer() {
+    let source = "enum E {\n  case a\n  deinit { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("class"));
+}
+
+#[test]
+fn a_generic_class_cannot_declare_a_deinitializer_yet() {
+    let source = "class Box<T> {\n  var v: T\n  deinit { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("generic"));
+}
+
+#[test]
+fn a_class_cannot_declare_two_deinitializers() {
+    let source = "class A {\n  var v: Int\n  deinit { }\n  deinit { }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("duplicate"));
+}
+
+#[test]
+fn a_subclass_deinitializer_is_not_an_override() {
+    let source =
+        "class A {\n  var v: Int\n  deinit { }\n}\nclass B: A {\n  deinit { }\n}\nfunc main() { }";
+    assert_eq!(run(source), "");
+}
+
+#[test]
+fn deinit_outside_a_type_is_rejected_at_the_top_level() {
+    assert!(build_error("deinit { }\nfunc main() { }").contains("top level"));
+}

@@ -392,7 +392,10 @@ impl Signatures {
     }
 
     fn check_override(&self, func: &FuncDecl) -> CResult<()> {
-        let Some(owner) = func.owner().filter(|_| !func.is_init()) else {
+        let Some(owner) = func
+            .owner()
+            .filter(|_| !func.is_init() && !func.is_deinit())
+        else {
             return Ok(());
         };
         let (ty, _) = self.member_owner(func, owner)?;
@@ -496,6 +499,18 @@ impl Signatures {
         } else {
             return Err(CheckError::at(line, format!("unknown type '{owner}'")));
         };
+        if func.is_deinit() && !ty.is_class() {
+            return Err(CheckError::at(
+                line,
+                format!("'deinit' applies only to a class, not to '{owner}'"),
+            ));
+        }
+        if func.is_deinit() && !generics.is_empty() {
+            return Err(CheckError::at(
+                line,
+                format!("the generic class '{owner}' cannot declare a deinit yet"),
+            ));
+        }
         if func.is_override() && !ty.is_class() {
             return Err(CheckError::at(
                 line,

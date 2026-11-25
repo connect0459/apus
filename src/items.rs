@@ -174,7 +174,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
 }
 
 fn is_member_start(token: &Token) -> bool {
-    matches!(token, Token::Ident(k) if k == "func" || k == "init" || k == "mutating" || k == "override")
+    matches!(token, Token::Ident(k) if k == "func" || k == "init" || k == "deinit" || k == "mutating" || k == "override")
 }
 
 fn extract_members(slice: &mut Vec<Spanned>) -> Result<Vec<Vec<Spanned>>, SplitError> {
@@ -240,7 +240,11 @@ fn modifier_count(member: &[Spanned]) -> usize {
 }
 
 fn has_type_parameters(member: &[Spanned]) -> bool {
-    let name_at = modifier_count(member) + 1;
+    let at = modifier_count(member);
+    if matches!(member.get(at).map(Spanned::token), Some(Token::Ident(k)) if k == "deinit") {
+        return false;
+    }
+    let name_at = at + 1;
     matches!(member.get(name_at + 1).map(Spanned::token), Some(Token::Punct(p)) if p == "<")
 }
 
@@ -248,6 +252,7 @@ fn member_name(tokens: &[Spanned]) -> Result<String, SplitError> {
     let at = modifier_count(tokens);
     match tokens.get(at).map(Spanned::token) {
         Some(Token::Ident(k)) if k == "init" => Ok("init".to_string()),
+        Some(Token::Ident(k)) if k == "deinit" => Ok("deinit".to_string()),
         Some(Token::Ident(k)) if k == "func" => match tokens.get(at + 1).map(Spanned::token) {
             Some(Token::Ident(name)) => Ok(name.clone()),
             _ => Err(SplitError {
@@ -508,6 +513,16 @@ mod tests {
             digest_of("struct P { var x: Int\n func f() -> Int { return 1 } }"),
             digest_of("struct P { var x: Int\n func f() -> Bool { return true } }")
         );
+    }
+
+    #[test]
+    fn a_deinit_is_split_out_as_a_member_of_its_class() {
+        let found = items("class A {\n  var x: Int\n  deinit { print(1) }\n}\nfunc main() { }");
+        assert!(
+            found.iter().any(|item| item.name() == "A.deinit"),
+            "{found:?}"
+        );
+        assert!(!found.iter().any(|item| item.is_generic()));
     }
 
     #[test]

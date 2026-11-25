@@ -19,9 +19,9 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 20] = [
-    "func", "struct", "class", "enum", "init", "mutating", "override", "case", "switch", "default",
-    "var", "let", "if", "else", "while", "for", "in", "return", "true", "false",
+const KEYWORDS: [&str; 21] = [
+    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "case", "switch",
+    "default", "var", "let", "if", "else", "while", "for", "in", "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -228,6 +228,8 @@ impl Parser<'_> {
             self.func_decl(line).map(|f| Decl::Func(f.as_mutating()))
         } else if self.eat_keyword("init") {
             self.init_decl(line).map(Decl::Func)
+        } else if self.eat_keyword("deinit") {
+            self.deinit_decl(line).map(Decl::Func)
         } else if self.eat_keyword("func") {
             self.func_decl(line).map(Decl::Func)
         } else if self.eat_keyword("struct") {
@@ -265,6 +267,16 @@ impl Parser<'_> {
             self.block()?
         };
         Ok(FuncDecl::new(line, name, params, ret, body).with_generics(generics))
+    }
+
+    fn deinit_decl(&mut self, line: u32) -> PResult<FuncDecl> {
+        let body = if self.header_only {
+            self.pos = self.tokens.len();
+            Vec::new()
+        } else {
+            self.block()?
+        };
+        Ok(FuncDecl::new(line, "deinit".to_string(), Vec::new(), None, body).as_deinit())
     }
 
     fn init_decl(&mut self, line: u32) -> PResult<FuncDecl> {
@@ -856,6 +868,25 @@ mod tests {
     #[test]
     fn override_must_be_followed_by_func() {
         assert!(try_parse("override init() { }").is_err());
+    }
+
+    #[test]
+    fn deinit_declares_a_member_without_parameters() {
+        let f = func("deinit { print(1) }");
+        assert!(f.is_deinit());
+        assert_eq!(f.name(), "deinit");
+        assert!(f.params().is_empty());
+        assert!(!func("func f() { }").is_deinit());
+    }
+
+    #[test]
+    fn deinit_cannot_take_parameters() {
+        assert!(try_parse("deinit(x: Int) { }").is_err());
+    }
+
+    #[test]
+    fn deinit_cannot_be_used_as_a_name() {
+        assert!(try_parse("func f() { let deinit = 1 }").is_err());
     }
 
     #[test]

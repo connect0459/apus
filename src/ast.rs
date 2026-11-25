@@ -78,6 +78,7 @@ pub struct FuncDecl {
     mutating: bool,
     overriding: bool,
     init: bool,
+    deinit: bool,
 }
 
 impl FuncDecl {
@@ -99,6 +100,7 @@ impl FuncDecl {
             mutating: false,
             overriding: false,
             init: false,
+            deinit: false,
         }
     }
 
@@ -109,6 +111,11 @@ impl FuncDecl {
 
     pub fn as_mutating(mut self) -> Self {
         self.mutating = true;
+        self
+    }
+
+    pub fn as_deinit(mut self) -> Self {
+        self.deinit = true;
         self
     }
 
@@ -138,6 +145,10 @@ impl FuncDecl {
 
     pub fn is_init(&self) -> bool {
         self.init
+    }
+
+    pub fn is_deinit(&self) -> bool {
+        self.deinit
     }
 
     pub fn is_override(&self) -> bool {
