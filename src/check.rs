@@ -447,7 +447,14 @@ impl FnCx<'_> {
     fn lower_stmt(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
         match stmt.kind() {
             StmtKind::Switch { subject, cases } => {
-                self.switch_stmt(stmt.line(), subject, cases, out)
+                let mut lowered = Vec::new();
+                self.switch_stmt(stmt.line(), subject, cases, &mut lowered)?;
+                out.push(TStmt::If {
+                    cond: TExpr::Bool(true),
+                    then_body: lowered,
+                    else_body: Vec::new(),
+                });
+                Ok(())
             }
             StmtKind::Expr(expr) if matches!(expr.kind(), ExprKind::OptMemberCall { .. }) => {
                 self.optional_call_stmt(stmt.line(), expr, out)

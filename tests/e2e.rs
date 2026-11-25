@@ -2445,3 +2445,30 @@ fn a_member_cannot_be_both_weak_and_unowned() {
     let source = "class P { var x: Int }\nclass C {\n  weak unowned var p: P?\n}\nfunc main() { }";
     assert!(build_error(source).contains("weak"));
 }
+
+#[test]
+fn a_switch_can_match_the_cases_of_an_optional() {
+    let source = "func show(_ x: Int?) {\n  switch x {\n  case .some(let v): print(v)\n  case .none: print(0 - 1)\n  }\n}\nfunc main() {\n  show(4)\n  show(nil)\n}";
+    assert_eq!(run(source), "4\n-1\n");
+}
+
+#[test]
+fn a_switch_on_an_optional_may_use_a_default() {
+    let source = "func main() {\n  let y: Int? = nil\n  switch y {\n  case .some(let v): print(v)\n  default: print(9)\n  }\n}";
+    assert_eq!(run(source), "9\n");
+}
+
+#[test]
+fn a_switch_on_an_optional_must_be_exhaustive() {
+    let source =
+        "func main() {\n  let y: Int? = 1\n  switch y {\n  case .some(let v): print(v)\n  }\n}";
+    assert!(build_error(source).contains("exhaustive") || build_error(source).contains("none"));
+}
+
+#[test]
+fn a_switch_on_an_optional_instance_binds_it_with_ownership() {
+    let source = tracked(
+        "func main() {\n  var t: Tracked? = Tracked(id: 1)\n  switch t {\n  case .some(let v):\n    t = nil\n    print(v.id)\n  case .none: print(0)\n  }\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "1\n-1\n10\n");
+}
