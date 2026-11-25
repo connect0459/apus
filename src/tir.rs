@@ -112,6 +112,9 @@ pub enum TStmt {
         value: TExpr,
     },
     Return(Option<TExpr>),
+    Break(usize),
+    Continue(usize),
+    Block(Vec<TStmt>),
     If {
         cond: TExpr,
         then_body: Vec<TStmt>,
@@ -299,6 +302,9 @@ impl<E> Rewriter<'_, E> {
                 then_body: self.stmts(then_body)?,
                 else_body: self.stmts(else_body)?,
             },
+            TStmt::Break(depth) => TStmt::Break(*depth),
+            TStmt::Continue(depth) => TStmt::Continue(*depth),
+            TStmt::Block(body) => TStmt::Block(self.stmts(body)?),
             TStmt::While { cond, body } => TStmt::While {
                 cond: self.expr(cond)?,
                 body: self.stmts(body)?,

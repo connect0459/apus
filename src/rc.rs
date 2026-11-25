@@ -10,6 +10,7 @@ pub fn insert(func: &TFunc, sigs: &Signatures) -> (TFunc, Vec<StructId>) {
         sigs,
         locals: func.locals().to_vec(),
         scopes: Vec::new(),
+        jumps: Vec::new(),
         temps: Vec::new(),
         created: Vec::new(),
     };
@@ -110,10 +111,16 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
     TFunc::new(sigs.drop_name(id), 1, Ty::Void, vec![class], body)
 }
 
+struct JumpTarget {
+    height: usize,
+    resume: Vec<TStmt>,
+}
+
 struct Pass<'a> {
     sigs: &'a Signatures,
     locals: Vec<Ty>,
     scopes: Vec<Vec<LocalId>>,
+    jumps: Vec<JumpTarget>,
     temps: Vec<LocalId>,
     created: Vec<StructId>,
 }
@@ -169,6 +176,37 @@ impl Pass<'_> {
         self.release_all(temps.iter().rev().copied())
     }
 
+    fn jump_scope(
+        &mut self,
+        resume: Vec<TStmt>,
+        body: impl FnOnce(&mut Self) -> Vec<TStmt>,
+    ) -> Vec<TStmt> {
+        self.jumps.push(JumpTarget {
+            height: self.scopes.len(),
+            resume,
+        });
+        let result = body(self);
+        self.jumps.pop();
+        result
+    }
+
+    fn jump(&self, depth: usize, with_resume: bool) -> Vec<TStmt> {
+        let Some(target) = self
+            .jumps
+            .len()
+            .checked_sub(depth + 1)
+            .map(|i| &self.jumps[i])
+        else {
+            return Vec::new();
+        };
+        let leaving = self.scopes[target.height..].iter().flatten().rev().copied();
+        let mut out = self.release_all(leaving);
+        if with_resume {
+            out.extend(target.resume.iter().cloned());
+        }
+        out
+    }
+
     fn live_locals(&self) -> Vec<LocalId> {
         self.scopes.iter().flatten().copied().collect()
     }
@@ -180,7 +218,10 @@ impl Pass<'_> {
             self.stmt(stmt, &mut out);
         }
         let scope = self.scopes.pop().unwrap_or_default();
-        if !matches!(out.last(), Some(TStmt::Return(_))) {
+        if !matches!(
+            out.last(),
+            Some(TStmt::Return(_) | TStmt::Break(_) | TStmt::Continue(_))
+        ) {
             out.extend(self.release_all(scope.into_iter().rev()));
         }
         out
@@ -211,24 +252,38 @@ impl Pass<'_> {
                     else_body,
                 });
             }
+            TStmt::Break(depth) => {
+                out.extend(self.jump(*depth, false));
+                out.push(TStmt::Break(*depth));
+            }
+            TStmt::Continue(depth) => {
+                out.extend(self.jump(*depth, true));
+                out.push(TStmt::Continue(*depth));
+            }
+            TStmt::Block(body) => {
+                let body = self.jump_scope(Vec::new(), |p| p.block(body));
+                out.push(TStmt::Block(body));
+            }
             TStmt::While { cond, body } => {
                 let (cond, temps) = self.scoped(|p| p.expr(cond));
-                let mut body = self.block(body);
                 if temps.is_empty() {
+                    let body = self.jump_scope(Vec::new(), |p| p.block(body));
                     out.push(TStmt::While { cond, body });
                     return;
                 }
                 let flag = self.new_local(Ty::Bool);
+                let mut resume = vec![TStmt::Assign {
+                    local: flag,
+                    value: cond.clone(),
+                }];
+                resume.extend(self.release_temps(&temps));
+                let mut body = self.jump_scope(resume.clone(), |p| p.block(body));
                 out.push(TStmt::Let {
                     local: flag,
-                    init: cond.clone(),
+                    init: cond,
                 });
                 out.extend(self.release_temps(&temps));
-                body.push(TStmt::Assign {
-                    local: flag,
-                    value: cond,
-                });
-                body.extend(self.release_temps(&temps));
+                body.extend(resume);
                 out.push(TStmt::While {
                     cond: TExpr::Local(flag, Ty::Bool),
                     body,
@@ -258,7 +313,7 @@ impl Pass<'_> {
                     out.extend(self.release_temps(&temps));
                     (TExpr::Local(low, Ty::Int), TExpr::Local(high, Ty::Int))
                 };
-                let body = self.block(body);
+                let body = self.jump_scope(Vec::new(), |p| p.block(body));
                 out.push(TStmt::ForRange {
                     local: *local,
                     lo,

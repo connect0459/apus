@@ -344,6 +344,7 @@ fn emit_function(
         sret,
         symbols: Symbols::default(),
         literals: Vec::new(),
+        jumps: Vec::new(),
     };
     let terminated = emitter.stmts(func.body())?;
     if !terminated {
@@ -374,6 +375,14 @@ struct Emitter<'a, 'f> {
     sret: Option<Value>,
     symbols: Symbols,
     literals: Vec<Literal>,
+    jumps: Vec<JumpBlocks>,
+}
+
+struct JumpBlocks {
+    exit: Block,
+    next: Option<Block>,
+    exit_used: bool,
+    next_used: bool,
 }
 
 fn field_offset(index: usize) -> i32 {
@@ -586,6 +595,23 @@ impl Emitter<'_, '_> {
                 then_body,
                 else_body,
             } => self.if_stmt(cond, then_body, else_body),
+            TStmt::Break(depth) => {
+                let target = self.jump_target(*depth)?;
+                target.exit_used = true;
+                let exit = target.exit;
+                self.builder.ins().jump(exit, &[]);
+                Ok(true)
+            }
+            TStmt::Continue(depth) => {
+                let target = self.jump_target(*depth)?;
+                target.next_used = true;
+                let next = target
+                    .next
+                    .ok_or_else(|| CodegenError::from("continue outside a loop".to_string()))?;
+                self.builder.ins().jump(next, &[]);
+                Ok(true)
+            }
+            TStmt::Block(body) => self.block_stmt(body),
             TStmt::While { cond, body } => self.while_stmt(cond, body),
             TStmt::ForRange {
                 local,
@@ -835,6 +861,46 @@ impl Emitter<'_, '_> {
         Ok(terminated)
     }
 
+    fn jump_target(&mut self, depth: usize) -> GResult<&mut JumpBlocks> {
+        let index = self
+            .jumps
+            .len()
+            .checked_sub(depth + 1)
+            .ok_or_else(|| CodegenError::from("jump outside a loop or a switch".to_string()))?;
+        Ok(&mut self.jumps[index])
+    }
+
+    fn open_jump_scope(&mut self, exit: Block, next: Option<Block>) {
+        self.jumps.push(JumpBlocks {
+            exit,
+            next,
+            exit_used: false,
+            next_used: false,
+        });
+    }
+
+    fn close_jump_scope(&mut self) -> GResult<JumpBlocks> {
+        self.jumps
+            .pop()
+            .ok_or_else(|| CodegenError::from("unbalanced jump scope".to_string()))
+    }
+
+    fn block_stmt(&mut self, body: &[TStmt]) -> GResult<bool> {
+        let exit = self.builder.create_block();
+        self.open_jump_scope(exit, None);
+        let terminated = self.stmts(body)?;
+        let scope = self.close_jump_scope()?;
+        if !terminated {
+            self.builder.ins().jump(exit, &[]);
+        }
+        self.builder.switch_to_block(exit);
+        if terminated && !scope.exit_used {
+            self.builder.ins().trap(UNREACHABLE);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn while_stmt(&mut self, cond: &TExpr, body: &[TStmt]) -> GResult<bool> {
         let header = self.builder.create_block();
         let body_block = self.builder.create_block();
@@ -843,7 +909,9 @@ impl Emitter<'_, '_> {
         self.builder.switch_to_block(header);
         let cond = self.value(cond)?;
         self.builder.ins().brif(cond, body_block, &[], exit, &[]);
+        self.open_jump_scope(exit, Some(header));
         self.branch(body_block, body, header)?;
+        self.close_jump_scope()?;
         self.builder.switch_to_block(exit);
         Ok(false)
     }
@@ -872,8 +940,16 @@ impl Emitter<'_, '_> {
         };
         let more = self.builder.ins().icmp(cc, current, hi);
         self.builder.ins().brif(more, body_block, &[], exit, &[]);
+        let latch = self.builder.create_block();
         self.builder.switch_to_block(body_block);
-        if !self.stmts(body)? {
+        self.open_jump_scope(exit, Some(latch));
+        let terminated = self.stmts(body)?;
+        let scope = self.close_jump_scope()?;
+        if !terminated {
+            self.builder.ins().jump(latch, &[]);
+        }
+        if !terminated || scope.next_used {
+            self.builder.switch_to_block(latch);
             let current = self.builder.use_var(var);
             if inclusive {
                 let advance = self.builder.create_block();

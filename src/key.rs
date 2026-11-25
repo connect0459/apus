@@ -122,6 +122,18 @@ impl Encoder<'_> {
                 self.stmts(then_body);
                 self.stmts(else_body);
             }
+            TStmt::Break(depth) => {
+                self.tag(23);
+                self.usize(*depth);
+            }
+            TStmt::Continue(depth) => {
+                self.tag(24);
+                self.usize(*depth);
+            }
+            TStmt::Block(body) => {
+                self.tag(25);
+                self.stmts(body);
+            }
             TStmt::While { cond, body } => {
                 self.tag(15);
                 self.expr(cond);

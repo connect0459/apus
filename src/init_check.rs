@@ -252,6 +252,8 @@ impl Scan<'_> {
                 self.expr_uses_self(target) || self.expr_uses_self(value)
             }
             StmtKind::Return(value) => value.as_ref().is_some_and(|e| self.expr_uses_self(e)),
+            StmtKind::Break(_) | StmtKind::Continue(_) => false,
+            StmtKind::Labeled { stmt, .. } => self.stmt_uses_self(stmt),
             StmtKind::If {
                 cond,
                 then_body,
@@ -396,7 +398,12 @@ fn returns(stmt: &Stmt) -> bool {
         | StmtKind::WhileLet { body, .. }
         | StmtKind::For { body, .. } => any_returns(body),
         StmtKind::Switch { cases, .. } => cases.iter().any(|c| any_returns(c.body())),
-        StmtKind::Let { .. } | StmtKind::Assign { .. } | StmtKind::Expr(_) => false,
+        StmtKind::Labeled { stmt, .. } => returns(stmt),
+        StmtKind::Let { .. }
+        | StmtKind::Assign { .. }
+        | StmtKind::Break(_)
+        | StmtKind::Continue(_)
+        | StmtKind::Expr(_) => false,
     }
 }
 

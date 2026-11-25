@@ -426,6 +426,12 @@ pub enum StmtKind {
         value: Expr,
     },
     Return(Option<Expr>),
+    Break(Option<String>),
+    Continue(Option<String>),
+    Labeled {
+        label: String,
+        stmt: Box<Stmt>,
+    },
     If {
         cond: Expr,
         then_body: Vec<Stmt>,

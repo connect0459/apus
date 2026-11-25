@@ -19,10 +19,10 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 27] = [
+const KEYWORDS: [&str; 29] = [
     "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "weak",
     "nil", "guard", "as", "is", "case", "switch", "default", "var", "let", "if", "else", "while",
-    "for", "in", "return", "true", "false",
+    "for", "in", "return", "break", "continue", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -583,6 +583,14 @@ impl Parser<'_> {
             let iter = self.expr()?;
             let body = self.block()?;
             StmtKind::For { var, iter, body }
+        } else if self.eat_keyword("break") {
+            StmtKind::Break(self.jump_label())
+        } else if self.eat_keyword("continue") {
+            StmtKind::Continue(self.jump_label())
+        } else if self.peek_name().is_some()
+            && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":")
+        {
+            return self.labeled_stmt(line);
         } else if self.eat_keyword("return") {
             let has_value = self.on_same_line() && !self.is_punct("}") && !self.is_punct(";");
             StmtKind::Return(if has_value { Some(self.expr()?) } else { None })
@@ -590,6 +598,30 @@ impl Parser<'_> {
             self.expr_or_assign_kind()?
         };
         Ok(Stmt::new(line, kind))
+    }
+
+    fn jump_label(&mut self) -> Option<String> {
+        if self.on_same_line() {
+            self.name().ok()
+        } else {
+            None
+        }
+    }
+
+    fn labeled_stmt(&mut self, line: u32) -> PResult<Stmt> {
+        let label = self.name()?;
+        self.expect_punct(":")?;
+        if !(self.is_keyword("while") || self.is_keyword("for") || self.is_keyword("switch")) {
+            return self.fail("a label must precede a 'while', 'for' or 'switch' statement");
+        }
+        let stmt = self.stmt()?;
+        Ok(Stmt::new(
+            line,
+            StmtKind::Labeled {
+                label,
+                stmt: Box::new(stmt),
+            },
+        ))
     }
 
     fn let_kind(&mut self) -> PResult<StmtKind> {
@@ -1656,6 +1688,59 @@ mod tests {
             vec![st(StmtKind::Return(None)), st(StmtKind::Expr(int(1)))]
         );
         assert_eq!(body("return 1"), vec![st(StmtKind::Return(Some(int(1))))]);
+    }
+
+    #[test]
+    fn break_and_continue_take_a_label_only_when_one_follows_on_the_same_line() {
+        assert_eq!(body("break"), vec![st(StmtKind::Break(None))]);
+        assert_eq!(body("continue"), vec![st(StmtKind::Continue(None))]);
+        assert_eq!(
+            body("break outer"),
+            vec![st(StmtKind::Break(Some("outer".to_string())))]
+        );
+        assert_eq!(
+            body("continue outer"),
+            vec![st(StmtKind::Continue(Some("outer".to_string())))]
+        );
+        assert_eq!(
+            body("break\nouter"),
+            vec![st(StmtKind::Break(None)), st(StmtKind::Expr(id("outer")))]
+        );
+    }
+
+    #[test]
+    fn a_label_names_the_loop_or_switch_that_follows_it() {
+        assert_eq!(
+            body("outer: while true { }"),
+            vec![st(StmtKind::Labeled {
+                label: "outer".to_string(),
+                stmt: Box::new(st(StmtKind::While {
+                    cond: ex(ExprKind::Bool(true)),
+                    body: vec![],
+                })),
+            })]
+        );
+        assert_eq!(
+            body("outer: for k in 0..<3 { }"),
+            vec![st(StmtKind::Labeled {
+                label: "outer".to_string(),
+                stmt: Box::new(st(StmtKind::For {
+                    var: "k".to_string(),
+                    iter: range(int(0), int(3), false),
+                    body: vec![],
+                })),
+            })]
+        );
+    }
+
+    #[test]
+    fn a_label_must_precede_a_loop_or_a_switch() {
+        assert!(
+            try_parse("func f() { outer: return }")
+                .unwrap_err()
+                .message()
+                .contains("label")
+        );
     }
 
     #[test]

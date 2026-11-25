@@ -2781,3 +2781,156 @@ fn a_cast_needs_a_class_on_both_sides() {
     let target = "class A { var x: Int }\nfunc main() {\n  let a = A(x: 1)\n  print(a is Int)\n}";
     assert!(build_error(target).contains("class"));
 }
+
+#[test]
+fn break_leaves_the_innermost_while_loop() {
+    let source = "func main() {\n  var i = 0\n  while true {\n    if i == 3 { break }\n    print(i)\n    i += 1\n  }\n  print(99)\n}";
+    assert_eq!(run(source), "0\n1\n2\n99\n");
+}
+
+#[test]
+fn continue_skips_the_rest_of_a_while_iteration() {
+    let source = "func main() {\n  var i = 0\n  while i < 5 {\n    i += 1\n    if i == 3 { continue }\n    print(i)\n  }\n}";
+    assert_eq!(run(source), "1\n2\n4\n5\n");
+}
+
+#[test]
+fn break_and_continue_work_in_a_for_loop() {
+    let source = "func main() {\n  for i in 0..<10 {\n    if i == 2 { continue }\n    if i == 5 { break }\n    print(i)\n  }\n  for j in 1...4 {\n    if j == 2 { continue }\n    print(j)\n  }\n}";
+    assert_eq!(run(source), "0\n1\n3\n4\n1\n3\n4\n");
+}
+
+#[test]
+fn continue_on_the_last_value_of_an_inclusive_range_ends_the_loop() {
+    let source = "func main() {\n  for j in 1...3 {\n    if j == 3 { continue }\n    print(j)\n  }\n  print(9)\n}";
+    assert_eq!(run(source), "1\n2\n9\n");
+}
+
+#[test]
+fn break_affects_only_the_innermost_loop() {
+    let source = "func main() {\n  for i in 0..<3 {\n    for j in 0..<3 {\n      if j == 1 { break }\n      print(i * 10 + j)\n    }\n  }\n}";
+    assert_eq!(run(source), "0\n10\n20\n");
+}
+
+#[test]
+fn a_labeled_break_leaves_the_named_loop() {
+    let source = "func main() {\n  outer: for i in 0..<3 {\n    for j in 0..<3 {\n      if i == 1 && j == 1 { break outer }\n      print(i * 10 + j)\n    }\n  }\n  print(99)\n}";
+    assert_eq!(run(source), "0\n1\n2\n10\n99\n");
+}
+
+#[test]
+fn a_labeled_continue_starts_the_next_iteration_of_the_named_loop() {
+    let source = "func main() {\n  outer: for i in 0..<3 {\n    for j in 0..<3 {\n      if j == 1 { continue outer }\n      print(i * 10 + j)\n    }\n  }\n}";
+    assert_eq!(run(source), "0\n10\n20\n");
+}
+
+#[test]
+fn break_inside_a_switch_leaves_only_the_switch() {
+    let source = "enum Light { case red, green }\nfunc main() {\n  for i in 0..<2 {\n    let l = Light.red\n    switch l {\n    case .red:\n      print(1)\n      if i == 0 { break }\n      print(2)\n    case .green:\n      print(3)\n    }\n    print(10 + i)\n  }\n}";
+    assert_eq!(run(source), "1\n10\n1\n2\n11\n");
+}
+
+#[test]
+fn a_labeled_break_leaves_a_loop_from_inside_a_switch() {
+    let source = "enum Light { case red, green }\nfunc main() {\n  loop: for i in 0..<3 {\n    let l = Light.red\n    switch l {\n    case .red:\n      if i == 1 { break loop }\n      print(i)\n    case .green:\n      print(3)\n    }\n  }\n  print(99)\n}";
+    assert_eq!(run(source), "0\n99\n");
+}
+
+#[test]
+fn continue_inside_a_switch_continues_the_enclosing_loop() {
+    let source = "enum Light { case red, green }\nfunc main() {\n  for i in 0..<3 {\n    let l = Light.red\n    switch l {\n    case .red:\n      if i == 1 { continue }\n    case .green:\n      print(3)\n    }\n    print(i)\n  }\n}";
+    assert_eq!(run(source), "0\n2\n");
+}
+
+#[test]
+fn a_labeled_switch_can_be_left_from_a_nested_loop() {
+    let source = "enum Light { case red }\nfunc main() {\n  let l = Light.red\n  pick: switch l {\n  case .red:\n    for i in 0..<5 {\n      if i == 2 { break pick }\n      print(i)\n    }\n    print(50)\n  }\n  print(99)\n}";
+    assert_eq!(run(source), "0\n1\n99\n");
+}
+
+#[test]
+fn break_and_continue_work_in_while_let() {
+    let source = "func main() {\n  var i = 0\n  while let v = next(i) {\n    i += 1\n    if v == 1 { continue }\n    if v == 3 { break }\n    print(v)\n  }\n  print(99)\n}\nfunc next(_ n: Int) -> Int? {\n  if n < 10 { return n }\n  return nil\n}";
+    assert_eq!(run(source), "0\n2\n99\n");
+}
+
+#[test]
+fn guard_may_leave_a_loop_with_break_or_continue() {
+    let source = "func main() {\n  for i in 0..<5 {\n    guard i != 1 else { continue }\n    guard i < 3 else { break }\n    print(i)\n  }\n  print(99)\n}";
+    assert_eq!(run(source), "0\n2\n99\n");
+}
+
+#[test]
+fn guard_let_may_leave_a_loop_with_break() {
+    let source = "func main() {\n  var i = 0\n  while true {\n    guard let v = pick(i) else { break }\n    print(v)\n    i += 1\n  }\n}\nfunc pick(_ n: Int) -> Int? {\n  if n < 2 { return n + 5 }\n  return nil\n}";
+    assert_eq!(run(source), "5\n6\n");
+}
+
+#[test]
+fn break_releases_the_variables_of_the_loop_body() {
+    let source = tracked(
+        "func main() {\n  var i = 0\n  while true {\n    let t = Tracked(id: i + 1)\n    if i == 1 { break }\n    print(i)\n    i += 1\n  }\n  print(99)\n}",
+    );
+    assert_eq!(run(&source), "0\n-1\n-2\n99\n");
+}
+
+#[test]
+fn continue_releases_the_variables_of_the_loop_body() {
+    let source = tracked(
+        "func main() {\n  for i in 0..<3 {\n    let t = Tracked(id: i + 1)\n    if i == 1 { continue }\n    print(i)\n  }\n}",
+    );
+    assert_eq!(run(&source), "0\n-1\n-2\n2\n-3\n");
+}
+
+#[test]
+fn a_labeled_break_releases_the_variables_of_every_loop_it_leaves() {
+    let source = tracked(
+        "func main() {\n  outer: for i in 0..<2 {\n    let a = Tracked(id: 1)\n    for j in 0..<2 {\n      let b = Tracked(id: 2)\n      break outer\n    }\n  }\n  print(99)\n}",
+    );
+    assert_eq!(run(&source), "-2\n-1\n99\n");
+}
+
+#[test]
+fn continue_re_evaluates_a_while_condition_that_owns_temporaries() {
+    let source = tracked(
+        "func make(_ n: Int) -> Tracked { return Tracked(id: n) }\nfunc main() {\n  var i = 1\n  while make(i).id < 4 {\n    i += 1\n    if i == 2 { continue }\n    print(100 + i)\n  }\n}",
+    );
+    assert_eq!(run(&source), "-1\n-2\n103\n-3\n104\n-4\n");
+}
+
+#[test]
+fn a_function_may_end_after_a_loop_that_only_breaks() {
+    let source =
+        "func f() -> Int {\n  while true { break }\n  return 7\n}\nfunc main() { print(f()) }";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn break_outside_a_loop_or_switch_is_rejected() {
+    assert!(build_error("func main() { break }").contains("break"));
+}
+
+#[test]
+fn continue_outside_a_loop_is_rejected() {
+    assert!(build_error("func main() { continue }").contains("continue"));
+    let in_switch = "enum E { case a }\nfunc main() {\n  let e = E.a\n  switch e {\n  case .a:\n    continue\n  }\n}";
+    assert!(build_error(in_switch).contains("continue"));
+}
+
+#[test]
+fn a_label_that_names_nothing_is_rejected() {
+    assert!(build_error("func main() {\n  while true { break nowhere }\n}").contains("nowhere"));
+}
+
+#[test]
+fn continue_cannot_target_a_labeled_switch() {
+    let source = "enum E { case a }\nfunc main() {\n  let e = E.a\n  pick: switch e {\n  case .a:\n    while true { continue pick }\n  }\n}";
+    assert!(build_error(source).contains("pick"));
+}
+
+#[test]
+fn a_label_name_cannot_be_reused_by_a_nested_statement() {
+    let source =
+        "func main() {\n  a: while true {\n    a: while true { break a }\n    break a\n  }\n}";
+    assert!(build_error(source).contains("label"));
+}

@@ -34,6 +34,8 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         cell_call: CellCall::default(),
         super_initialized: false,
         chain_values: Vec::new(),
+        targets: Vec::new(),
+        pending_label: None,
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -188,6 +190,42 @@ fn always_returns(stmts: &[Stmt]) -> bool {
     }
 }
 
+fn always_exits(stmts: &[Stmt]) -> bool {
+    exits(stmts, false, &[])
+}
+
+fn exits(stmts: &[Stmt], in_switch: bool, inner_labels: &[String]) -> bool {
+    match stmts.last().map(Stmt::kind) {
+        Some(StmtKind::Return(_) | StmtKind::Continue(_)) => true,
+        Some(StmtKind::Break(None)) => !in_switch,
+        Some(StmtKind::Break(Some(label))) => !inner_labels.contains(label),
+        Some(StmtKind::If {
+            then_body,
+            else_body: Some(else_body),
+            ..
+        })
+        | Some(StmtKind::IfLet {
+            then_body,
+            else_body: Some(else_body),
+            ..
+        }) => {
+            exits(then_body, in_switch, inner_labels) && exits(else_body, in_switch, inner_labels)
+        }
+        Some(StmtKind::Switch { cases, .. }) => {
+            !cases.is_empty()
+                && cases
+                    .iter()
+                    .all(|case| exits(case.body(), true, inner_labels))
+        }
+        Some(StmtKind::Labeled { label, stmt }) => {
+            let mut labels = inner_labels.to_vec();
+            labels.push(label.clone());
+            exits(std::slice::from_ref(stmt), in_switch, &labels)
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Binding {
     local: LocalId,
@@ -207,6 +245,19 @@ struct FnCx<'a> {
     cell_call: CellCall,
     super_initialized: bool,
     chain_values: Vec<TExpr>,
+    targets: Vec<Target>,
+    pending_label: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TargetKind {
+    Loop,
+    Switch,
+}
+
+struct Target {
+    label: Option<String>,
+    kind: TargetKind,
 }
 
 #[derive(Clone, Copy)]
@@ -577,16 +628,86 @@ impl FnCx<'_> {
         result.map(|()| checked)
     }
 
+    fn in_target<R>(
+        &mut self,
+        kind: TargetKind,
+        check: impl FnOnce(&mut Self) -> CResult<R>,
+    ) -> CResult<R> {
+        let label = self.pending_label.take();
+        self.targets.push(Target { label, kind });
+        let result = check(self);
+        self.targets.pop();
+        result
+    }
+
+    fn jump_depth(&self, line: u32, keyword: &str, label: Option<&str>) -> CResult<usize> {
+        let is_continue = keyword == "continue";
+        let mut candidates = self.targets.iter().rev().enumerate();
+        match label {
+            Some(label) => {
+                let found = candidates.find(|(_, t)| t.label.as_deref() == Some(label));
+                match found {
+                    Some((_, t)) if is_continue && t.kind == TargetKind::Switch => {
+                        Err(CheckError::at(
+                            line,
+                            format!("'continue' cannot target '{label}': it labels a switch"),
+                        ))
+                    }
+                    Some((depth, _)) => Ok(depth),
+                    None => Err(CheckError::at(
+                        line,
+                        format!("cannot find the label '{label}' for '{keyword}'"),
+                    )),
+                }
+            }
+            None => candidates
+                .find(|(_, t)| !is_continue || t.kind == TargetKind::Loop)
+                .map(|(depth, _)| depth)
+                .ok_or_else(|| {
+                    let place = if is_continue {
+                        "a loop"
+                    } else {
+                        "a loop or a switch"
+                    };
+                    CheckError::at(line, format!("'{keyword}' is only allowed inside {place}"))
+                }),
+        }
+    }
+
     fn lower_stmt(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
         match stmt.kind() {
             StmtKind::Switch { subject, cases } => {
                 let mut lowered = Vec::new();
-                self.switch_stmt(stmt.line(), subject, cases, &mut lowered)?;
-                out.push(TStmt::If {
-                    cond: TExpr::Bool(true),
-                    then_body: lowered,
-                    else_body: Vec::new(),
-                });
+                self.in_target(TargetKind::Switch, |cx| {
+                    cx.switch_stmt(stmt.line(), subject, cases, &mut lowered)
+                })?;
+                out.push(TStmt::Block(lowered));
+                Ok(())
+            }
+            StmtKind::Labeled { label, stmt: inner } => {
+                if self
+                    .targets
+                    .iter()
+                    .any(|t| t.label.as_deref() == Some(label))
+                {
+                    return Err(CheckError::at(
+                        stmt.line(),
+                        format!("the label '{label}' is already used by an enclosing statement"),
+                    ));
+                }
+                self.pending_label = Some(label.clone());
+                let result = self.lower_stmt(inner, out);
+                self.pending_label = None;
+                result
+            }
+            StmtKind::Break(label) => {
+                let depth = self.jump_depth(stmt.line(), "break", label.as_deref())?;
+                out.push(TStmt::Break(depth));
+                Ok(())
+            }
+            StmtKind::Continue(label) => {
+                let depth = self.jump_depth(stmt.line(), "continue", label.as_deref())?;
+                out.push(TStmt::Continue(depth));
                 Ok(())
             }
             StmtKind::WhileLet {
@@ -710,12 +831,12 @@ impl FnCx<'_> {
     }
 
     fn require_exit(&self, line: u32, else_body: &[Stmt]) -> CResult<()> {
-        if always_returns(else_body) {
+        if always_exits(else_body) {
             Ok(())
         } else {
             Err(CheckError::at(
                 line,
-                "the 'else' body of a 'guard' must leave the scope: end every path with 'return'",
+                "the 'else' body of a 'guard' must leave the scope: end every path with 'return', 'break' or 'continue'",
             ))
         }
     }
@@ -805,7 +926,7 @@ impl FnCx<'_> {
                     ty: inner,
                 },
             }];
-            checked.extend(self.block(body)?);
+            checked.extend(self.in_target(TargetKind::Loop, |cx| cx.block(body))?);
             Ok(checked)
         });
         self.scopes.pop();
@@ -1155,14 +1276,15 @@ impl FnCx<'_> {
             } => self.if_let(line, name, *mutable, value, then_body, else_body.as_deref()),
             StmtKind::While { cond, body } => {
                 let cond = self.condition(cond)?;
-                Ok(TStmt::While {
-                    cond,
-                    body: self.block(body)?,
-                })
+                let body = self.in_target(TargetKind::Loop, |cx| cx.block(body))?;
+                Ok(TStmt::While { cond, body })
             }
             StmtKind::For { var, iter, body } => self.for_stmt(line, var, iter, body),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
             StmtKind::Switch { .. }
+            | StmtKind::Labeled { .. }
+            | StmtKind::Break(_)
+            | StmtKind::Continue(_)
             | StmtKind::WhileLet { .. }
             | StmtKind::Guard { .. }
             | StmtKind::GuardLet { .. } => Err(CheckError::at(
@@ -1402,12 +1524,13 @@ impl FnCx<'_> {
         let hi = self.int_value(hi)?;
         self.scopes.push(HashMap::new());
         let result = self.declare(line, var, Ty::Int, false).and_then(|local| {
+            let body = self.in_target(TargetKind::Loop, |cx| cx.block(body))?;
             Ok(TStmt::ForRange {
                 local,
                 lo,
                 hi,
                 inclusive: *inclusive,
-                body: self.block(body)?,
+                body,
             })
         });
         self.scopes.pop();
