@@ -25,6 +25,7 @@ pub struct InitScope<'a> {
     members: &'a [&'a str],
     methods: &'a [&'a str],
     params: &'a [&'a str],
+    own: Option<&'a [&'a str]>,
 }
 
 impl<'a> InitScope<'a> {
@@ -33,7 +34,13 @@ impl<'a> InitScope<'a> {
             members,
             methods,
             params,
+            own: None,
         }
+    }
+
+    pub fn with_superclass(mut self, own: &'a [&'a str]) -> Self {
+        self.own = Some(own);
+        self
     }
 }
 
@@ -51,35 +58,59 @@ pub fn check_initialization(
         scope,
         locals: vec![scope.params.iter().map(|p| (*p).to_string()).collect()],
     };
-    let mut pending: Vec<&str> = scope.members.to_vec();
+    let mut pending: Vec<&str> = scope.own.unwrap_or(scope.members).to_vec();
+    let mut super_pending = scope.own.is_some();
     for stmt in body {
-        if pending.is_empty() {
+        if pending.is_empty() && !super_pending {
             return Ok(());
         }
-        if let Some(member) = scan.plain_member_assignment(stmt) {
+        if let Some(member) = scan.plain_member_assignment(stmt)
+            && scope.own.is_none_or(|own| own.contains(&member))
+        {
             pending.retain(|m| *m != member);
             continue;
         }
+        if super_pending && scan.is_super_init(stmt) {
+            if !pending.is_empty() {
+                return Err(InitViolation {
+                    line: stmt.line(),
+                    message: "super.init is called before every member is initialized".to_string(),
+                });
+            }
+            super_pending = false;
+            continue;
+        }
+        let waiting_for = if pending.is_empty() {
+            "super.init is called"
+        } else {
+            "every member is initialized"
+        };
         if scan.stmt_uses_self(stmt) {
             return Err(InitViolation {
                 line: stmt.line(),
-                message: "'self' is used before every member is initialized".to_string(),
+                message: format!("'self' is used before {waiting_for}"),
             });
         }
         if returns(stmt) {
             return Err(InitViolation {
                 line: stmt.line(),
-                message: "an initializer returns before every member is initialized".to_string(),
+                message: format!("an initializer returns before {waiting_for}"),
             });
         }
     }
-    match pending.first() {
-        None => Ok(()),
-        Some(member) => Err(InitViolation {
+    if let Some(member) = pending.first() {
+        return Err(InitViolation {
             line: init_line,
             message: format!("the initializer does not initialize the member '{member}'"),
-        }),
+        });
     }
+    if super_pending {
+        return Err(InitViolation {
+            line: init_line,
+            message: "the initializer does not call super.init".to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub fn check_enum_initialization(
@@ -102,6 +133,19 @@ pub fn check_enum_initialization(
 }
 
 impl Scan<'_> {
+    fn is_super_init(&self, stmt: &Stmt) -> bool {
+        matches!(
+            stmt.kind(),
+            StmtKind::Expr(expr) if matches!(
+                expr.kind(),
+                ExprKind::MemberCall { base, name, args }
+                    if name == "init"
+                        && matches!(base.kind(), ExprKind::Ident(n) if n == "super")
+                        && !args.iter().any(|a| self.expr_uses_self(a.value()))
+            )
+        )
+    }
+
     fn assigns_self(&mut self, stmts: &[Stmt]) -> Result<bool, InitViolation> {
         for stmt in stmts {
             if self.plain_self_assignment(stmt) || self.branches_assign_self(stmt)? {
@@ -507,5 +551,54 @@ mod tests {
     #[test]
     fn returning_before_assigning_self_is_rejected_for_an_enum() {
         assert!(enum_verdict("return\nself = E.a").is_err());
+    }
+
+    fn subclass_verdict(body: &str) -> Result<(), InitViolation> {
+        let src = format!("init() {{\n{body}\n}}");
+        let Decl::Func(init) = parse_item(&lex(&src).unwrap()).unwrap() else {
+            panic!("expected an initializer");
+        };
+        let members = ["x", "y"];
+        let own = ["y"];
+        check_initialization(
+            init.body(),
+            InitScope::new(&members, &[], &[]).with_superclass(&own),
+            init.line(),
+        )
+    }
+
+    #[test]
+    fn own_members_then_super_init_initialize_a_subclass() {
+        assert!(subclass_verdict("self.y = 1\nsuper.init()").is_ok());
+    }
+
+    #[test]
+    fn a_subclass_initializer_without_super_init_is_rejected() {
+        assert!(subclass_verdict("self.y = 1").is_err());
+    }
+
+    #[test]
+    fn super_init_before_the_own_members_is_rejected() {
+        assert!(subclass_verdict("super.init()\nself.y = 1").is_err());
+    }
+
+    #[test]
+    fn using_self_between_the_members_and_super_init_is_rejected() {
+        assert!(subclass_verdict("self.y = 1\nprint(self.y)\nsuper.init()").is_err());
+    }
+
+    #[test]
+    fn assigning_an_inherited_member_before_super_init_is_rejected() {
+        assert!(subclass_verdict("self.y = 1\nself.x = 2\nsuper.init()").is_err());
+    }
+
+    #[test]
+    fn returning_before_super_init_is_rejected() {
+        assert!(subclass_verdict("self.y = 1\nreturn\nsuper.init()").is_err());
+    }
+
+    #[test]
+    fn a_super_init_argument_may_not_use_self() {
+        assert!(subclass_verdict("self.y = 1\nsuper.init(self.y)").is_err());
     }
 }

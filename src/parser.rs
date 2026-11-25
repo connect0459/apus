@@ -674,7 +674,12 @@ impl Parser<'_> {
                 continue;
             }
             if self.eat_punct(".") {
-                let name = self.name()?;
+                let after_super = matches!(expr.kind(), ExprKind::Ident(n) if n == "super");
+                let name = if after_super && self.eat_keyword("init") {
+                    "init".to_string()
+                } else {
+                    self.name()?
+                };
                 expr = Expr::new(
                     line,
                     ExprKind::Member {
@@ -851,6 +856,22 @@ mod tests {
     #[test]
     fn override_must_be_followed_by_func() {
         assert!(try_parse("override init() { }").is_err());
+    }
+
+    #[test]
+    fn super_init_parses_as_a_member_call_on_super() {
+        let e = expr("super.init(x: 1)");
+        let ExprKind::MemberCall { base, name, args } = e.kind() else {
+            panic!("expected a member call");
+        };
+        assert_eq!(base.kind(), &ExprKind::Ident("super".to_string()));
+        assert_eq!(name, "init");
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn init_cannot_follow_a_dot_on_other_values() {
+        assert!(try_parse("func f() { a.init() }").is_err());
     }
 
     #[test]

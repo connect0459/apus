@@ -437,6 +437,18 @@ impl Signatures {
         }
     }
 
+    pub fn inherited_init_owner(&self, ty: Ty) -> Option<String> {
+        let mut current = self.superclass(ty);
+        while let Some(t) = current {
+            let owner = self.owner_name(t)?;
+            if self.funcs.contains_key(&format!("{owner}.init")) {
+                return Some(owner);
+            }
+            current = self.superclass(t);
+        }
+        None
+    }
+
     pub fn resolve_method(&self, ty: Ty, name: &str) -> Option<String> {
         let mut current = Some(ty);
         while let Some(t) = current {

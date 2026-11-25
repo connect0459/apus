@@ -30,6 +30,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         init_self: None,
         cell_self: None,
         cell_call: CellCall::default(),
+        super_initialized: false,
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -131,7 +132,21 @@ fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
             .struct_sig(id)
             .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
         let members: Vec<&str> = sig.members().map(|(_, f)| f.name()).collect();
+        let parent = cx.sigs.superclass(ty);
+        let inherited = match parent {
+            Some(Ty::Class(parent)) => cx
+                .sigs
+                .struct_sig(parent)
+                .map_or(0, |s| s.members().count()),
+            _ => 0,
+        };
+        let own = &members[inherited.min(members.len())..];
         let scope = InitScope::new(&members, &methods, &params);
+        let scope = if parent.is_some() {
+            scope.with_superclass(own)
+        } else {
+            scope
+        };
         check_initialization(func.body(), scope, func.line())
             .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
         zero_struct(cx, func, id, ty)?
@@ -193,6 +208,7 @@ struct FnCx<'a> {
     init_self: Option<LocalId>,
     cell_self: Option<CellSelf>,
     cell_call: CellCall,
+    super_initialized: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -270,6 +286,9 @@ impl FnCx<'_> {
         match stmt.kind() {
             StmtKind::Switch { subject, cases } => {
                 self.switch_stmt(stmt.line(), subject, cases, out)
+            }
+            StmtKind::Expr(expr) if self.is_super_init(expr) => {
+                self.super_init(stmt.line(), expr, out)
             }
             StmtKind::Expr(_) => {
                 self.cell_call.allowed = true;
@@ -1032,6 +1051,63 @@ impl FnCx<'_> {
         })
     }
 
+    fn is_super_init(&self, expr: &Expr) -> bool {
+        matches!(
+            expr.kind(),
+            ExprKind::MemberCall { base, name, .. } if name == "init" && self.is_super(base)
+        )
+    }
+
+    fn super_init(&mut self, line: u32, expr: &Expr, out: &mut Vec<TStmt>) -> CResult<()> {
+        let ExprKind::MemberCall { args, .. } = expr.kind() else {
+            return Err(CheckError::at(
+                line,
+                "internal error: not a super.init call",
+            ));
+        };
+        let Some(target) = self.init_self else {
+            return Err(CheckError::at(
+                line,
+                "'super.init' can only be called from an initializer",
+            ));
+        };
+        let (_, parent) = self.super_receiver(line)?;
+        if std::mem::replace(&mut self.super_initialized, true) {
+            return Err(CheckError::at(line, "'super.init' is called twice"));
+        }
+        let sigs = self.sigs;
+        let parent_name = sigs.owner_name(parent).unwrap_or_default();
+        let built = self.call(line, &parent_name, args, None)?;
+        self.expect(line, parent, built.ty())?;
+        let Ty::Class(parent_id) = parent else {
+            return Err(CheckError::at(
+                line,
+                "internal error: a superclass is a class",
+            ));
+        };
+        let layout = sigs
+            .struct_sig(parent_id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown superclass layout"))?;
+        let temporary = LocalId::new(self.locals.len());
+        self.locals.push(parent);
+        out.push(TStmt::Let {
+            local: temporary,
+            init: built,
+        });
+        for (index, field) in layout.members() {
+            out.push(TStmt::AssignField {
+                local: target,
+                index,
+                value: TExpr::Field {
+                    base: Box::new(TExpr::Local(temporary, parent)),
+                    index,
+                    ty: field.ty(),
+                },
+            });
+        }
+        Ok(())
+    }
+
     fn is_super(&self, base: &Expr) -> bool {
         matches!(base.kind(), ExprKind::Ident(name) if name == SUPER && self.lookup(name, base.line()).is_err())
     }
@@ -1524,6 +1600,14 @@ impl FnCx<'_> {
             .struct_sig(pattern_id)
             .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
         let members: Vec<&FieldSig> = sig.members().map(|(_, f)| f).collect();
+        if let Some(parent) = sigs.inherited_init_owner(sigs.struct_ty(def, pattern_id)) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{base_name}' must declare an initializer because its superclass '{parent}' does"
+                ),
+            ));
+        }
         if args.len() != members.len() {
             return Err(CheckError::at(
                 line,

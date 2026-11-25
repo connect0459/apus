@@ -1496,3 +1496,100 @@ fn an_override_may_return_a_struct() {
          func main() {\n  print(sum(A()))\n  print(sum(B()))\n}";
     assert_eq!(run(source), "3\n7\n");
 }
+
+const VEHICLES: &str = "class Vehicle {\n  var wheels: Int\n  var name: Int\n  init(wheels: Int) {\n    self.wheels = wheels\n    self.name = wheels * 10\n  }\n  func kind() -> Int { return 1 }\n}\n\
+class Car: Vehicle {\n  var doors: Int\n  init(doors: Int) {\n    self.doors = doors\n    super.init(wheels: 4)\n  }\n  override func kind() -> Int { return 2 }\n}\n";
+
+#[test]
+fn a_subclass_initializer_sets_its_members_then_calls_super_init() {
+    let source = format!(
+        "{VEHICLES}func main() {{\n  let c = Car(doors: 3)\n  print(c.doors)\n  print(c.wheels)\n  print(c.name)\n}}"
+    );
+    assert_eq!(run(&source), "3\n4\n40\n");
+}
+
+#[test]
+fn an_instance_built_by_a_subclass_initializer_dispatches_as_the_subclass() {
+    let source = format!(
+        "{VEHICLES}func kind(of v: Vehicle) -> Int {{ return v.kind() }}\n\
+         func main() {{\n  print(kind(of: Car(doors: 3)))\n  print(kind(of: Vehicle(wheels: 2)))\n}}"
+    );
+    assert_eq!(run(&source), "2\n1\n");
+}
+
+#[test]
+fn super_init_may_use_the_memberwise_initializer_of_the_superclass() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  var y: Int\n  init(y: Int) {\n    self.y = y\n    super.init(x: y + 1)\n  }\n}\n\
+         func main() {\n  let b = B(y: 1)\n  print(b.x)\n  print(b.y)\n}";
+    assert_eq!(run(source), "2\n1\n");
+}
+
+#[test]
+fn a_subclass_that_adds_no_members_may_start_with_super_init() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  init() { super.init(x: 9) }\n}\n\
+         func main() {\n  print(B().x)\n}";
+    assert_eq!(run(source), "9\n");
+}
+
+#[test]
+fn a_subclass_initializer_may_use_self_after_super_init() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  var y: Int\n  init(y: Int) {\n    self.y = y\n    super.init(x: 1)\n    self.x += self.y\n    print(self.x)\n  }\n}\n\
+         func main() {\n  let b = B(y: 5)\n  print(b.x)\n}";
+    assert_eq!(run(source), "6\n6\n");
+}
+
+#[test]
+fn a_subclass_initializer_must_call_super_init() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  var y: Int\n  init(y: Int) { self.y = y }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("super.init"));
+}
+
+#[test]
+fn super_init_cannot_come_before_the_members_are_set() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  var y: Int\n  init(y: Int) {\n    super.init(x: 1)\n    self.y = y\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("super.init"));
+}
+
+#[test]
+fn self_cannot_be_used_before_super_init() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  var y: Int\n  init(y: Int) {\n    self.y = y\n    print(self.y)\n    super.init(x: 1)\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("super.init"));
+}
+
+#[test]
+fn an_inherited_member_cannot_be_set_before_super_init() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  var y: Int\n  init(y: Int) {\n    self.y = y\n    self.x = 1\n    super.init(x: 2)\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("self"));
+}
+
+#[test]
+fn an_initializer_cannot_return_before_super_init() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  init() {\n    return\n    super.init(x: 1)\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("super.init"));
+}
+
+#[test]
+fn super_init_cannot_be_called_twice() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  init() {\n    super.init(x: 1)\n    super.init(x: 2)\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("twice"));
+}
+
+#[test]
+fn super_init_is_rejected_outside_an_initializer() {
+    let source = "class A {\n  var x: Int\n}\nclass B: A {\n  func f() { super.init(x: 1) }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("initializer"));
+}
+
+#[test]
+fn super_init_is_rejected_in_a_class_without_a_superclass() {
+    let source = "class A {\n  var x: Int\n  init() {\n    self.x = 1\n    super.init()\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("super"));
+}
+
+#[test]
+fn a_subclass_of_a_class_with_an_initializer_must_declare_its_own() {
+    let source = format!(
+        "{VEHICLES}class Truck: Vehicle {{\n  var load: Int\n}}\nfunc main() {{\n  let t = Truck(wheels: 6, name: 1, load: 2)\n}}"
+    );
+    assert!(build_error(&source).contains("initializer"));
+}
