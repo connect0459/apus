@@ -40,10 +40,10 @@
   - [x] `break`, `continue` and labels on loops and switches; `guard` may leave with `break` or `continue`
   - [x] Equality on `String` and structs: strings by content, structs member by member (Int, Bool, String, enums without payloads and nested structs only)
   - [x] `switch` on `Int`, `Bool` and `String`: literal cases, `Int` ranges, `default` required except for a `Bool` that covers `true` and `false`
-- [ ] M6: protocols and type constraints
+- [x] M6: protocols and type constraints
   - [x] M6a: protocols with method requirements, conformance declared on `struct`, `class` and `enum`, constraints `<T: P & Q>` on functions, methods and types, built-in `Equatable` and `Comparable`
   - [x] M6b: associated types: `associatedtype`, `typealias` bindings in struct, class and enum bodies, `T.Item` in signatures, annotations and members of generic types
-  - [ ] M6c: protocols as types (existentials), planned as a class reference whose non-class conformers are boxed in a synthesized class, dispatched by a class tag comparison chain (see the existential decision)
+  - [x] M6c: protocols as types: `let x: P`, parameters, results and members, optionals of them, requirement calls through a tag comparison chain, `is` and `as?` to a class conformer
 
 ## Open decisions
 
@@ -274,15 +274,17 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 
 **Consequences.** The key encodes a `Witness` by protocol, method and type, and only generic bodies contain one, so reference counting and the backend never see it. A mutating requirement is satisfied by a struct, or by a non-mutating method of a class; an enum without payloads cannot satisfy it yet because its mutation goes through a cell. A protocol is used as a constraint only: there is no existential type, no associated type, no protocol inheritance, no default implementation and no static requirement. `Equatable` cannot be declared by a generic type or a class, and a user type cannot be `Comparable`, because there is no operator overloading. The protocol declaration joins the signature digest as a whole, so editing a requirement rechecks every function.
 
-### Existentials are class references, and a value of another type is boxed (2026-11-25, planned)
+### Existentials are class references, and a value of another type is boxed (2026-11-25)
 
 **Problem.** `let x: P` needs one representation for a value of any conforming type, a way to call a requirement on it, and reference counting, without a second aggregate kind in the typed IR.
 
 **Options.** A class reference where a non-class conformer is boxed in a synthesized class (reuses the object header, counting, drop and tag dispatch); only class conformers (smallest, but a struct or an enum cannot be used); an inline layout of a tag and the widest payload (keeps value semantics, but the slot typing rule forbids two class or struct conformers).
 
-**Decision.** An existential `P` is a pointer to a class object. A class conformer is stored as it is, and any other conformer (struct, enum, `Int`, `Bool`, `String`) is wrapped in `$Box<S>`, a synthesized generic class with one member `value: S`. A requirement called on an existential becomes a tag comparison chain over the class tags of every conformer, in the style of `Virtual`: the case of a class calls its method, the case of `$Box<S>` calls `S.method` with `value`. A protocol with associated types cannot be used as a type, and a `mutating` requirement cannot be called on an existential, because a copy of an existential shares its box.
+**Decision.** An existential `P` is a pointer to a class object. A class conformer is stored as it is, and any other conformer (struct, enum, `Int`, `Bool`, `String`) is wrapped in `$Box<S>`, a synthesized generic class with one member `value: S`. A requirement called on an existential becomes a tag comparison chain over the class tags of every conformer, in the style of `Virtual`: the case of a class calls its method, the case of `$Box<S>` calls `S.method` with `value`. A protocol with associated types or a requirement that mentions `Self` cannot be used as a type, nor can `Equatable` and `Comparable`, and a `mutating` requirement cannot be called on an existential, because a copy of an existential shares its box.
 
-**Consequences.** Adding a conformer changes the key of every function that calls a requirement of that protocol through an existential, as adding an override does. `is`, `as?` and `as!` from an existential to a class reuse the tag test. A boxed struct has reference semantics through the box. This section records the plan and is revised when M6c is implemented.
+**Implementation.** `Signatures::existential` registers, per protocol, a pseudo class that has only the object header, so the reference counting, the optionals, the members and the casts of classes apply unchanged; `is_subclass` accepts a non-generic class that conforms to the protocol. `coerce` boxes any other non-generic conformer with `construct(box_of(S), [value])`, where `$Box` is a builtin generic class with the member `value`. A call on an existential is `TExpr::Dispatch { protocol, method, args, ret }`; `mono` replaces it by `Virtual` over every non-generic conformer (`existential_conformers`), whose last case is the default. A class case calls its own resolved method, and a boxed case calls a thunk `$box<S>.method`, built by `boxed_requirement` as an ordinary instance, that reads `value` and calls `S.method`. The box classes of every non-generic type that declares a user protocol are instantiated when the signatures are collected, so that their tags, which are structure identifiers, do not depend on which functions a build checks: a clean function keeps cached tags, and an incremental test guards this.
+
+**Consequences.** Adding a conformer changes the key of every function that calls a requirement of that protocol through an existential, as adding an override does, while unrelated functions stay cached. `is`, `as?` and `as!` from an existential to a class reuse the tag test; a cast to a protocol is rejected. A boxed struct has reference semantics through the box. A generic type cannot be stored in an existential, because the chain cannot list the instances, and an existential does not satisfy a constraint (`T := P`) yet. Calling a requirement of a protocol that nobody conforms to is an error reported while monomorphizing, without a line number. `Rewriter::expr` keeps its big arms in separate functions: a larger frame made a 120-term expression overflow the default thread stack in a debug build.
 
 ### An associated type is an opaque projection of a type parameter, bound by typealias (2026-11-25)
 
