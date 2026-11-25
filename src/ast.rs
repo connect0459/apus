@@ -227,6 +227,7 @@ pub struct ProtocolDecl {
     line: u32,
     name: String,
     requirements: Vec<FuncDecl>,
+    associated: Vec<String>,
 }
 
 impl ProtocolDecl {
@@ -235,7 +236,17 @@ impl ProtocolDecl {
             line,
             name,
             requirements,
+            associated: Vec::new(),
         }
+    }
+
+    pub fn with_associated(mut self, associated: Vec<String>) -> Self {
+        self.associated = associated;
+        self
+    }
+
+    pub fn associated(&self) -> &[String] {
+        &self.associated
     }
 
     pub fn line(&self) -> u32 {
@@ -261,6 +272,7 @@ pub struct StructDecl {
     class: bool,
     superclass: Option<String>,
     conformances: Vec<String>,
+    aliases: Vec<(String, TypeRef)>,
 }
 
 impl StructDecl {
@@ -274,6 +286,7 @@ impl StructDecl {
             class: false,
             superclass: None,
             conformances: Vec::new(),
+            aliases: Vec::new(),
         }
     }
 
@@ -298,6 +311,15 @@ impl StructDecl {
 
     pub fn conformances(&self) -> &[String] {
         &self.conformances
+    }
+
+    pub fn with_aliases(mut self, aliases: Vec<(String, TypeRef)>) -> Self {
+        self.aliases = aliases;
+        self
+    }
+
+    pub fn aliases(&self) -> &[(String, TypeRef)] {
+        &self.aliases
     }
 
     pub fn without_superclass(mut self) -> Self {
@@ -368,6 +390,7 @@ pub struct EnumDecl {
     bounds: Vec<Vec<String>>,
     cases: Vec<EnumCaseDecl>,
     conformances: Vec<String>,
+    aliases: Vec<(String, TypeRef)>,
 }
 
 impl EnumDecl {
@@ -379,6 +402,7 @@ impl EnumDecl {
             bounds: Vec::new(),
             cases,
             conformances: Vec::new(),
+            aliases: Vec::new(),
         }
     }
 
@@ -407,6 +431,15 @@ impl EnumDecl {
 
     pub fn conformances(&self) -> &[String] {
         &self.conformances
+    }
+
+    pub fn with_aliases(mut self, aliases: Vec<(String, TypeRef)>) -> Self {
+        self.aliases = aliases;
+        self
+    }
+
+    pub fn aliases(&self) -> &[(String, TypeRef)] {
+        &self.aliases
     }
 
     pub fn has_payload(&self) -> bool {

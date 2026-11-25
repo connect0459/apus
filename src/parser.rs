@@ -19,10 +19,39 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 30] = [
-    "func", "struct", "class", "enum", "init", "mutating", "override", "deinit", "unowned", "weak",
-    "nil", "guard", "as", "is", "case", "switch", "default", "var", "let", "if", "else", "while",
-    "for", "in", "return", "break", "continue", "protocol", "true", "false",
+const KEYWORDS: [&str; 32] = [
+    "func",
+    "struct",
+    "class",
+    "enum",
+    "init",
+    "mutating",
+    "override",
+    "deinit",
+    "unowned",
+    "weak",
+    "nil",
+    "guard",
+    "as",
+    "is",
+    "case",
+    "switch",
+    "default",
+    "var",
+    "let",
+    "if",
+    "else",
+    "while",
+    "for",
+    "in",
+    "return",
+    "break",
+    "continue",
+    "protocol",
+    "associatedtype",
+    "typealias",
+    "true",
+    "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -187,8 +216,16 @@ impl Parser<'_> {
         }
     }
 
+    fn on_new_line_before_dot(&self) -> bool {
+        !self.on_same_line()
+    }
+
     fn type_ref(&mut self) -> PResult<TypeRef> {
-        let name = self.name()?;
+        let mut name = self.name()?;
+        if self.is_punct(".") && !self.on_new_line_before_dot() {
+            self.pos += 1;
+            name = format!("{name}.{}", self.name()?);
+        }
         let args = if self.is_punct("<") {
             self.type_args()?
         } else {
@@ -248,6 +285,12 @@ impl Parser<'_> {
         Ok((names, bounds))
     }
 
+    fn type_alias(&mut self) -> PResult<(String, TypeRef)> {
+        let name = self.name()?;
+        self.expect_punct("=")?;
+        Ok((name, self.type_ref()?))
+    }
+
     fn conformance_list(&mut self) -> PResult<Vec<String>> {
         let mut names = Vec::new();
         if self.eat_punct(":") {
@@ -263,10 +306,20 @@ impl Parser<'_> {
         let name = self.name()?;
         self.expect_punct("{")?;
         let mut requirements = Vec::new();
+        let mut associated: Vec<String> = Vec::new();
         loop {
             while self.eat_punct(";") {}
             if self.eat_punct("}") {
                 break;
+            }
+            if self.eat_keyword("associatedtype") {
+                let item = self.name()?;
+                if associated.contains(&item) {
+                    return self.fail("duplicate associated type");
+                }
+                associated.push(item);
+                self.end_of_statement()?;
+                continue;
             }
             let requirement_line = self.line();
             let mutating = self.eat_keyword("mutating");
@@ -279,7 +332,7 @@ impl Parser<'_> {
             });
             self.end_of_statement()?;
         }
-        Ok(ProtocolDecl::new(line, name, requirements))
+        Ok(ProtocolDecl::new(line, name, requirements).with_associated(associated))
     }
 
     fn requirement(&mut self, line: u32) -> PResult<FuncDecl> {
@@ -426,10 +479,16 @@ impl Parser<'_> {
         };
         self.expect_punct("{")?;
         let mut fields = Vec::new();
+        let mut aliases = Vec::new();
         loop {
             while self.eat_punct(";") {}
             if self.eat_punct("}") {
                 break;
+            }
+            if self.eat_keyword("typealias") {
+                aliases.push(self.type_alias()?);
+                self.end_of_statement()?;
+                continue;
             }
             let mut unowned = false;
             let mut weak = false;
@@ -469,7 +528,8 @@ impl Parser<'_> {
         let decl = StructDecl::new(line, name, fields)
             .with_generics(generics)
             .with_bounds(bounds)
-            .with_conformances(inherited);
+            .with_conformances(inherited)
+            .with_aliases(aliases);
         let decl = match superclass {
             Some(superclass) => decl.with_superclass(superclass),
             None => decl,
@@ -483,10 +543,16 @@ impl Parser<'_> {
         let conformances = self.conformance_list()?;
         self.expect_punct("{")?;
         let mut cases = Vec::new();
+        let mut aliases = Vec::new();
         loop {
             while self.eat_punct(";") {}
             if self.eat_punct("}") {
                 break;
+            }
+            if self.eat_keyword("typealias") {
+                aliases.push(self.type_alias()?);
+                self.end_of_statement()?;
+                continue;
             }
             self.expect_keyword("case")?;
             cases.push(self.enum_case_decl()?);
@@ -498,7 +564,8 @@ impl Parser<'_> {
         Ok(EnumDecl::new(line, name, cases)
             .with_generics(generics)
             .with_bounds(bounds)
-            .with_conformances(conformances))
+            .with_conformances(conformances)
+            .with_aliases(aliases))
     }
 
     fn enum_case_decl(&mut self) -> PResult<EnumCaseDecl> {
@@ -1937,6 +2004,48 @@ mod tests {
             panic!("expected an enum");
         };
         assert_eq!(e.bound(0), ["P"]);
+    }
+
+    #[test]
+    fn a_protocol_declares_associated_types() {
+        let p = protocol(
+            "protocol Container {\n  associatedtype Item\n  associatedtype Index\n  func first() -> Item\n}",
+        );
+        assert_eq!(p.associated(), ["Item", "Index"]);
+        assert_eq!(p.requirements().len(), 1);
+        assert_eq!(p.requirements()[0].ret(), Some(&TypeRef::from("Item")));
+    }
+
+    #[test]
+    fn a_type_binds_associated_types_with_typealias() {
+        let Decl::Struct(s) =
+            try_parse("struct S: Container {\n  typealias Item = Int\n  var v: Int\n}").unwrap()
+        else {
+            panic!("expected a struct");
+        };
+        assert_eq!(s.aliases(), [("Item".to_string(), TypeRef::from("Int"))]);
+        assert_eq!(s.fields().len(), 1);
+        let Decl::Enum(e) =
+            try_parse("enum E: Container {\n  typealias Item = Bool\n  case a\n}").unwrap()
+        else {
+            panic!("expected an enum");
+        };
+        assert_eq!(e.aliases(), [("Item".to_string(), TypeRef::from("Bool"))]);
+        assert_eq!(e.cases().len(), 1);
+    }
+
+    #[test]
+    fn a_type_may_name_the_associated_type_of_a_type_parameter() {
+        let f = func("func head<C: Container>(_ c: C) -> C.Item { }");
+        assert_eq!(f.ret(), Some(&TypeRef::from("C.Item")));
+        let optional = func("func head<C: Container>(_ c: C) -> C.Item? { }");
+        assert_eq!(
+            optional.ret(),
+            Some(&TypeRef::new(
+                "Optional".to_string(),
+                vec![TypeRef::from("C.Item")]
+            ))
+        );
     }
 
     #[test]
