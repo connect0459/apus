@@ -4146,3 +4146,50 @@ fn string_conversions_and_searches_are_rejected_when_misused() {
     assert!(build_error("func main() { print(\"a\".hasPrefix()) }").contains("hasPrefix"));
     assert!(build_error("func main() { print(\"a\".shout()) }").contains("shout"));
 }
+
+#[test]
+fn a_string_literal_may_embed_expressions() {
+    let source = "enum Color { case red, green }\nstruct P {\n  var name: String\n}\nfunc twice(_ n: Int) -> Int { return n * 2 }\nfunc main() {\n  let a = 4\n  let s = \"hi\"\n  print(\"x=\\(1 + 2)\")\n  print(\"\\(a) and \\(s)!\")\n  print(\"\\(true)/\\(Color.green)\")\n  print(\"twice: \\(twice(a))\")\n  print(\"len \\(s.count)\")\n  print(\"\\(a)\")\n  print(\"\\(a)\\(a)\")\n  print(\"[\\(P(name: \"q\").name)]\")\n  print(\"\\(-a)\")\n}";
+    assert_eq!(
+        run(source),
+        "x=3\n4 and hi!\ntrue/green\ntwice: 8\nlen 2\n4\n44\n[q]\n-4\n"
+    );
+}
+
+#[test]
+fn an_embedded_expression_may_contain_strings_and_interpolations() {
+    let source = "func main() {\n  let n = 7\n  print(\"a\\(\"in\" + \"ner\")b\")\n  print(\"a\\(\"b\\(n)c\")d\")\n  print(\"(\\(n))\")\n  print(\"\\(\"\\(\"x\")\")\")\n}";
+    assert_eq!(run(source), "ainnerb\nab7cd\n(7)\nx\n");
+}
+
+#[test]
+fn an_escaped_backslash_does_not_start_an_interpolation() {
+    let source =
+        "func main() {\n  print(\"\\\\(1)\")\n  print(\"a\\nb\")\n  print(\"q\\\"\\(1)\\\"\")\n}";
+    assert_eq!(run(source), "\\(1)\na\nb\nq\"1\"\n");
+}
+
+#[test]
+fn an_interpolated_string_is_an_ordinary_string() {
+    let source = "func label(_ n: Int) -> String { return \"#\\(n)\" }\nfunc main() {\n  var s = \"\"\n  var i = 0\n  while i < 3 {\n    s += label(i)\n    i += 1\n  }\n  print(s)\n  print(s.count)\n  switch label(2) {\n  case \"#2\": print(1)\n  default: print(0)\n  }\n  print(label(5) == \"#5\")\n  let t: String? = \"o\\(1)\"\n  if let u = t { print(u) }\n}";
+    assert_eq!(run(source), "#0#1#2\n6\n1\ntrue\no1\n");
+}
+
+#[test]
+fn interpolating_in_a_loop_does_not_leak() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    let s = \"item \\(i) of \\(i + 1)\"\n    total += s.count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "357784\n");
+}
+
+#[test]
+fn a_value_that_cannot_become_a_string_cannot_be_interpolated() {
+    let source = "struct P { var x: Int }\nfunc main() {\n  print(\"\\(P(x: 1))\")\n}";
+    assert!(build_error(source).contains("cannot convert"));
+}
+
+#[test]
+fn a_malformed_interpolation_is_an_error() {
+    assert!(!build_error("func main() { print(\"a\\()\") }").is_empty());
+    assert!(build_error("func main() { print(\"a\\(1\") }").contains("interpolation"));
+    assert!(!build_error("func main() { print(\"a\\(1 +)\") }").is_empty());
+}

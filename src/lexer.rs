@@ -3,7 +3,14 @@ pub enum Token {
     Ident(String),
     Int(i64),
     Str(String),
+    Interp(Vec<Piece>),
     Punct(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Piece {
+    Text(String),
+    Code(Vec<Spanned>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,11 +50,51 @@ const TWO_CHAR_PUNCTS: [&str; 13] = [
     "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "??",
 ];
 
+fn skip_code(chars: &[char], mut at: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            '"' => {
+                at = skip_string(chars, at + 1)?;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+fn skip_string(chars: &[char], mut at: usize) -> Option<usize> {
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '"' => return Some(at + 1),
+            '\\' if chars.get(at + 1) == Some(&'(') => {
+                at = skip_code(chars, at + 2)? + 1;
+            }
+            '\\' => at += 2,
+            _ => at += 1,
+        }
+    }
+    None
+}
+
 pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
+    lex_from(src, 1)
+}
+
+fn lex_from(src: &str, first_line: u32) -> Result<Vec<Spanned>, LexError> {
     let chars: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
-    let mut line = 1u32;
+    let mut line = first_line;
     while i < chars.len() {
         let c = chars[i];
         if c == '\n' {
@@ -89,6 +136,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
             let start_line = line;
             i += 1;
             let mut text = String::new();
+            let mut pieces: Vec<Piece> = Vec::new();
             loop {
                 match chars.get(i) {
                     None | Some('\n') => {
@@ -100,6 +148,22 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     Some('"') => {
                         i += 1;
                         break;
+                    }
+                    Some('\\') if chars.get(i + 1) == Some(&'(') => {
+                        let Some(close) = skip_code(&chars, i + 2) else {
+                            return Err(LexError {
+                                line: start_line,
+                                message: "unterminated string interpolation".to_string(),
+                            });
+                        };
+                        let inner: String = chars[i + 2..close].iter().collect();
+                        let code = lex_from(&inner, line)?;
+                        line += u32::try_from(inner.matches('\n').count()).unwrap_or(0);
+                        if !text.is_empty() {
+                            pieces.push(Piece::Text(std::mem::take(&mut text)));
+                        }
+                        pieces.push(Piece::Code(code));
+                        i = close + 1;
                     }
                     Some('\\') => {
                         let escaped = match chars.get(i + 1) {
@@ -124,8 +188,16 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>, LexError> {
                     }
                 }
             }
+            let token = if pieces.is_empty() {
+                Token::Str(text)
+            } else {
+                if !text.is_empty() {
+                    pieces.push(Piece::Text(text));
+                }
+                Token::Interp(pieces)
+            };
             out.push(Spanned {
-                token: Token::Str(text),
+                token,
                 line: start_line,
             });
         } else if c.is_ascii_digit() {
@@ -195,6 +267,39 @@ mod tests {
 
     fn punct(s: &str) -> Token {
         Token::Punct(s.to_string())
+    }
+
+    #[test]
+    fn a_string_without_an_interpolation_is_one_string_token() {
+        assert_eq!(tokens("\"a\\nb\""), vec![Token::Str("a\nb".to_string())]);
+    }
+
+    #[test]
+    fn a_string_with_an_interpolation_is_split_into_text_and_code() {
+        let found = tokens("\"a\\(x + 1)b\"");
+        let [Token::Interp(pieces)] = found.as_slice() else {
+            panic!("expected an interpolated string");
+        };
+        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces[0], Piece::Text("a".to_string()));
+        assert_eq!(pieces[2], Piece::Text("b".to_string()));
+        let Piece::Code(code) = &pieces[1] else {
+            panic!("expected code");
+        };
+        let inner: Vec<Token> = code.iter().map(|t| t.token().clone()).collect();
+        assert_eq!(inner, vec![ident("x"), punct("+"), Token::Int(1)]);
+    }
+
+    #[test]
+    fn an_interpolation_may_contain_strings_that_contain_interpolations() {
+        let found = tokens("\"a\\(\"b\\(c)\")d\"");
+        assert!(matches!(found.as_slice(), [Token::Interp(pieces)] if pieces.len() == 3));
+    }
+
+    #[test]
+    fn an_unterminated_interpolation_is_an_error() {
+        let error = lex("\"a\\(1").unwrap_err();
+        assert!(error.message().contains("interpolation"));
     }
 
     #[test]

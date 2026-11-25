@@ -1,5 +1,5 @@
 use crate::hash::Fnv1a;
-use crate::lexer::{Spanned, Token};
+use crate::lexer::{Piece, Spanned, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -315,6 +315,22 @@ pub fn hash_tokens(tokens: &[Spanned]) -> u64 {
             Token::Punct(s) => {
                 hasher.write(&[4]);
                 hasher.write(s.as_bytes());
+            }
+            Token::Interp(pieces) => {
+                hasher.write(&[5]);
+                for piece in pieces {
+                    match piece {
+                        Piece::Text(text) => {
+                            hasher.write(&[1]);
+                            hasher.write(text.as_bytes());
+                        }
+                        Piece::Code(code) => {
+                            hasher.write(&[2]);
+                            hasher.write(&hash_tokens(code).to_le_bytes());
+                        }
+                    }
+                    hasher.write(&[0xfe]);
+                }
             }
         }
         hasher.write(&[0xff]);

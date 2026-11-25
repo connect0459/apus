@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::{Spanned, Token};
+use crate::lexer::{Piece, Spanned, Token};
 use crate::limits::{MAX_DEPTH, MAX_NESTING};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1225,6 +1225,53 @@ impl Parser<'_> {
         Ok(args)
     }
 
+    fn interpolation(&mut self, line: u32, pieces: &[Piece]) -> PResult<Expr> {
+        let mut joined: Option<Expr> = None;
+        for piece in pieces {
+            let part = match piece {
+                Piece::Text(text) => Expr::new(line, ExprKind::Str(text.clone())),
+                Piece::Code(code) => {
+                    self.enter()?;
+                    let mut inner = Parser {
+                        tokens: code,
+                        pos: 0,
+                        header_only: self.header_only,
+                        nesting: self.nesting,
+                        depth: self.depth,
+                    };
+                    let value = inner.expr();
+                    self.leave();
+                    let value = value?;
+                    if inner.pos < code.len() {
+                        return inner.fail("unexpected token in a string interpolation");
+                    }
+                    Expr::new(
+                        line,
+                        ExprKind::Call {
+                            callee: "String".to_string(),
+                            args: vec![Arg::new(None, value)],
+                        },
+                    )
+                }
+            };
+            joined = Some(match joined {
+                None => part,
+                Some(before) => Expr::new(
+                    line,
+                    ExprKind::Binary {
+                        op: BinOp::Add,
+                        lhs: Box::new(before),
+                        rhs: Box::new(part),
+                    },
+                ),
+            });
+            if let Some(expr) = &joined {
+                self.check_depth(expr.depth())?;
+            }
+        }
+        Ok(joined.unwrap_or_else(|| Expr::new(line, ExprKind::Str(String::new()))))
+    }
+
     fn primary(&mut self) -> PResult<Expr> {
         let line = self.line();
         let kind = match self.peek() {
@@ -1234,6 +1281,11 @@ impl Parser<'_> {
             Some(Token::Ident(s)) if s == "false" => ExprKind::Bool(false),
             Some(Token::Ident(s)) if s == "nil" => ExprKind::Nil,
             Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => ExprKind::Ident(s.clone()),
+            Some(Token::Interp(pieces)) => {
+                let pieces = pieces.clone();
+                self.pos += 1;
+                return self.interpolation(line, &pieces);
+            }
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;
                 self.enter()?;
@@ -2259,6 +2311,30 @@ mod tests {
         };
         assert_eq!(name, "x");
         assert!(matches!(base.kind(), ExprKind::GenericMemberCall { .. }));
+    }
+
+    #[test]
+    fn an_interpolated_string_is_a_concatenation_of_text_and_string_conversions() {
+        let text = |s: &str| ex(ExprKind::Str(s.to_string()));
+        let conversion = |inner: Expr| {
+            ex(ExprKind::Call {
+                callee: "String".to_string(),
+                args: vec![Arg::new(None, inner)],
+            })
+        };
+        assert_eq!(
+            expr("\"a\\(x)b\""),
+            bin(
+                BinOp::Add,
+                bin(BinOp::Add, text("a"), conversion(id("x"))),
+                text("b")
+            )
+        );
+        assert_eq!(expr("\"\\(x)\""), conversion(id("x")));
+        assert_eq!(
+            expr("\"\\(1 + 2)\""),
+            conversion(bin(BinOp::Add, int(1), int(2)))
+        );
     }
 
     #[test]
