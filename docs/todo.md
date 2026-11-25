@@ -36,6 +36,10 @@
   - [x] Generic methods: a method may declare type parameters of its own
   - [x] `mutating` on enums without payloads, `init` on enums
   - [x] Inheritance (single, with `override`, `super` and dynamic dispatch) and `===`/`!==`
+- [ ] M5: language gaps
+  - [x] `break`, `continue` and labels on loops and switches; `guard` may leave with `break` or `continue`
+  - [ ] Equality on `String` and structs
+  - [ ] `switch` on `Int`, `Bool` and `String`
 
 ## Open decisions
 
@@ -224,4 +228,14 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 
 **Decision.** `ExprKind::OptionalChain` holds the subject and a link whose base is `ChainValue`; a nested `?.` inside the link starts a nested chain. The checker evaluates the subject once with `Bind`, pushes the unwrapped value for `ChainValue`, checks the link, and wraps the result once (an optional result is not wrapped again), through `Select`. As a statement, a chain becomes an `if` on the tag, so a call that returns nothing can be chained. `guard let` lowers to a hidden holder, an `if` on the tag whose body is the `else` body, and a binding declared in the current scope; `require_exit` accepts the `else` body only when every path returns. `while let` keeps a flag and re-evaluates its subject at the top of every iteration. A `switch` is lowered inside its own block, so its subject is released where the `switch` ends. `is`, `as?` and `as!` bind the operand once and compare its class tag with the tags of the target class and of every subclass (`Signatures::class_tags`); a cast between unrelated classes is rejected. `as?` yields `Optional<Target>`, `as!` unwraps it and traps on nil, an optional operand is looked through, and casts bind tighter than `??` and looser than ranges. A local declared with a type annotation now has the annotated type, which a subclass instance assigned to a superclass annotation needs for casts to see the declared type.
 
-**Consequences.** A cast costs one comparison per class in the family of the target. Casts work on class references only: no protocols, no `Any`, no casts of values. A mutating call inside a chain is rejected because the unwrapped value is a copy. `guard` accepts only `return` as a way out; `break`, `continue` and `fatalError` do not exist yet.
+**Consequences.** A cast costs one comparison per class in the family of the target. Casts work on class references only: no protocols, no `Any`, no casts of values. A mutating call inside a chain is rejected because the unwrapped value is a copy. `guard` accepts `return`, `break` and `continue` as a way out; `fatalError` does not exist yet.
+
+### break and continue are depth-indexed jumps over loops and switch blocks (2026-11-25)
+
+**Problem.** `break` and `continue` must leave scopes that own reference-counted locals, re-run a `while` condition that owns temporaries, and, as in Swift, `break` inside a `switch` must leave the switch.
+
+**Options.** Lower to flag variables in the checker (no new IR, but every later statement is wrapped in an `if`); add jump nodes to the typed IR and resolve targets in the backend.
+
+**Decision.** `TStmt::Break(depth)` and `TStmt::Continue(depth)` count the enclosing breakable constructs outward from zero. The breakable constructs are `While`, `ForRange` and the new `TStmt::Block`, which a `switch` lowers into. The checker resolves labels to depths (`jump_depth`); an unlabeled `continue` skips switches, and `continue` cannot name a switch label. `rc::insert` releases the locals of every scope above the target before the jump, and a `continue` in a `while` whose condition owns temporaries first re-evaluates the condition flag. Codegen keeps a stack of exit and continue blocks; a `for` loop continues at a latch block that increments the variable.
+
+**Consequences.** The key encodes the depth, so moving a `break` out of a nested loop changes the key. `guard` accepts a `break` as its way out only when it leaves the guard's own scope: a `break` inside a `switch` nested in the `else` body does not count. Labels apply to loops and switches only, and a label cannot be reused by an enclosing statement.
