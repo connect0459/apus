@@ -1,6 +1,35 @@
 use crate::ast::{BinOp, UnaryOp};
 use crate::types::Ty;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrOp {
+    Concat,
+    Count,
+    IsEmpty,
+}
+
+impl StrOp {
+    pub fn result(self) -> Ty {
+        match self {
+            StrOp::Concat => Ty::Str,
+            StrOp::Count => Ty::Int,
+            StrOp::IsEmpty => Ty::Bool,
+        }
+    }
+
+    pub fn allocates(self) -> bool {
+        matches!(self, StrOp::Concat)
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            StrOp::Concat => 1,
+            StrOp::Count => 2,
+            StrOp::IsEmpty => 3,
+        }
+    }
+}
+
 pub const TAG_SLOT: usize = 0;
 pub const RC_SLOT: usize = 1;
 pub const DROP_SLOT: usize = 2;
@@ -197,6 +226,10 @@ pub enum TExpr {
         init: Box<TExpr>,
     },
     FuncAddr(String),
+    StrOp {
+        op: StrOp,
+        args: Vec<TExpr>,
+    },
     Witness {
         protocol: String,
         method: String,
@@ -250,6 +283,7 @@ impl TExpr {
             | TExpr::LoadWeak(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::FuncAddr(_) => Ty::Int,
+            TExpr::StrOp { op, .. } => op.result(),
             TExpr::Unwrap { ty, .. } | TExpr::Select { ty, .. } => *ty,
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
@@ -566,6 +600,10 @@ impl<E> Rewriter<'_, E> {
                 init: Box::new(self.expr(init)?),
             },
             TExpr::FuncAddr(_) => expr.clone(),
+            TExpr::StrOp { op, args } => TExpr::StrOp {
+                op: *op,
+                args: self.exprs(args)?,
+            },
             TExpr::Select {
                 cond,
                 then,

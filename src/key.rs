@@ -257,6 +257,14 @@ impl Encoder<'_> {
                     self.expr(arg);
                 }
             }
+            TExpr::StrOp { op, args } => {
+                self.tag(55);
+                self.tag(op.code());
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
             TExpr::Dispatch {
                 protocol,
                 method,

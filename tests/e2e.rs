@@ -4028,3 +4028,56 @@ fn a_string_can_be_stored_copied_and_returned_through_every_kind_of_owner() {
     let source = "struct Label {\n  var text: String\n  var n: Int\n}\nclass Holder {\n  var label: Label\n  var name: String\n}\nfunc pick(_ flag: Bool) -> String {\n  let a = \"first\"\n  let b = \"second\"\n  if flag { return a }\n  return b\n}\nfunc main() {\n  var l = Label(text: \"x\", n: 1)\n  let copy = l\n  l.text = \"y\"\n  let h = Holder(label: copy, name: pick(false))\n  var o: String? = pick(true)\n  print(l.text)\n  print(copy.text)\n  print(h.label.text)\n  print(h.name)\n  if let s = o { print(s) }\n  o = nil\n  if o == nil { print(0) }\n}";
     assert_eq!(run(source), "y\nx\nx\nsecond\nfirst\n0\n");
 }
+
+#[test]
+fn strings_can_be_concatenated_with_plus() {
+    let source = "func main() {\n  let a = \"foo\"\n  let b = \"bar\"\n  let c = a + b\n  print(c)\n  print(a + \"-\" + b + \"!\")\n  print(\"\" + \"x\")\n  print(\"x\" + \"\")\n  print(\"\" + \"\")\n}";
+    assert_eq!(run(source), "foobar\nfoo-bar!\nx\nx\n\n");
+}
+
+#[test]
+fn a_string_can_be_extended_with_plus_equals() {
+    let source = "func main() {\n  var s = \"a\"\n  s += \"b\"\n  s += \"cd\"\n  print(s)\n  s += s\n  print(s)\n  var t = \"\"\n  var i = 0\n  while i < 5 {\n    t += \"x\"\n    i += 1\n  }\n  print(t)\n}";
+    assert_eq!(run(source), "abcd\nabcdabcd\nxxxxx\n");
+}
+
+#[test]
+fn count_and_is_empty_describe_the_bytes_of_a_string() {
+    let source = "func main() {\n  let s = \"hello\"\n  print(s.count)\n  print(s.isEmpty)\n  print(\"\".count)\n  print(\"\".isEmpty)\n  print((s + \" world\").count)\n  print((\"\" + \"\").isEmpty)\n  print(\"é\".count)\n}";
+    assert_eq!(run(source), "5\nfalse\n0\ntrue\n11\ntrue\n2\n");
+}
+
+#[test]
+fn a_concatenated_string_can_be_compared_switched_on_and_passed_around() {
+    let source = "func twice(_ s: String) -> String { return s + s }\nfunc kind(_ s: String) -> Int {\n  switch s {\n  case \"ab\": return 1\n  case \"abab\": return 2\n  default: return 0\n  }\n}\nfunc main() {\n  let ab = \"a\" + \"b\"\n  print(ab == \"ab\")\n  print(kind(ab))\n  print(kind(twice(ab)))\n  print(kind(twice(twice(\"x\"))))\n  if twice(ab) == \"abab\" { print(1) }\n}";
+    assert_eq!(run(source), "true\n1\n2\n0\n1\n");
+}
+
+#[test]
+fn a_concatenated_string_can_be_stored_in_every_kind_of_owner() {
+    let source = "struct Label {\n  var text: String\n}\nclass Holder {\n  var label: Label\n  var name: String\n}\nfunc build(_ n: Int) -> String {\n  var s = \"n\"\n  var i = 0\n  while i < n {\n    s += \"!\"\n    i += 1\n  }\n  return s\n}\nfunc main() {\n  let h = Holder(label: Label(text: build(1)), name: build(2))\n  h.name = h.name + h.label.text\n  h.label.text += \"?\"\n  var o: String? = build(3)\n  print(h.name)\n  print(h.label.text)\n  if let s = o { print(s + \".\") }\n  o = nil\n  if o == nil { print(0) }\n}";
+    assert_eq!(run(source), "n!!n!\nn!?\nn!!!.\n0\n");
+}
+
+#[test]
+fn many_concatenations_in_a_loop_do_not_crash() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    let s = \"item\" + \"-\" + \"x\"\n    total += s.count\n    i += 1\n  }\n  print(total)\n  var big = \"\"\n  var j = 0\n  while j < 1000 {\n    big += \"ab\"\n    j += 1\n  }\n  print(big.count)\n}";
+    assert_eq!(run(source), "120000\n2000\n");
+}
+
+#[test]
+fn a_string_cannot_be_combined_with_other_types_or_operators() {
+    assert!(build_error("func main() { print(\"a\" + 1) }").contains("expected String"));
+    assert!(build_error("func main() { print(1 + \"a\") }").contains("expected Int"));
+    assert!(build_error("func main() { print(\"a\" - \"b\") }").contains("expected Int"));
+    assert!(
+        build_error("func main() {\n  var s = \"a\"\n  s -= \"b\"\n}").contains("expected Int")
+    );
+    assert!(build_error("func main() {\n  var s = \"a\"\n  s += 1\n}").contains("expected String"));
+}
+
+#[test]
+fn a_string_has_only_the_members_count_and_is_empty() {
+    assert!(build_error("func main() { print(\"a\".length) }").contains("length"));
+    assert!(!build_error("func main() {\n  let s = \"a\"\n  s.count = 1\n}").is_empty());
+}

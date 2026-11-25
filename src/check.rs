@@ -9,7 +9,7 @@ use crate::sigs::{
     COMPARABLE, CResult, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig, NONE_CASE, PRINT,
     ParamSig, SOME_CASE, bound_includes, scope_of,
 };
-use crate::tir::{LocalId, TAG_SLOT, TExpr, TFunc, TStmt};
+use crate::tir::{LocalId, StrOp, TAG_SLOT, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
 const SUPER: &str = "super";
@@ -424,6 +424,22 @@ impl FnCx<'_> {
     }
 
     fn field_of(&self, line: u32, base: TExpr, name: &str) -> CResult<TExpr> {
+        if base.ty() == Ty::Str {
+            let op = match name {
+                "count" => StrOp::Count,
+                "isEmpty" => StrOp::IsEmpty,
+                _ => {
+                    return Err(CheckError::at(
+                        line,
+                        format!("String has no member '{name}'"),
+                    ));
+                }
+            };
+            return Ok(TExpr::StrOp {
+                op,
+                args: vec![base],
+            });
+        }
         let (index, field) = self.member_of(line, base.ty(), name)?;
         let ty = field.ty();
         Ok(TExpr::Field {
@@ -1821,6 +1837,13 @@ impl FnCx<'_> {
     ) -> CResult<TExpr> {
         match op {
             None => self.coerce(line, target_ty, rhs),
+            Some(BinOp::Add) if target_ty == Ty::Str => {
+                self.expect(line, Ty::Str, rhs.ty())?;
+                Ok(TExpr::StrOp {
+                    op: StrOp::Concat,
+                    args: vec![current, rhs],
+                })
+            }
             Some(op) => {
                 self.expect(line, Ty::Int, target_ty)?;
                 self.expect(line, Ty::Int, rhs.ty())?;
@@ -2166,6 +2189,13 @@ impl FnCx<'_> {
                     ),
                 ) {
                     return self.parameter_operator(line, *op, index, lhs, rhs);
+                }
+                if *op == BinOp::Add && lhs.ty() == Ty::Str {
+                    self.expect(line, Ty::Str, rhs.ty())?;
+                    return Ok(TExpr::StrOp {
+                        op: StrOp::Concat,
+                        args: vec![lhs, rhs],
+                    });
                 }
                 self.operands(line, *op, lhs.ty(), rhs.ty())?;
                 if matches!(op, BinOp::Eq | BinOp::Ne) && lhs.ty().is_struct() {
@@ -3612,11 +3642,12 @@ mod tests {
     }
 
     #[test]
-    fn strings_can_be_compared_but_not_combined_yet() {
+    fn strings_can_be_compared_and_concatenated() {
         assert!(check_main("print(\"a\" == \"b\")").is_ok());
         assert!(check_main("print(\"a\" != \"b\")").is_ok());
         assert!(check_main("print(\"a\" < \"b\")").is_err());
-        assert!(check_main("print(\"a\" + \"b\")").is_err());
+        assert!(check_main("print(\"a\" + \"b\")").is_ok());
+        assert!(check_main("print(\"a\" * \"b\")").is_err());
     }
 
     #[test]

@@ -22,7 +22,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
-use crate::tir::{DROP_SLOT, RC_SLOT, TExpr, TFunc, TStmt, TStruct, UNOWNED_SLOT};
+use crate::tir::{DROP_SLOT, RC_SLOT, StrOp, TExpr, TFunc, TStmt, TStruct, UNOWNED_SLOT};
 use crate::types::Ty;
 
 const VARIADIC_PADDING: usize = 7;
@@ -36,6 +36,7 @@ const NAMESPACE_DATA: u32 = 1;
 pub const ENTRY_SYMBOL: &str = "apus_main";
 const STRING_HEADER: usize = 16;
 const STRING_RC: i32 = -16;
+const STRING_LEN: i32 = -8;
 const IMMORTAL: i64 = i64::MIN;
 const RUNTIME_FORMAT_INT: &str = "apus_format_int";
 const RUNTIME_TRUE: &str = "apus_true";
@@ -179,7 +180,9 @@ impl Backend {
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
-        for name in ["printf", "puts", "malloc", "free", "fflush", "write"] {
+        for name in [
+            "printf", "puts", "malloc", "free", "fflush", "write", "memcpy",
+        ] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
         }
@@ -806,6 +809,80 @@ impl Emitter<'_, '_> {
             .collect())
     }
 
+    fn string_op(&mut self, op: StrOp, args: &[TExpr]) -> GResult<Value> {
+        let values = args
+            .iter()
+            .map(|arg| self.value(arg))
+            .collect::<GResult<Vec<_>>>()?;
+        let flags = MemFlagsData::trusted();
+        match (op, values.as_slice()) {
+            (StrOp::Concat, [left, right]) => {
+                let left_len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *left, STRING_LEN);
+                let right_len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *right, STRING_LEN);
+                let total = self.builder.ins().iadd(left_len, right_len);
+                let result = self.alloc_string(total);
+                self.copy_bytes(result, *left, left_len);
+                let tail = self.builder.ins().iadd(result, left_len);
+                self.copy_bytes(tail, *right, right_len);
+                Ok(result)
+            }
+            (StrOp::Count, [text]) => {
+                Ok(self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN))
+            }
+            (StrOp::IsEmpty, [text]) => {
+                let len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                Ok(self.builder.ins().icmp_imm_s(IntCC::Equal, len, 0))
+            }
+            _ => Err(CodegenError::from(
+                "a string operation has the wrong operands",
+            )),
+        }
+    }
+
+    fn alloc_string(&mut self, len: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let size = self
+            .builder
+            .ins()
+            .iadd_imm_s(len, (STRING_HEADER + 1) as i64);
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let malloc = self.import_func("malloc", sig, false);
+        let call = self.builder.ins().call(malloc, &[size]);
+        let block = self.builder.inst_results(call)[0];
+        let one = self.builder.ins().iconst(types::I64, 1);
+        self.builder.ins().store(flags, one, block, 0);
+        self.builder.ins().store(flags, len, block, 8);
+        let bytes = self.builder.ins().iadd_imm_s(block, STRING_HEADER as i64);
+        let end = self.builder.ins().iadd(bytes, len);
+        let zero = self.builder.ins().iconst(types::I8, 0);
+        self.builder.ins().store(flags, zero, end, 0);
+        bytes
+    }
+
+    fn copy_bytes(&mut self, destination: Value, source: Value, len: Value) {
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..3 {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let memcpy = self.import_func("memcpy", sig, false);
+        self.builder.ins().call(memcpy, &[destination, source, len]);
+    }
+
     fn retain_string(&mut self, value: Value) -> GResult<()> {
         let flags = MemFlagsData::trusted();
         self.guarded(value, |this| {
@@ -1117,6 +1194,7 @@ impl Emitter<'_, '_> {
 
     fn expr(&mut self, expr: &TExpr) -> GResult<Option<Value>> {
         let value = match expr {
+            TExpr::StrOp { op, args } => self.string_op(*op, args)?,
             TExpr::Witness { .. } | TExpr::Dispatch { .. } => {
                 return Err(CodegenError::from(
                     "a protocol requirement was not resolved",

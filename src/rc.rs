@@ -597,7 +597,7 @@ impl Pass<'_> {
                 | TExpr::RetainWeak(_)
                 | TExpr::LoadWeak(_)
                 | TExpr::Select { .. }
-        )
+        ) || matches!(expr, TExpr::StrOp { op, .. } if op.allocates())
     }
 
     fn owned_value(&mut self, expr: &TExpr) -> TExpr {
@@ -645,6 +645,10 @@ impl Pass<'_> {
                 type_args: type_args.clone(),
                 args: self.borrowed_all(args),
                 ret: *ret,
+            },
+            TExpr::StrOp { op, args } => TExpr::StrOp {
+                op: *op,
+                args: self.borrowed_all(args),
             },
             TExpr::Dispatch {
                 protocol,
