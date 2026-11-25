@@ -561,6 +561,8 @@ pub enum BinOp {
     Rem,
     Eq,
     Ne,
+    Is,
+    IsNot,
     Lt,
     Gt,
     Le,

@@ -34,6 +34,8 @@ const BINARY_LEVELS: [&[(&str, BinOp)]; 6] = [
     &[
         ("==", BinOp::Eq),
         ("!=", BinOp::Ne),
+        ("===", BinOp::Is),
+        ("!==", BinOp::IsNot),
         ("<=", BinOp::Le),
         (">=", BinOp::Ge),
         ("<", BinOp::Lt),
@@ -797,6 +799,19 @@ mod tests {
 
     fn int(n: i64) -> Expr {
         ex(ExprKind::Int(n))
+    }
+
+    #[test]
+    fn identity_operators_bind_like_equality() {
+        let e = expr("a === b && c !== d");
+        assert_eq!(
+            e,
+            bin(
+                BinOp::And,
+                bin(BinOp::Is, id("a"), id("b")),
+                bin(BinOp::IsNot, id("c"), id("d"))
+            )
+        );
     }
 
     fn id(s: &str) -> Expr {

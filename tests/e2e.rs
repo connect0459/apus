@@ -1273,3 +1273,27 @@ fn a_constant_member_cannot_be_assigned_implicitly_in_a_method() {
         "class C {\n  let n: Int\n  init() { n = 1 }\n  func bad() { n = 2 }\n}\nfunc main() { }";
     assert!(build_error(source).contains("constant"));
 }
+
+const NODE: &str = "class Node {\n  var v: Int\n}\n";
+
+#[test]
+fn identity_distinguishes_two_instances_with_equal_members() {
+    let source = format!(
+        "{NODE}func main() {{\n  let a = Node(v: 1)\n  let b = Node(v: 1)\n  print(a === a)\n  print(a === b)\n  print(a !== b)\n}}"
+    );
+    assert_eq!(run(&source), "true\nfalse\ntrue\n");
+}
+
+#[test]
+fn identity_follows_a_reference_copied_into_another_variable() {
+    let source = format!(
+        "{NODE}func main() {{\n  let a = Node(v: 1)\n  let b = a\n  b.v = 5\n  print(a === b)\n  print(a.v)\n}}"
+    );
+    assert_eq!(run(&source), "true\n5\n");
+}
+
+#[test]
+fn identity_is_rejected_for_values_that_are_not_class_instances() {
+    let source = "func main() { print(1 === 1) }";
+    assert!(build_error(source).contains("class"));
+}

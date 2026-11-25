@@ -860,8 +860,8 @@ impl Emitter<'_, '_> {
 
 fn comparison(op: BinOp) -> Option<IntCC> {
     match op {
-        BinOp::Eq => Some(IntCC::Equal),
-        BinOp::Ne => Some(IntCC::NotEqual),
+        BinOp::Eq | BinOp::Is => Some(IntCC::Equal),
+        BinOp::Ne | BinOp::IsNot => Some(IntCC::NotEqual),
         BinOp::Lt => Some(IntCC::SignedLessThan),
         BinOp::Gt => Some(IntCC::SignedGreaterThan),
         BinOp::Le => Some(IntCC::SignedLessThanOrEqual),

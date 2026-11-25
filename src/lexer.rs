@@ -38,7 +38,7 @@ impl LexError {
     }
 }
 
-const THREE_CHAR_PUNCTS: [&str; 2] = ["..<", "..."];
+const THREE_CHAR_PUNCTS: [&str; 4] = ["..<", "...", "===", "!=="];
 const TWO_CHAR_PUNCTS: [&str; 13] = [
     "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "??",
 ];
@@ -210,6 +210,20 @@ mod tests {
         assert_eq!(
             tokens("a // c\n/* b /* nested */ */ c"),
             vec![ident("a"), ident("c")]
+        );
+    }
+
+    #[test]
+    fn identity_operators_are_single_tokens() {
+        assert_eq!(
+            tokens("a === b !== c"),
+            vec![
+                ident("a"),
+                punct("==="),
+                ident("b"),
+                punct("!=="),
+                ident("c")
+            ]
         );
     }
 

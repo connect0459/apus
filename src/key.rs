@@ -256,6 +256,8 @@ fn bin_op_code(op: BinOp) -> u8 {
         BinOp::Ge => 10,
         BinOp::And => 11,
         BinOp::Or => 12,
+        BinOp::Is => 13,
+        BinOp::IsNot => 14,
     }
 }
 

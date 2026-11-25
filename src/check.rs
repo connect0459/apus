@@ -1291,6 +1291,16 @@ impl FnCx<'_> {
                     ))
                 }
             }
+            BinOp::Is | BinOp::IsNot => {
+                if lhs.is_class() && rhs.is_class() {
+                    self.expect(line, lhs, rhs)
+                } else {
+                    Err(CheckError::at(
+                        line,
+                        "'===' and '!==' compare class instances",
+                    ))
+                }
+            }
             BinOp::And | BinOp::Or => {
                 self.expect(line, Ty::Bool, lhs)?;
                 self.expect(line, Ty::Bool, rhs)
