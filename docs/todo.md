@@ -42,7 +42,7 @@
   - [x] `switch` on `Int`, `Bool` and `String`: literal cases, `Int` ranges, `default` required except for a `Bool` that covers `true` and `false`
 - [ ] M6: protocols and type constraints
   - [x] M6a: protocols with method requirements, conformance declared on `struct`, `class` and `enum`, constraints `<T: P & Q>` on functions, methods and types, built-in `Equatable` and `Comparable`
-  - [ ] M6b: associated types
+  - [x] M6b: associated types: `associatedtype`, `typealias` bindings in struct, class and enum bodies, `T.Item` in signatures, annotations and members of generic types
   - [ ] M6c: protocols as types (existentials), planned as a class reference whose non-class conformers are boxed in a synthesized class, dispatched by a class tag comparison chain (see the existential decision)
 
 ## Open decisions
@@ -283,3 +283,13 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** An existential `P` is a pointer to a class object. A class conformer is stored as it is, and any other conformer (struct, enum, `Int`, `Bool`, `String`) is wrapped in `$Box<S>`, a synthesized generic class with one member `value: S`. A requirement called on an existential becomes a tag comparison chain over the class tags of every conformer, in the style of `Virtual`: the case of a class calls its method, the case of `$Box<S>` calls `S.method` with `value`. A protocol with associated types cannot be used as a type, and a `mutating` requirement cannot be called on an existential, because a copy of an existential shares its box.
 
 **Consequences.** Adding a conformer changes the key of every function that calls a requirement of that protocol through an existential, as adding an override does. `is`, `as?` and `as!` from an existential to a class reuse the tag test. A boxed struct has reference semantics through the box. This section records the plan and is revised when M6c is implemented.
+
+### An associated type is an opaque projection of a type parameter, bound by typealias (2026-11-25)
+
+**Problem.** A requirement such as `func first() -> Item` mentions a type that only the conforming type knows, and a generic body must name it (`C.Item`) without knowing it.
+
+**Options.** Infer the binding from the method signatures (Swift; needs a matching pass over every requirement); require an explicit `typealias` in the conforming type; a new `Ty` variant for the projection versus an extra field on `Ty::Param`.
+
+**Decision.** `associatedtype Item` in a protocol registers a global identifier (`Signatures::assoc_types`). A conforming struct, class or enum binds it with `typealias Item = Type` in its body, and `check_conformances` rejects a missing binding. `Ty::Assoc` packs the type parameter index and the identifier into one word, so that `Ty` stays two words: a third word made `TExpr` larger and the checker overflowed the default thread stack on a 120-term expression, so a unit test now guards the size. Inside a protocol, a bare name resolves to the projection of `Self`; in a signature or a body, `T.Item` is a scope entry that `scope_for` adds for every type parameter whose constraints declare `Item`, and `type_scope` does the same for the members of a generic type, projecting a concrete argument through its binding at once. The projection is opaque (copy, pass, return and store) and compares equal only to itself; `unify` ignores it and `coerce` checks it after the other parameters are inferred. `subst` replaces it by the binding of a concrete argument (`assoc_binding`, which follows the superclass chain) or by the projection of the caller's own parameter. Inside the type's own members, its aliases are in scope, so a member may write `Item` for the bound type.
+
+**Consequences.** `mono` needs no change: types of a generic body are substituted by `subst`, and a missing binding is reported there. An associated type has no constraints of its own (`associatedtype Item: P` and `where` clauses are not supported), so its values support no operation, and a nested projection (`C.Item.Item`) is rejected. A protocol with associated types must stay a constraint, which the existential plan already assumes. The binding is part of the type item, so editing a typealias rechecks every function through the signature digest.
