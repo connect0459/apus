@@ -76,6 +76,7 @@ pub struct FuncDecl {
     body: Vec<Stmt>,
     owner: Option<String>,
     mutating: bool,
+    overriding: bool,
     init: bool,
 }
 
@@ -96,6 +97,7 @@ impl FuncDecl {
             body,
             owner: None,
             mutating: false,
+            overriding: false,
             init: false,
         }
     }
@@ -107,6 +109,11 @@ impl FuncDecl {
 
     pub fn as_mutating(mut self) -> Self {
         self.mutating = true;
+        self
+    }
+
+    pub fn as_override(mut self) -> Self {
+        self.overriding = true;
         self
     }
 
@@ -131,6 +138,10 @@ impl FuncDecl {
 
     pub fn is_init(&self) -> bool {
         self.init
+    }
+
+    pub fn is_override(&self) -> bool {
+        self.overriding
     }
 
     pub fn generics(&self) -> &[String] {
@@ -194,6 +205,7 @@ pub struct StructDecl {
     generics: Vec<String>,
     fields: Vec<Field>,
     class: bool,
+    superclass: Option<String>,
 }
 
 impl StructDecl {
@@ -204,6 +216,7 @@ impl StructDecl {
             generics: Vec::new(),
             fields,
             class: false,
+            superclass: None,
         }
     }
 
@@ -217,8 +230,17 @@ impl StructDecl {
         self
     }
 
+    pub fn with_superclass(mut self, superclass: String) -> Self {
+        self.superclass = Some(superclass);
+        self
+    }
+
     pub fn is_class(&self) -> bool {
         self.class
+    }
+
+    pub fn superclass(&self) -> Option<&str> {
+        self.superclass.as_deref()
     }
 
     pub fn generics(&self) -> &[String] {

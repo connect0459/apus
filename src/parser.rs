@@ -19,9 +19,9 @@ impl ParseError {
 
 type PResult<T> = Result<T, ParseError>;
 
-const KEYWORDS: [&str; 19] = [
-    "func", "struct", "class", "enum", "init", "mutating", "case", "switch", "default", "var",
-    "let", "if", "else", "while", "for", "in", "return", "true", "false",
+const KEYWORDS: [&str; 20] = [
+    "func", "struct", "class", "enum", "init", "mutating", "override", "case", "switch", "default",
+    "var", "let", "if", "else", "while", "for", "in", "return", "true", "false",
 ];
 
 const LEVEL_OR: usize = 0;
@@ -220,7 +220,10 @@ impl Parser<'_> {
 
     fn decl(&mut self) -> PResult<Decl> {
         let line = self.line();
-        if self.eat_keyword("mutating") {
+        if self.eat_keyword("override") {
+            self.expect_keyword("func")?;
+            self.func_decl(line).map(|f| Decl::Func(f.as_override()))
+        } else if self.eat_keyword("mutating") {
             self.expect_keyword("func")?;
             self.func_decl(line).map(|f| Decl::Func(f.as_mutating()))
         } else if self.eat_keyword("init") {
@@ -307,6 +310,17 @@ impl Parser<'_> {
     fn struct_decl(&mut self, line: u32, class: bool) -> PResult<StructDecl> {
         let name = self.name()?;
         let generics = self.generic_params()?;
+        let superclass = if class && self.eat_punct(":") {
+            let superclass = self.name()?;
+            if self.is_punct("<") {
+                return self.fail(
+                    "a superclass cannot take type arguments: generic classes cannot take part in inheritance yet",
+                );
+            }
+            Some(superclass)
+        } else {
+            None
+        };
         self.expect_punct("{")?;
         let mut fields = Vec::new();
         loop {
@@ -328,6 +342,10 @@ impl Parser<'_> {
             self.end_of_statement()?;
         }
         let decl = StructDecl::new(line, name, fields).with_generics(generics);
+        let decl = match superclass {
+            Some(superclass) => decl.with_superclass(superclass),
+            None => decl,
+        };
         Ok(if class { decl.as_class() } else { decl })
     }
 
@@ -799,6 +817,40 @@ mod tests {
 
     fn int(n: i64) -> Expr {
         ex(ExprKind::Int(n))
+    }
+
+    #[test]
+    fn a_class_may_name_a_superclass() {
+        let Decl::Struct(class) = try_parse("class B: A { var y: Int }").unwrap() else {
+            panic!("expected a class");
+        };
+        assert_eq!(class.superclass(), Some("A"));
+        assert_eq!(class.fields().len(), 1);
+    }
+
+    #[test]
+    fn a_class_has_no_superclass_by_default() {
+        let Decl::Struct(class) = try_parse("class A { var x: Int }").unwrap() else {
+            panic!("expected a class");
+        };
+        assert_eq!(class.superclass(), None);
+    }
+
+    #[test]
+    fn a_struct_cannot_name_a_superclass() {
+        assert!(try_parse("struct S: A { var x: Int }").is_err());
+    }
+
+    #[test]
+    fn override_marks_a_function_as_overriding() {
+        let f = func("override func f() { }");
+        assert!(f.is_override());
+        assert!(!func("func f() { }").is_override());
+    }
+
+    #[test]
+    fn override_must_be_followed_by_func() {
+        assert!(try_parse("override init() { }").is_err());
     }
 
     #[test]

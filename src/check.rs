@@ -129,7 +129,7 @@ fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
             .sigs
             .struct_sig(id)
             .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
-        let members: Vec<&str> = sig.fields().iter().map(FieldSig::name).collect();
+        let members: Vec<&str> = sig.members().map(|(_, f)| f.name()).collect();
         let scope = InitScope::new(&members, &methods, &params);
         check_initialization(func.body(), scope, func.line())
             .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
@@ -145,12 +145,19 @@ fn zero_struct(cx: &FnCx, func: &FuncDecl, id: StructId, ty: Ty) -> CResult<TExp
         .sigs
         .struct_sig(id)
         .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
-    let zeros: Vec<TExpr> = sig.fields().iter().map(|f| TExpr::Zero(f.ty())).collect();
-    Ok(if ty.is_class() {
-        TExpr::New { ty, args: zeros }
-    } else {
-        TExpr::StructInit { ty, args: zeros }
-    })
+    let zeros: Vec<TExpr> = sig.members().map(|(_, f)| TExpr::Zero(f.ty())).collect();
+    Ok(construct(ty, zeros))
+}
+
+fn construct(ty: Ty, members: Vec<TExpr>) -> TExpr {
+    match ty {
+        Ty::Class(id) => {
+            let tag = i64::try_from(id.index()).unwrap_or(i64::MAX);
+            let args = std::iter::once(TExpr::Int(tag)).chain(members).collect();
+            TExpr::New { ty, args }
+        }
+        _ => TExpr::StructInit { ty, args: members },
+    }
 }
 
 fn always_returns(stmts: &[Stmt]) -> bool {
@@ -206,7 +213,7 @@ impl FnCx<'_> {
     }
 
     fn expect(&self, line: u32, expected: Ty, found: Ty) -> CResult<()> {
-        if expected == found {
+        if expected == found || self.sigs.is_subclass(found, expected) {
             Ok(())
         } else {
             Err(CheckError::at(
@@ -1292,12 +1299,15 @@ impl FnCx<'_> {
                 }
             }
             BinOp::Is | BinOp::IsNot => {
-                if lhs.is_class() && rhs.is_class() {
-                    self.expect(line, lhs, rhs)
+                if lhs.is_class()
+                    && rhs.is_class()
+                    && (self.sigs.is_subclass(lhs, rhs) || self.sigs.is_subclass(rhs, lhs))
+                {
+                    Ok(())
                 } else {
                     Err(CheckError::at(
                         line,
-                        "'===' and '!==' compare class instances",
+                        "'===' and '!==' compare instances of related classes",
                     ))
                 }
             }
@@ -1474,19 +1484,20 @@ impl FnCx<'_> {
         let sig = sigs
             .struct_sig(pattern_id)
             .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
-        if args.len() != sig.fields().len() {
+        let members: Vec<&FieldSig> = sig.members().map(|(_, f)| f).collect();
+        if args.len() != members.len() {
             return Err(CheckError::at(
                 line,
                 format!(
                     "'{}' takes {} member(s), but {} were given",
                     sig.name(),
-                    sig.fields().len(),
+                    members.len(),
                     args.len()
                 ),
             ));
         }
         let mut values = Vec::with_capacity(args.len());
-        for (arg, field) in args.iter().zip(sig.fields()) {
+        for (arg, field) in args.iter().zip(&members) {
             if arg.label() != Some(field.name()) {
                 return Err(CheckError::at(
                     line,
@@ -1503,19 +1514,14 @@ impl FnCx<'_> {
             values.push(value);
         }
         let id = if inferring {
-            let patterns: Vec<Ty> = sig.fields().iter().map(FieldSig::ty).collect();
+            let patterns: Vec<Ty> = members.iter().map(|f| f.ty()).collect();
             let context = expected.map(|e| (sigs.struct_ty(def, pattern_id), e));
             let type_args = self.infer(line, &base_name, generics, &patterns, &values, context)?;
             sigs.instantiate_struct(def, type_args, &self.scope, line)?
         } else {
             pattern_id
         };
-        let ty = sigs.struct_ty(def, id);
-        Ok(if ty.is_class() {
-            TExpr::New { ty, args: values }
-        } else {
-            TExpr::StructInit { ty, args: values }
-        })
+        Ok(construct(sigs.struct_ty(def, id), values))
     }
 }
 

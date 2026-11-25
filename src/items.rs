@@ -174,7 +174,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
 }
 
 fn is_member_start(token: &Token) -> bool {
-    matches!(token, Token::Ident(k) if k == "func" || k == "init" || k == "mutating")
+    matches!(token, Token::Ident(k) if k == "func" || k == "init" || k == "mutating" || k == "override")
 }
 
 fn extract_members(slice: &mut Vec<Spanned>) -> Result<Vec<Vec<Spanned>>, SplitError> {
@@ -232,20 +232,20 @@ fn extract_members(slice: &mut Vec<Spanned>) -> Result<Vec<Vec<Spanned>>, SplitE
     Ok(members)
 }
 
+fn modifier_count(member: &[Spanned]) -> usize {
+    member
+        .iter()
+        .take_while(|t| matches!(t.token(), Token::Ident(k) if k == "mutating" || k == "override"))
+        .count()
+}
+
 fn has_type_parameters(member: &[Spanned]) -> bool {
-    let name_at = if matches!(member[0].token(), Token::Ident(k) if k == "mutating") {
-        2
-    } else {
-        1
-    };
+    let name_at = modifier_count(member) + 1;
     matches!(member.get(name_at + 1).map(Spanned::token), Some(Token::Punct(p)) if p == "<")
 }
 
 fn member_name(tokens: &[Spanned]) -> Result<String, SplitError> {
-    let mut at = 0;
-    if matches!(tokens[at].token(), Token::Ident(k) if k == "mutating") {
-        at += 1;
-    }
+    let at = modifier_count(tokens);
     match tokens.get(at).map(Spanned::token) {
         Some(Token::Ident(k)) if k == "init" => Ok("init".to_string()),
         Some(Token::Ident(k)) if k == "func" => match tokens.get(at + 1).map(Spanned::token) {
@@ -257,7 +257,7 @@ fn member_name(tokens: &[Spanned]) -> Result<String, SplitError> {
         },
         _ => Err(SplitError {
             line: tokens[at.min(tokens.len() - 1)].line(),
-            message: "expected 'func' after 'mutating'".to_string(),
+            message: "expected 'func' after a modifier".to_string(),
         }),
     }
 }
@@ -508,6 +508,13 @@ mod tests {
             digest_of("struct P { var x: Int\n func f() -> Int { return 1 } }"),
             digest_of("struct P { var x: Int\n func f() -> Bool { return true } }")
         );
+    }
+
+    #[test]
+    fn an_overriding_method_is_split_out_with_its_name() {
+        let found =
+            items("class B: A {\n  var y: Int\n  override func f() { }\n}\nfunc main() { }");
+        assert!(found.iter().any(|item| item.name() == "B.f"), "{found:?}");
     }
 
     #[test]

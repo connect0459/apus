@@ -35,6 +35,8 @@ fn identity(generics: &[String]) -> Vec<Ty> {
     (0..generics.len()).map(Ty::Param).collect()
 }
 
+pub const CLASS_TAG: &str = "$class";
+
 pub type CResult<T> = Result<T, CheckError>;
 
 pub type Scope = [(String, Ty)];
@@ -113,6 +115,10 @@ impl FieldSig {
     pub fn is_mutable(&self) -> bool {
         self.mutable
     }
+
+    pub fn is_class_tag(&self) -> bool {
+        self.name == CLASS_TAG
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +138,13 @@ impl StructSig {
 
     pub fn field(&self, name: &str) -> Option<(usize, &FieldSig)> {
         self.fields.iter().enumerate().find(|(_, f)| f.name == name)
+    }
+
+    pub fn members(&self) -> impl Iterator<Item = (usize, &FieldSig)> {
+        self.fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.is_class_tag())
     }
 }
 
@@ -206,6 +219,7 @@ struct Instances {
     enum_index: HashMap<(usize, Vec<Ty>), EnumId>,
     enum_pending: HashSet<(usize, Vec<Ty>)>,
     layout_owner: HashMap<StructId, EnumId>,
+    superclass: HashMap<StructId, StructId>,
     cell_owner: HashMap<StructId, EnumId>,
     cell_index: HashMap<EnumId, StructId>,
 }
@@ -262,6 +276,12 @@ impl Signatures {
             return Err(CheckError::at(
                 decl.line(),
                 format!("duplicate type '{}'", decl.name()),
+            ));
+        }
+        if decl.superclass().is_some() && !decl.generics().is_empty() {
+            return Err(CheckError::at(
+                decl.line(),
+                "generic classes cannot take part in inheritance yet",
             ));
         }
         self.struct_def_ids
@@ -497,9 +517,12 @@ impl Signatures {
         }
         let fields = self.struct_fields(decl, &key.1, &name, scope, line);
         self.instances.borrow_mut().struct_pending.remove(&key);
-        let fields = fields?;
+        let (fields, superclass) = fields?;
         let mut instances = self.instances.borrow_mut();
         let id = StructId::new(instances.structs.len());
+        if let Some(parent) = superclass {
+            instances.superclass.insert(id, parent);
+        }
         instances.structs.push(Rc::new(StructSig { name, fields }));
         instances.struct_origin.push(Origin::Struct {
             def,
@@ -516,7 +539,7 @@ impl Signatures {
         name: &str,
         scope: &Scope,
         line: u32,
-    ) -> CResult<Vec<FieldSig>> {
+    ) -> CResult<(Vec<FieldSig>, Option<StructId>)> {
         let own_scope: Vec<(String, Ty)> = decl
             .generics()
             .iter()
@@ -525,6 +548,22 @@ impl Signatures {
             .collect();
         let at = if line == 0 { decl.line() } else { line };
         let mut fields: Vec<FieldSig> = Vec::new();
+        let mut parent = None;
+        if decl.is_class() {
+            fields.push(FieldSig {
+                name: CLASS_TAG.to_string(),
+                ty: Ty::Int,
+                mutable: false,
+            });
+            if let Some(superclass) = decl.superclass() {
+                let id = self.superclass_id(decl, superclass, at)?;
+                let inherited = self.struct_sig(id).ok_or_else(|| {
+                    CheckError::at(at, "internal error: unknown superclass layout")
+                })?;
+                fields.extend(inherited.members().map(|(_, f)| f.clone()));
+                parent = Some(id);
+            }
+        }
         for field in decl.fields() {
             let ty = self.resolve_type(field.ty(), &own_scope, at)?;
             if let Ty::Struct(_) = ty {
@@ -548,7 +587,62 @@ impl Signatures {
                 mutable: field.is_mutable(),
             });
         }
-        Ok(fields)
+        Ok((fields, parent))
+    }
+
+    fn superclass_id(&self, decl: &StructDecl, superclass: &str, at: u32) -> CResult<StructId> {
+        let Some(def) = self.struct_def_ids.get(superclass).copied() else {
+            return Err(CheckError::at(at, format!("unknown type '{superclass}'")));
+        };
+        let parent = &self.struct_defs[def];
+        if !parent.is_class() {
+            return Err(CheckError::at(
+                at,
+                format!(
+                    "'{superclass}' is not a class, so '{}' cannot inherit from it",
+                    decl.name()
+                ),
+            ));
+        }
+        if !decl.generics().is_empty() || !parent.generics().is_empty() {
+            return Err(CheckError::at(
+                at,
+                "generic classes cannot take part in inheritance yet",
+            ));
+        }
+        if superclass == decl.name()
+            || self
+                .instances
+                .borrow()
+                .struct_pending
+                .contains(&(def, Vec::new()))
+        {
+            return Err(CheckError::at(
+                at,
+                format!(
+                    "'{}' cannot inherit from itself, directly or not",
+                    decl.name()
+                ),
+            ));
+        }
+        self.instantiate_struct(def, Vec::new(), &[], at)
+    }
+
+    pub fn superclass(&self, ty: Ty) -> Option<Ty> {
+        let Ty::Class(id) = ty else { return None };
+        let parent = self.instances.borrow().superclass.get(&id).copied()?;
+        Some(Ty::Class(parent))
+    }
+
+    pub fn is_subclass(&self, sub: Ty, sup: Ty) -> bool {
+        let mut current = Some(sub);
+        while let Some(ty) = current {
+            if ty == sup {
+                return true;
+            }
+            current = self.superclass(ty);
+        }
+        false
     }
 
     pub fn instantiate_enum(

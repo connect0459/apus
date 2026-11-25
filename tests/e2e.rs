@@ -1297,3 +1297,89 @@ fn identity_is_rejected_for_values_that_are_not_class_instances() {
     let source = "func main() { print(1 === 1) }";
     assert!(build_error(source).contains("class"));
 }
+
+const SHAPES: &str =
+    "class Shape {\n  var sides: Int\n}\nclass Square: Shape {\n  var length: Int\n}\n";
+
+#[test]
+fn a_subclass_inherits_the_members_of_its_superclass() {
+    let source = format!(
+        "{SHAPES}func main() {{\n  let s = Square(sides: 4, length: 3)\n  print(s.sides)\n  print(s.length)\n  s.sides = 5\n  print(s.sides)\n}}"
+    );
+    assert_eq!(run(&source), "4\n3\n5\n");
+}
+
+#[test]
+fn a_subclass_instance_can_be_used_where_its_superclass_is_expected() {
+    let source = format!(
+        "{SHAPES}func sidesOf(_ s: Shape) -> Int {{ return s.sides }}\nfunc make() -> Shape {{ return Square(sides: 4, length: 1) }}\n\
+         func main() {{\n  let a: Shape = Square(sides: 4, length: 3)\n  print(sidesOf(a))\n  print(sidesOf(Square(sides: 7, length: 1)))\n  print(make().sides)\n}}"
+    );
+    assert_eq!(run(&source), "4\n7\n4\n");
+}
+
+#[test]
+fn a_superclass_instance_cannot_be_used_where_a_subclass_is_expected() {
+    let source = format!("{SHAPES}func main() {{\n  let s: Square = Shape(sides: 4)\n}}");
+    assert!(build_error(&source).contains("expected Square"));
+}
+
+#[test]
+fn identity_compares_an_instance_with_its_superclass_reference() {
+    let source = format!(
+        "{SHAPES}func main() {{\n  let s = Square(sides: 4, length: 3)\n  let a: Shape = s\n  print(a === s)\n  print(s === a)\n  print(a !== Shape(sides: 4))\n}}"
+    );
+    assert_eq!(run(&source), "true\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_class_with_several_levels_of_inheritance_inherits_every_member() {
+    let source = format!(
+        "{SHAPES}class Cube: Square {{\n  var depth: Int\n}}\n\
+         func sidesOf(_ s: Shape) -> Int {{ return s.sides }}\n\
+         func main() {{\n  let c = Cube(sides: 4, length: 2, depth: 9)\n  print(c.depth)\n  print(c.length)\n  print(sidesOf(c))\n}}"
+    );
+    assert_eq!(run(&source), "9\n2\n4\n");
+}
+
+#[test]
+fn unrelated_classes_are_not_interchangeable() {
+    let source = format!(
+        "{SHAPES}class Other {{ var n: Int }}\nfunc main() {{\n  let s: Shape = Other(n: 1)\n}}"
+    );
+    assert!(build_error(&source).contains("expected Shape"));
+}
+
+#[test]
+fn a_superclass_must_exist() {
+    let source = "class B: Missing { var y: Int }\nfunc main() { }";
+    assert!(build_error(source).contains("Missing"));
+}
+
+#[test]
+fn a_superclass_must_be_a_class() {
+    let source = "struct S { var x: Int }\nclass B: S { var y: Int }\nfunc main() { }";
+    assert!(build_error(source).contains("not a class"));
+}
+
+#[test]
+fn a_class_cannot_inherit_from_itself_directly_or_not() {
+    let direct = "class A: A { var x: Int }\nfunc main() { }";
+    assert!(build_error(direct).contains("inherit"));
+    let indirect = "class A: B { var x: Int }\nclass B: A { var y: Int }\nfunc main() { }";
+    assert!(build_error(indirect).contains("inherit"));
+}
+
+#[test]
+fn a_subclass_cannot_redeclare_an_inherited_member() {
+    let source = "class A { var x: Int }\nclass B: A { var x: Int }\nfunc main() { }";
+    assert!(build_error(source).contains("duplicate"));
+}
+
+#[test]
+fn generic_classes_cannot_take_part_in_inheritance() {
+    let sub = "class A { var x: Int }\nclass B<T>: A { var y: T }\nfunc main() { }";
+    assert!(build_error(sub).contains("generic"));
+    let sup = "class A<T> { var x: T }\nclass B: A<Int> { var y: Int }\nfunc main() { }";
+    assert!(build_error(sup).contains("generic"));
+}
