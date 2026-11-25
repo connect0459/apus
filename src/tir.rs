@@ -191,6 +191,13 @@ pub enum TExpr {
         init: Box<TExpr>,
     },
     FuncAddr(String),
+    Witness {
+        protocol: String,
+        method: String,
+        self_ty: Ty,
+        args: Vec<TExpr>,
+        ret: Ty,
+    },
     Select {
         cond: Box<TExpr>,
         then: Box<TExpr>,
@@ -219,7 +226,9 @@ impl TExpr {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => Ty::Int,
                 _ => Ty::Bool,
             },
-            TExpr::Call { ret, .. } | TExpr::Virtual { ret, .. } => *ret,
+            TExpr::Call { ret, .. } | TExpr::Virtual { ret, .. } | TExpr::Witness { ret, .. } => {
+                *ret
+            }
             TExpr::Retain(inner)
             | TExpr::Moved(inner)
             | TExpr::RetainUnowned(inner)
@@ -240,10 +249,26 @@ impl TExpr {
 
 type TyMap<'a, E> = &'a mut dyn FnMut(Ty) -> Result<Ty, E>;
 type CallMap<'a, E> = &'a mut dyn FnMut(String, Vec<Ty>) -> Result<(String, Vec<Ty>), E>;
+type WitnessMap<'a, E> = &'a mut dyn FnMut(&str, &str, Ty) -> Result<Witnessed, E>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Witnessed {
+    Keep,
+    Call {
+        callee: String,
+        type_args: Vec<Ty>,
+    },
+    Operator(BinOp),
+    Virtual {
+        cases: Vec<(i64, String)>,
+        default: String,
+    },
+}
 
 struct Rewriter<'a, E> {
     ty: TyMap<'a, E>,
     call: CallMap<'a, E>,
+    witness: WitnessMap<'a, E>,
 }
 
 impl TFunc {
@@ -252,8 +277,9 @@ impl TFunc {
         name: String,
         ty: TyMap<'_, E>,
         call: CallMap<'_, E>,
+        witness: WitnessMap<'_, E>,
     ) -> Result<TFunc, E> {
-        let mut rewriter = Rewriter { ty, call };
+        let mut rewriter = Rewriter { ty, call, witness };
         let ret = (rewriter.ty)(self.ret)?;
         let locals = self
             .locals
@@ -381,6 +407,59 @@ impl<E> Rewriter<'_, E> {
                     default: (self.call)(default.clone(), Vec::new())?.0,
                     args: self.exprs(args)?,
                     ret: (self.ty)(*ret)?,
+                }
+            }
+            TExpr::Witness {
+                protocol,
+                method,
+                self_ty,
+                args,
+                ret,
+            } => {
+                let self_ty = (self.ty)(*self_ty)?;
+                let ret = (self.ty)(*ret)?;
+                let mut args = self.exprs(args)?;
+                match (self.witness)(protocol, method, self_ty)? {
+                    Witnessed::Keep => TExpr::Witness {
+                        protocol: protocol.clone(),
+                        method: method.clone(),
+                        self_ty,
+                        args,
+                        ret,
+                    },
+                    Witnessed::Call { callee, type_args } => {
+                        let (callee, type_args) = (self.call)(callee, type_args)?;
+                        TExpr::Call {
+                            callee,
+                            type_args,
+                            args,
+                            ret,
+                        }
+                    }
+                    Witnessed::Operator(op) => {
+                        let rhs = args.pop();
+                        let lhs = args.pop();
+                        match (lhs, rhs) {
+                            (Some(lhs), Some(rhs)) => TExpr::Binary {
+                                op,
+                                lhs: Box::new(lhs),
+                                rhs: Box::new(rhs),
+                            },
+                            _ => TExpr::Bool(false),
+                        }
+                    }
+                    Witnessed::Virtual { cases, default } => {
+                        let mut renamed = Vec::with_capacity(cases.len());
+                        for (tag, callee) in cases {
+                            renamed.push((tag, (self.call)(callee, Vec::new())?.0));
+                        }
+                        TExpr::Virtual {
+                            cases: renamed,
+                            default: (self.call)(default, Vec::new())?.0,
+                            args,
+                            ret,
+                        }
+                    }
                 }
             }
             TExpr::StructInit { ty, args } => TExpr::StructInit {

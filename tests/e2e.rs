@@ -3102,3 +3102,185 @@ fn a_value_switch_rejects_enum_patterns() {
     let source = "enum E { case a }\nfunc main() {\n  switch 1 {\n  case .a:\n    print(1)\n  default:\n    print(2)\n  }\n}";
     assert!(!build_error(source).is_empty());
 }
+
+const SHAPE_PROTOCOL: &str = "protocol Shape {\n  func area() -> Int\n}\nstruct Square: Shape {\n  var side: Int\n  func area() -> Int { return side * side }\n}\nstruct Rect: Shape {\n  var w: Int\n  var h: Int\n  func area() -> Int { return w * h }\n}\n";
+
+#[test]
+fn a_generic_function_calls_a_requirement_of_its_constraint() {
+    let source = format!(
+        "{SHAPE_PROTOCOL}func total<T: Shape>(_ a: T, _ b: T) -> Int {{\n  return a.area() + b.area()\n}}\nfunc main() {{\n  print(total(Square(side: 2), Square(side: 3)))\n  print(total(Rect(w: 2, h: 5), Rect(w: 1, h: 1)))\n}}"
+    );
+    assert_eq!(run(&source), "13\n11\n");
+}
+
+#[test]
+fn a_class_and_an_enum_can_conform_to_a_protocol() {
+    let source = "protocol Named {\n  func code() -> Int\n}\nclass Dog: Named {\n  var n: Int\n  func code() -> Int { return n }\n}\nenum Color: Named {\n  case red, green\n  func code() -> Int {\n    switch self {\n    case .red: return 1\n    case .green: return 2\n    }\n  }\n}\nfunc show<T: Named>(_ x: T) {\n  print(x.code())\n}\nfunc main() {\n  show(Dog(n: 7))\n  show(Color.green)\n}";
+    assert_eq!(run(source), "7\n2\n");
+}
+
+#[test]
+fn a_subclass_conforms_through_its_superclass_and_dispatches_dynamically() {
+    let source = "protocol Named {\n  func code() -> Int\n}\nclass Animal: Named {\n  func code() -> Int { return 1 }\n}\nclass Cat: Animal {\n  override func code() -> Int { return 2 }\n}\nfunc show<T: Named>(_ x: T) {\n  print(x.code())\n}\nfunc main() {\n  let a: Animal = Cat()\n  show(a)\n  show(Animal())\n  show(Cat())\n}";
+    assert_eq!(run(source), "2\n1\n2\n");
+}
+
+#[test]
+fn a_requirement_may_take_arguments_and_the_self_type() {
+    let source = "protocol Joinable {\n  func join(_ other: Self, by: Int) -> Self\n}\nstruct Num: Joinable {\n  var v: Int\n  func join(_ other: Num, by: Int) -> Num { return Num(v: v + other.v + by) }\n}\nfunc combine<T: Joinable>(_ a: T, _ b: T) -> T {\n  return a.join(b, by: 100)\n}\nfunc main() {\n  print(combine(Num(v: 1), Num(v: 2)).v)\n}";
+    assert_eq!(run(source), "103\n");
+}
+
+#[test]
+fn a_mutating_requirement_changes_the_caller_variable() {
+    let source = "protocol Counter {\n  mutating func bump()\n  func value() -> Int\n}\nstruct Tally: Counter {\n  var n: Int\n  mutating func bump() { n += 1 }\n  func value() -> Int { return n }\n}\nfunc twice<T: Counter>(_ c: T) -> Int {\n  var x = c\n  x.bump()\n  x.bump()\n  return x.value()\n}\nfunc main() {\n  print(twice(Tally(n: 5)))\n}";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn a_constraint_may_list_several_protocols() {
+    let source = "protocol A {\n  func a() -> Int\n}\nprotocol B {\n  func b() -> Int\n}\nstruct Both: A, B {\n  var x: Int\n  func a() -> Int { return x }\n  func b() -> Int { return x * 2 }\n}\nfunc sum<T: A & B>(_ v: T) -> Int {\n  return v.a() + v.b()\n}\nfunc main() {\n  print(sum(Both(x: 4)))\n}";
+    assert_eq!(run(source), "12\n");
+}
+
+#[test]
+fn a_constrained_value_can_be_passed_to_another_constrained_function() {
+    let source = format!(
+        "{SHAPE_PROTOCOL}func area_of<T: Shape>(_ s: T) -> Int {{ return s.area() }}\nfunc twice<T: Shape>(_ s: T) -> Int {{\n  return area_of(s) * 2\n}}\nfunc main() {{\n  print(twice(Square(side: 3)))\n}}"
+    );
+    assert_eq!(run(&source), "18\n");
+}
+
+#[test]
+fn a_generic_type_may_constrain_its_parameter() {
+    let source = format!(
+        "{SHAPE_PROTOCOL}struct Holder<T: Shape> {{\n  var item: T\n  func double() -> Int {{ return item.area() * 2 }}\n}}\nfunc main() {{\n  let h = Holder(item: Square(side: 3))\n  print(h.double())\n  let r = Holder(item: Rect(w: 2, h: 3))\n  print(r.double())\n}}"
+    );
+    assert_eq!(run(&source), "18\n12\n");
+}
+
+#[test]
+fn a_generic_method_may_have_a_constrained_parameter() {
+    let source = format!(
+        "{SHAPE_PROTOCOL}struct Scale {{\n  var k: Int\n  func apply<T: Shape>(_ s: T) -> Int {{ return s.area() * k }}\n}}\nfunc main() {{\n  print(Scale(k: 3).apply(Square(side: 2)))\n}}"
+    );
+    assert_eq!(run(&source), "12\n");
+}
+
+#[test]
+fn equatable_gives_a_type_parameter_equality() {
+    let source = "enum Color { case red, green }\nfunc same<T: Equatable>(_ a: T, _ b: T) -> Bool { return a == b }\nfunc differ<T: Equatable>(_ a: T, _ b: T) -> Bool { return a != b }\nfunc main() {\n  print(same(1, 1))\n  print(same(1, 2))\n  print(same(\"a\", \"a\"))\n  print(differ(\"a\", \"b\"))\n  print(same(true, false))\n  print(same(Color.red, Color.red))\n  print(differ(Color.red, Color.green))\n}";
+    assert_eq!(run(source), "true\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_struct_that_declares_equatable_is_compared_member_by_member() {
+    let source = "struct P: Equatable {\n  var x: Int\n  var name: String\n}\nfunc same<T: Equatable>(_ a: T, _ b: T) -> Bool { return a == b }\nfunc main() {\n  print(same(P(x: 1, name: \"a\"), P(x: 1, name: \"a\")))\n  print(same(P(x: 1, name: \"a\"), P(x: 1, name: \"b\")))\n}";
+    assert_eq!(run(source), "true\nfalse\n");
+}
+
+#[test]
+fn comparable_gives_a_type_parameter_ordering_and_equality() {
+    let source = "func largest<T: Comparable>(_ a: T, _ b: T) -> T {\n  if a > b { return a }\n  return b\n}\nfunc inside<T: Comparable>(_ x: T, _ lo: T, _ hi: T) -> Bool {\n  return x >= lo && x <= hi && x != hi\n}\nfunc smaller<T: Comparable>(_ a: T, _ b: T) -> Bool { return a < b }\nfunc main() {\n  print(largest(3, 9))\n  print(largest(9, 3))\n  print(inside(5, 1, 9))\n  print(inside(9, 1, 9))\n  print(smaller(1, 2))\n}";
+    assert_eq!(run(source), "9\n9\ntrue\nfalse\ntrue\n");
+}
+
+#[test]
+fn protocol_calls_in_a_generic_function_are_instantiated_per_type() {
+    let source = format!(
+        "{SHAPE_PROTOCOL}func area_of<T: Shape>(_ s: T) -> Int {{ return s.area() }}\nfunc main() {{\n  print(area_of(Square(side: 2)))\n  print(area_of(Rect(w: 3, h: 4)))\n  print(area_of(Square(side: 5)))\n}}"
+    );
+    assert_eq!(run(&source), "4\n12\n25\n");
+}
+
+#[test]
+fn a_type_that_does_not_conform_is_rejected_at_the_call() {
+    let source = format!(
+        "{SHAPE_PROTOCOL}struct Other {{\n  var x: Int\n}}\nfunc area_of<T: Shape>(_ s: T) -> Int {{ return s.area() }}\nfunc main() {{\n  print(area_of(Other(x: 1)))\n}}"
+    );
+    let message = build_error(&source);
+    assert!(
+        message.contains("Other") && message.contains("Shape"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_conforming_type_must_implement_every_requirement() {
+    let source = "protocol P {\n  func a() -> Int\n  func b() -> Int\n}\nstruct S: P {\n  var x: Int\n  func a() -> Int { return x }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("'b'"));
+}
+
+#[test]
+fn an_implementation_must_match_the_requirement_signature() {
+    let wrong_result = "protocol P {\n  func a() -> Int\n}\nstruct S: P {\n  var x: Int\n  func a() -> Bool { return true }\n}\nfunc main() { }";
+    assert!(build_error(wrong_result).contains("'a'"));
+    let wrong_label = "protocol P {\n  func a(x: Int) -> Int\n}\nstruct S: P {\n  var x: Int\n  func a(_ x: Int) -> Int { return x }\n}\nfunc main() { }";
+    assert!(build_error(wrong_label).contains("'a'"));
+    let not_mutating = "protocol P {\n  mutating func a()\n}\nstruct S: P {\n  var x: Int\n  func a() { }\n}\nfunc main() { }";
+    assert!(build_error(not_mutating).contains("mutating"));
+}
+
+#[test]
+fn a_conformance_must_name_a_protocol() {
+    let unknown = "struct S: Nothing {\n  var x: Int\n}\nfunc main() { }";
+    assert!(build_error(unknown).contains("Nothing"));
+    let class_name = "class A {\n  var x: Int\n}\nstruct S: A {\n  var x: Int\n}\nfunc main() { }";
+    assert!(build_error(class_name).contains("not a protocol"));
+}
+
+#[test]
+fn a_constraint_must_name_a_protocol() {
+    let source = "struct A {\n  var x: Int\n}\nfunc f<T: A>(_ x: T) { }\nfunc main() { }";
+    assert!(build_error(source).contains("not a protocol"));
+}
+
+#[test]
+fn a_method_outside_the_constraint_cannot_be_called() {
+    let source = "protocol P {\n  func a() -> Int\n}\nfunc f<T: P>(_ x: T) -> Int { return x.b() }\nfunc main() { }";
+    assert!(build_error(source).contains("'b'"));
+    let none = "func f<T>(_ x: T) -> Int { return x.a() }\nfunc main() { }";
+    assert!(!build_error(none).is_empty());
+}
+
+#[test]
+fn an_operator_needs_the_matching_standard_protocol() {
+    let none = "func f<T>(_ a: T, _ b: T) -> Bool { return a == b }\nfunc main() { }";
+    assert!(!build_error(none).is_empty());
+    let equatable_only =
+        "func f<T: Equatable>(_ a: T, _ b: T) -> Bool { return a < b }\nfunc main() { }";
+    assert!(!build_error(equatable_only).is_empty());
+}
+
+#[test]
+fn a_constrained_value_cannot_flow_into_a_stronger_constraint() {
+    let source = "protocol P {\n  func a() -> Int\n}\nprotocol Q {\n  func b() -> Int\n}\nfunc needs_q<T: Q>(_ x: T) -> Int { return x.b() }\nfunc f<T: P>(_ x: T) -> Int { return needs_q(x) }\nfunc main() { }";
+    assert!(build_error(source).contains("Q"));
+}
+
+#[test]
+fn a_string_is_not_comparable_yet() {
+    let source = "func f<T: Comparable>(_ a: T, _ b: T) -> Bool { return a < b }\nfunc main() {\n  print(f(\"a\", \"b\"))\n}";
+    assert!(build_error(source).contains("Comparable"));
+}
+
+#[test]
+fn equatable_cannot_be_declared_by_a_type_with_a_class_member() {
+    let source =
+        "class Box {\n  var v: Int\n}\nstruct S: Equatable {\n  var b: Box\n}\nfunc main() { }";
+    assert!(build_error(source).contains("equality is not supported"));
+}
+
+#[test]
+fn a_protocol_name_cannot_be_reused() {
+    let twice = "protocol P {\n  func a()\n}\nprotocol P {\n  func b()\n}\nfunc main() { }";
+    assert!(build_error(twice).contains("duplicate"));
+    let builtin = "protocol Equatable {\n  func a()\n}\nfunc main() { }";
+    assert!(build_error(builtin).contains("Equatable"));
+}
+
+#[test]
+fn a_protocol_can_only_be_used_as_a_constraint_for_now() {
+    let source = "protocol P {\n  func a() -> Int\n}\nfunc f(_ x: P) { }\nfunc main() { }";
+    assert!(!build_error(source).is_empty());
+}

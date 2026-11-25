@@ -1014,6 +1014,11 @@ impl Emitter<'_, '_> {
 
     fn expr(&mut self, expr: &TExpr) -> GResult<Option<Value>> {
         let value = match expr {
+            TExpr::Witness { .. } => {
+                return Err(CodegenError::from(
+                    "a protocol requirement was not resolved",
+                ));
+            }
             TExpr::Int(n) => self.builder.ins().iconst(types::I64, *n),
             TExpr::EnumCase { index, .. } => self
                 .builder

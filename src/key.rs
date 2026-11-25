@@ -241,6 +241,23 @@ impl Encoder<'_> {
                     self.expr(arg);
                 }
             }
+            TExpr::Witness {
+                protocol,
+                method,
+                self_ty,
+                args,
+                ret,
+            } => {
+                self.tag(53);
+                self.str(protocol);
+                self.str(method);
+                self.ty(*self_ty);
+                self.ty(*ret);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
             TExpr::Virtual {
                 cases,
                 default,

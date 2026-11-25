@@ -1,11 +1,62 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::sigs::Signatures;
-use crate::tir::TFunc;
+use crate::ast::BinOp;
+use crate::check::equality_function;
+use crate::sigs::{COMPARABLE, EQUATABLE, Signatures};
+use crate::tir::{TFunc, Witnessed};
 use crate::types::Ty;
 
 const INSTANCE_LIMIT: usize = 2000;
+const EQUAL: &str = "$equal";
+
+fn resolve_witness(
+    sigs: &Signatures,
+    protocol: &str,
+    method: &str,
+    self_ty: Ty,
+) -> Result<Witnessed, String> {
+    let name = sigs.type_name(self_ty);
+    let missing = || format!("type '{name}' does not conform to the protocol '{protocol}'");
+    if !sigs.conforms(self_ty, protocol) {
+        return Err(missing());
+    }
+    match (protocol, method) {
+        (EQUATABLE, "==") if matches!(self_ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_)) => {
+            Ok(Witnessed::Operator(BinOp::Eq))
+        }
+        (EQUATABLE, "==") => Ok(Witnessed::Call {
+            callee: EQUAL.to_string(),
+            type_args: vec![self_ty],
+        }),
+        (COMPARABLE, op) => {
+            let op = match op {
+                "<" => BinOp::Lt,
+                ">" => BinOp::Gt,
+                "<=" => BinOp::Le,
+                _ => BinOp::Ge,
+            };
+            Ok(Witnessed::Operator(op))
+        }
+        _ => {
+            let qualified = sigs
+                .resolve_method(self_ty, method)
+                .ok_or_else(|| format!("type '{name}' has no method '{method}'"))?;
+            let cases = sigs.dispatch_cases(self_ty, method);
+            if cases.is_empty() {
+                Ok(Witnessed::Call {
+                    callee: qualified,
+                    type_args: sigs.type_arguments(self_ty),
+                })
+            } else {
+                Ok(Witnessed::Virtual {
+                    cases,
+                    default: qualified,
+                })
+            }
+        }
+    }
+}
 
 pub type GenericProvider<'a> = &'a mut dyn FnMut(&str) -> Result<Rc<TFunc>, String>;
 
@@ -49,6 +100,7 @@ impl<'a> Instantiator<'a> {
 
     pub fn resolve(&mut self, func: &TFunc) -> Result<(TFunc, Vec<usize>), String> {
         let mut direct: Vec<usize> = Vec::new();
+        let sigs = self.sigs;
         let rewritten = {
             let mut ty = |t: Ty| Ok::<Ty, String>(t);
             let mut call = |callee: String, type_args: Vec<Ty>| {
@@ -61,7 +113,10 @@ impl<'a> Instantiator<'a> {
                 }
                 Ok((self.funcs[id].name().to_string(), Vec::new()))
             };
-            func.rewrite(func.name().to_string(), &mut ty, &mut call)?
+            let mut witness = |protocol: &str, method: &str, self_ty: Ty| {
+                resolve_witness(sigs, protocol, method, self_ty)
+            };
+            func.rewrite(func.name().to_string(), &mut ty, &mut call, &mut witness)?
         };
         Ok((rewritten, direct))
     }
@@ -77,14 +132,25 @@ impl<'a> Instantiator<'a> {
                 "too many generic instances while instantiating '{mangled}'"
             ));
         }
-        let generic = (self.provider)(callee)?;
         let sigs = self.sigs;
+        let generic = if callee == EQUAL {
+            Rc::new(
+                args.first()
+                    .map(|ty| equality_function(sigs, *ty, mangled.clone()))
+                    .ok_or_else(|| "internal error: no type for equality".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else {
+            (self.provider)(callee)?
+        };
         let mut ty = |t: Ty| {
             sigs.subst(t, args, &[], 0)
                 .map_err(|e| e.message().to_string())
         };
         let mut keep = |c: String, a: Vec<Ty>| Ok::<_, String>((c, a));
-        let substituted = generic.rewrite(mangled.clone(), &mut ty, &mut keep)?;
+        let mut keep_witness = |_: &str, _: &str, _: Ty| Ok::<_, String>(Witnessed::Keep);
+        let substituted =
+            generic.rewrite(mangled.clone(), &mut ty, &mut keep, &mut keep_witness)?;
         let id = self.funcs.len();
         self.ids.insert(mangled, id);
         self.funcs.push(substituted.clone());

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{Decl, EnumCaseDecl, EnumDecl, FuncDecl, StructDecl, TypeRef};
+use crate::ast::{Decl, EnumCaseDecl, EnumDecl, FuncDecl, ProtocolDecl, StructDecl, TypeRef};
 use crate::tir::{TExpr, TStruct};
 use crate::types::{EnumId, StructId, Ty};
 
@@ -53,7 +53,94 @@ fn optional_decl() -> EnumDecl {
     .with_generics(vec!["Wrapped".to_string()])
 }
 
+pub const EQUATABLE: &str = "Equatable";
+pub const COMPARABLE: &str = "Comparable";
+pub const SELF_TYPE: &str = "Self";
+
 pub type CResult<T> = Result<T, CheckError>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Requirement {
+    name: String,
+    params: Vec<ParamSig>,
+    ret: Ty,
+    mutating: bool,
+}
+
+impl Requirement {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn params(&self) -> &[ParamSig] {
+        &self.params
+    }
+
+    pub fn ret(&self) -> Ty {
+        self.ret
+    }
+
+    pub fn is_mutating(&self) -> bool {
+        self.mutating
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolSig {
+    name: String,
+    requirements: Vec<Requirement>,
+}
+
+impl ProtocolSig {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn requirements(&self) -> &[Requirement] {
+        &self.requirements
+    }
+
+    pub fn requirement(&self, name: &str) -> Option<&Requirement> {
+        self.requirements.iter().find(|r| r.name == name)
+    }
+}
+
+fn operator_requirement(name: &str) -> Requirement {
+    let operand = ParamSig {
+        label: None,
+        ty: Ty::Param(0),
+    };
+    Requirement {
+        name: name.to_string(),
+        params: vec![operand.clone(), operand],
+        ret: Ty::Bool,
+        mutating: false,
+    }
+}
+
+fn standard_protocols() -> HashMap<String, ProtocolSig> {
+    let equatable = ProtocolSig {
+        name: EQUATABLE.to_string(),
+        requirements: vec![operator_requirement("==")],
+    };
+    let comparable = ProtocolSig {
+        name: COMPARABLE.to_string(),
+        requirements: ["<", ">", "<=", ">="]
+            .iter()
+            .map(|op| operator_requirement(op))
+            .collect(),
+    };
+    [equatable, comparable]
+        .into_iter()
+        .map(|p| (p.name.clone(), p))
+        .collect()
+}
+
+pub fn bound_includes(bound: &[String], protocol: &str) -> bool {
+    bound
+        .iter()
+        .any(|have| have == protocol || (protocol == EQUATABLE && have == COMPARABLE))
+}
 
 pub type Scope = [(String, Ty)];
 
@@ -84,6 +171,7 @@ impl ParamSig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncSig {
     generics: Vec<String>,
+    bounds: Vec<Vec<String>>,
     params: Vec<ParamSig>,
     ret: Ty,
     receiver: bool,
@@ -101,6 +189,10 @@ impl FuncSig {
 
     pub fn generics(&self) -> &[String] {
         &self.generics
+    }
+
+    pub fn bounds(&self) -> &[Vec<String>] {
+        &self.bounds
     }
 
     pub fn params(&self) -> &[ParamSig] {
@@ -257,6 +349,7 @@ pub struct Signatures {
     struct_def_ids: HashMap<String, usize>,
     enum_defs: Vec<EnumDecl>,
     enum_def_ids: HashMap<String, usize>,
+    protocols: HashMap<String, ProtocolSig>,
     instances: RefCell<Instances>,
 }
 
@@ -268,8 +361,31 @@ impl Signatures {
             struct_def_ids: HashMap::new(),
             enum_defs: Vec::new(),
             enum_def_ids: HashMap::new(),
+            protocols: standard_protocols(),
             instances: RefCell::new(Instances::default()),
         };
+        let mut protocol_decls: Vec<&ProtocolDecl> = Vec::new();
+        for decl in decls {
+            if let Decl::Protocol(p) = decl {
+                sigs.register_protocol_name(p)?;
+                protocol_decls.push(p);
+            }
+        }
+        let normalized: Vec<Decl> = decls
+            .iter()
+            .map(|decl| match decl {
+                Decl::Struct(s)
+                    if s.superclass()
+                        .is_some_and(|name| sigs.protocols.contains_key(name)) =>
+                {
+                    let mut names = vec![s.superclass().unwrap_or_default().to_string()];
+                    names.extend(s.conformances().iter().cloned());
+                    Decl::Struct(s.clone().without_superclass().with_conformances(names))
+                }
+                other => other.clone(),
+            })
+            .collect();
+        let decls = &normalized[..];
         sigs.register_enum_def(&optional_decl())?;
         for decl in decls {
             match decl {
@@ -278,6 +394,7 @@ impl Signatures {
                 Decl::Func(_) | Decl::Protocol(_) => {}
             }
         }
+        sigs.validate_protocol_names()?;
         for (def, decl) in sigs.enum_defs.clone().iter().enumerate() {
             if decl.generics().is_empty() {
                 sigs.instantiate_enum(def, Vec::new(), &[], decl.line())?;
@@ -287,6 +404,9 @@ impl Signatures {
             if decl.generics().is_empty() {
                 sigs.instantiate_struct(def, Vec::new(), &[], decl.line())?;
             }
+        }
+        for decl in protocol_decls {
+            sigs.resolve_protocol(decl)?;
         }
         for decl in decls {
             if let Decl::Func(func) = decl {
@@ -298,12 +418,426 @@ impl Signatures {
                 sigs.check_override(func)?;
             }
         }
+        sigs.check_conformances()?;
         Ok(sigs)
+    }
+
+    fn register_protocol_name(&mut self, decl: &ProtocolDecl) -> CResult<()> {
+        if decl.name() == EQUATABLE || decl.name() == COMPARABLE {
+            return Err(CheckError::at(
+                decl.line(),
+                format!(
+                    "'{}' is a standard protocol and cannot be declared again",
+                    decl.name()
+                ),
+            ));
+        }
+        let placeholder = ProtocolSig {
+            name: decl.name().to_string(),
+            requirements: Vec::new(),
+        };
+        if self
+            .protocols
+            .insert(decl.name().to_string(), placeholder)
+            .is_some()
+        {
+            return Err(CheckError::at(
+                decl.line(),
+                format!("duplicate protocol '{}'", decl.name()),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_protocol(&self, name: &str, line: u32) -> CResult<()> {
+        if self.protocols.contains_key(name) {
+            Ok(())
+        } else if self.struct_def_ids.contains_key(name) || self.enum_def_ids.contains_key(name) {
+            Err(CheckError::at(line, format!("'{name}' is not a protocol")))
+        } else {
+            Err(CheckError::at(line, format!("unknown protocol '{name}'")))
+        }
+    }
+
+    fn validate_protocol_names(&self) -> CResult<()> {
+        for decl in &self.struct_defs {
+            for name in decl.conformances() {
+                self.require_protocol(name, decl.line())?;
+            }
+            for index in 0..decl.generics().len() {
+                for name in decl.bound(index) {
+                    self.require_protocol(name, decl.line())?;
+                }
+            }
+        }
+        for decl in &self.enum_defs {
+            for name in decl.conformances() {
+                self.require_protocol(name, decl.line())?;
+            }
+            for index in 0..decl.generics().len() {
+                for name in decl.bound(index) {
+                    self.require_protocol(name, decl.line())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_protocol(&mut self, decl: &ProtocolDecl) -> CResult<()> {
+        let scope = vec![(SELF_TYPE.to_string(), Ty::Param(0))];
+        let mut requirements: Vec<Requirement> = Vec::new();
+        for requirement in decl.requirements() {
+            if requirements.iter().any(|r| r.name == requirement.name()) {
+                return Err(CheckError::at(
+                    requirement.line(),
+                    format!("duplicate requirement '{}'", requirement.name()),
+                ));
+            }
+            if !requirement.generics().is_empty() {
+                return Err(CheckError::at(
+                    requirement.line(),
+                    "a protocol requirement cannot declare type parameters yet",
+                ));
+            }
+            let mut params = Vec::new();
+            for param in requirement.params() {
+                params.push(ParamSig {
+                    label: param.label().map(str::to_string),
+                    ty: self.resolve_type(param.ty(), &scope, requirement.line())?,
+                });
+            }
+            let ret = match requirement.ret() {
+                Some(ty) => self.resolve_type(ty, &scope, requirement.line())?,
+                None => Ty::Void,
+            };
+            requirements.push(Requirement {
+                name: requirement.name().to_string(),
+                params,
+                ret,
+                mutating: requirement.is_mutating(),
+            });
+        }
+        self.protocols.insert(
+            decl.name().to_string(),
+            ProtocolSig {
+                name: decl.name().to_string(),
+                requirements,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn protocol(&self, name: &str) -> Option<&ProtocolSig> {
+        self.protocols.get(name)
+    }
+
+    fn declared_conformances(&self, ty: Ty) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        let mut current = Some(ty);
+        while let Some(t) = current {
+            if let Some((kind, def, _)) = self.origin_of(t) {
+                let declared = match kind {
+                    Kind::Struct => self.struct_defs[def].conformances(),
+                    Kind::Enum => self.enum_defs[def].conformances(),
+                };
+                names.extend(declared.iter().map(String::as_str));
+            }
+            current = self.superclass(t);
+        }
+        names
+    }
+
+    pub fn type_arguments(&self, ty: Ty) -> Vec<Ty> {
+        self.origin_of(ty)
+            .map(|(_, _, args)| args)
+            .unwrap_or_default()
+    }
+
+    pub fn conforms(&self, ty: Ty, protocol: &str) -> bool {
+        match protocol {
+            EQUATABLE => {
+                matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_))
+                    || self.declared_conformances(ty).contains(&protocol)
+            }
+            COMPARABLE => ty == Ty::Int,
+            _ => self.declared_conformances(ty).contains(&protocol),
+        }
+    }
+
+    pub fn find_requirement(
+        &self,
+        bound: &[String],
+        method: &str,
+    ) -> Option<(&ProtocolSig, &Requirement)> {
+        bound.iter().find_map(|name| {
+            let protocol = self.protocols.get(name)?;
+            Some((protocol, protocol.requirement(method)?))
+        })
+    }
+
+    pub fn unsatisfied_bound(
+        &self,
+        bounds: &[Vec<String>],
+        type_args: &[Ty],
+        caller_bounds: &[Vec<String>],
+    ) -> Option<(Ty, String)> {
+        for (bound, ty) in bounds.iter().zip(type_args) {
+            for protocol in bound {
+                let holds = match ty {
+                    Ty::Param(index) => caller_bounds
+                        .get(*index)
+                        .is_some_and(|have| bound_includes(have, protocol)),
+                    other => self.conforms(*other, protocol),
+                };
+                if !holds {
+                    return Some((*ty, protocol.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    fn check_type_bounds(
+        &self,
+        bounds: &[Vec<String>],
+        args: &[Ty],
+        type_name: &str,
+        line: u32,
+    ) -> CResult<()> {
+        if args.iter().any(|a| self.has_param(*a)) {
+            return Ok(());
+        }
+        match self.unsatisfied_bound(bounds, args, &[]) {
+            Some((ty, protocol)) => Err(CheckError::at(
+                line,
+                format!(
+                    "type '{}' does not conform to the protocol '{protocol}' required by '{type_name}'",
+                    self.type_name(ty)
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    pub fn equality_leaves(&self, line: u32, ty: Ty) -> CResult<Vec<Vec<(usize, Ty)>>> {
+        let mut leaves = Vec::new();
+        self.collect_equality_leaves(line, ty, &mut Vec::new(), &mut leaves)?;
+        Ok(leaves)
+    }
+
+    fn collect_equality_leaves(
+        &self,
+        line: u32,
+        ty: Ty,
+        path: &mut Vec<(usize, Ty)>,
+        leaves: &mut Vec<Vec<(usize, Ty)>>,
+    ) -> CResult<()> {
+        let Ty::Struct(id) = ty else {
+            return Ok(());
+        };
+        let sig = self
+            .struct_sig(id)
+            .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
+        for (index, field) in sig.members() {
+            let member = field.ty();
+            path.push((index, member));
+            match member {
+                Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => leaves.push(path.clone()),
+                Ty::Struct(_) if self.enum_of(member).is_none() => {
+                    self.collect_equality_leaves(line, member, path, leaves)?;
+                }
+                _ => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "equality is not supported for {}: member '{}' has type {}",
+                            self.type_name(ty),
+                            field.name(),
+                            self.type_name(member)
+                        ),
+                    ));
+                }
+            }
+            path.pop();
+        }
+        Ok(())
+    }
+
+    fn check_conformances(&self) -> CResult<()> {
+        for def in 0..self.struct_defs.len() {
+            let decl = &self.struct_defs[def];
+            let generics = decl.generics().to_vec();
+            let id = self.instantiate_struct(
+                def,
+                identity(&generics),
+                &scope_of(&generics),
+                decl.line(),
+            )?;
+            let ty = self.struct_ty(def, id);
+            self.check_type_conformances(
+                ty,
+                decl.name(),
+                decl.conformances(),
+                !generics.is_empty(),
+                decl.line(),
+            )?;
+        }
+        for def in 0..self.enum_defs.len() {
+            let decl = &self.enum_defs[def];
+            let generics = decl.generics().to_vec();
+            let id =
+                self.instantiate_enum(def, identity(&generics), &scope_of(&generics), decl.line())?;
+            let ty = self.enum_ty(id);
+            self.check_type_conformances(
+                ty,
+                decl.name(),
+                decl.conformances(),
+                !generics.is_empty(),
+                decl.line(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn check_type_conformances(
+        &self,
+        ty: Ty,
+        name: &str,
+        conformances: &[String],
+        generic: bool,
+        line: u32,
+    ) -> CResult<()> {
+        for protocol in conformances {
+            match protocol.as_str() {
+                COMPARABLE => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "'{name}' cannot conform to 'Comparable': only Int is Comparable yet"
+                        ),
+                    ));
+                }
+                EQUATABLE => self.check_equatable(ty, name, generic, line)?,
+                _ => self.check_requirements(ty, name, protocol, line)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn check_equatable(&self, ty: Ty, name: &str, generic: bool, line: u32) -> CResult<()> {
+        if generic {
+            return Err(CheckError::at(
+                line,
+                format!("the generic type '{name}' cannot conform to 'Equatable' yet"),
+            ));
+        }
+        if ty.is_class() {
+            return Err(CheckError::at(
+                line,
+                format!("the class '{name}' cannot conform to 'Equatable' yet"),
+            ));
+        }
+        if matches!(ty, Ty::Enum(_)) {
+            return Ok(());
+        }
+        if self.enum_of(ty).is_some() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "equality is not supported for '{name}': an enum with payloads cannot conform to 'Equatable' yet"
+                ),
+            ));
+        }
+        self.equality_leaves(line, ty).map(|_| ())
+    }
+
+    fn check_requirements(&self, ty: Ty, name: &str, protocol: &str, line: u32) -> CResult<()> {
+        let Some(sig) = self.protocols.get(protocol) else {
+            return Ok(());
+        };
+        let owner_generics = self.owner_generics(name);
+        for requirement in sig.requirements() {
+            let mismatch = |why: &str| {
+                CheckError::at(
+                    line,
+                    format!(
+                        "'{name}' does not implement the requirement '{}' of '{protocol}': {why}",
+                        requirement.name()
+                    ),
+                )
+            };
+            let qualified = self
+                .resolve_method(ty, requirement.name())
+                .ok_or_else(|| mismatch("the method is missing"))?;
+            let method = self
+                .funcs
+                .get(&qualified)
+                .ok_or_else(|| mismatch("the method is missing"))?;
+            if method.generics().len() != owner_generics {
+                return Err(mismatch("a generic method cannot satisfy a requirement"));
+            }
+            let given = &method.params()[1..];
+            if given.len() != requirement.params().len() {
+                return Err(mismatch("the number of parameters differs"));
+            }
+            for (have, want) in given.iter().zip(requirement.params()) {
+                let wanted = self.subst(want.ty(), &[ty], &[], line)?;
+                if have.label() != want.label() || have.ty() != wanted {
+                    return Err(mismatch("a parameter label or type differs"));
+                }
+            }
+            if method.ret() != self.subst(requirement.ret(), &[ty], &[], line)? {
+                return Err(mismatch("the result type differs"));
+            }
+            if method.is_mutating() && !requirement.is_mutating() {
+                return Err(mismatch(
+                    "the method is mutating but the requirement is not",
+                ));
+            }
+            if requirement.is_mutating() && !method.is_mutating() && !ty.is_class() {
+                return Err(mismatch(
+                    "the requirement is mutating but the method is not",
+                ));
+            }
+            if requirement.is_mutating() && matches!(ty, Ty::Enum(_)) {
+                return Err(mismatch(
+                    "an enum without payloads cannot satisfy a mutating requirement yet",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn owner_generics(&self, owner: &str) -> usize {
+        if let Some(def) = self.struct_def_ids.get(owner) {
+            self.struct_defs[*def].generics().len()
+        } else if let Some(def) = self.enum_def_ids.get(owner) {
+            self.enum_defs[*def].generics().len()
+        } else {
+            0
+        }
+    }
+
+    fn owner_bounds(&self, owner: &str) -> Vec<Vec<String>> {
+        if let Some(def) = self.struct_def_ids.get(owner) {
+            let decl = &self.struct_defs[*def];
+            (0..decl.generics().len())
+                .map(|i| decl.bound(i).to_vec())
+                .collect()
+        } else if let Some(def) = self.enum_def_ids.get(owner) {
+            let decl = &self.enum_defs[*def];
+            (0..decl.generics().len())
+                .map(|i| decl.bound(i).to_vec())
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
     fn register_struct_def(&mut self, decl: &StructDecl) -> CResult<()> {
         if self.struct_def_ids.contains_key(decl.name())
             || self.enum_def_ids.contains_key(decl.name())
+            || self.protocols.contains_key(decl.name())
         {
             return Err(CheckError::at(
                 decl.line(),
@@ -325,6 +859,7 @@ impl Signatures {
     fn register_enum_def(&mut self, decl: &EnumDecl) -> CResult<()> {
         if self.struct_def_ids.contains_key(decl.name())
             || self.enum_def_ids.contains_key(decl.name())
+            || self.protocols.contains_key(decl.name())
         {
             return Err(CheckError::at(
                 decl.line(),
@@ -381,6 +916,16 @@ impl Signatures {
             }
             None => func.generics().to_vec(),
         };
+        let mut bounds = func
+            .owner()
+            .map(|owner| self.owner_bounds(owner))
+            .unwrap_or_default();
+        for index in 0..func.generics().len() {
+            for name in func.bound(index) {
+                self.require_protocol(name, func.line())?;
+            }
+            bounds.push(func.bound(index).to_vec());
+        }
         let scope = scope_of(&generics);
         let receiver = owner_ty.filter(|_| !func.is_init());
         let receiver_param = receiver.map(|ty| match ty {
@@ -404,6 +949,7 @@ impl Signatures {
         };
         let sig = FuncSig {
             generics,
+            bounds,
             params,
             ret,
             receiver: receiver.is_some(),
@@ -671,6 +1217,10 @@ impl Signatures {
         }
         let decl = &self.struct_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
+        let bounds: Vec<Vec<String>> = (0..decl.generics().len())
+            .map(|i| decl.bound(i).to_vec())
+            .collect();
+        self.check_type_bounds(&bounds, &key.1, decl.name(), line)?;
         if !self
             .instances
             .borrow_mut()
@@ -892,6 +1442,10 @@ impl Signatures {
         }
         let decl = &self.enum_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
+        let bounds: Vec<Vec<String>> = (0..decl.generics().len())
+            .map(|i| decl.bound(i).to_vec())
+            .collect();
+        self.check_type_bounds(&bounds, &key.1, decl.name(), line)?;
         if !self.instances.borrow_mut().enum_pending.insert(key.clone()) {
             return Err(CheckError::at(
                 line,

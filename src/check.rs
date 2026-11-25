@@ -6,7 +6,8 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    CResult, EnumSig, FieldSig, FuncSig, NONE_CASE, PRINT, ParamSig, SOME_CASE, scope_of,
+    COMPARABLE, CResult, EQUATABLE, EnumSig, FieldSig, FuncSig, NONE_CASE, PRINT, ParamSig,
+    SOME_CASE, bound_includes, scope_of,
 };
 use crate::tir::{LocalId, TAG_SLOT, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -36,6 +37,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         chain_values: Vec::new(),
         targets: Vec::new(),
         pending_label: None,
+        bounds: sig.bounds().to_vec(),
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -208,6 +210,40 @@ fn chain_branches(
     tail.unwrap_or_default()
 }
 
+pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> {
+    let mut cx = FnCx {
+        sigs,
+        scope: Vec::new(),
+        expected: None,
+        ret: Ty::Bool,
+        locals: Vec::new(),
+        scopes: vec![HashMap::new()],
+        init_self: None,
+        cell_self: None,
+        cell_call: CellCall::default(),
+        super_initialized: false,
+        chain_values: Vec::new(),
+        targets: Vec::new(),
+        pending_label: None,
+        bounds: Vec::new(),
+    };
+    let left = cx.declare(0, "left", ty, false)?;
+    let right = cx.declare(0, "right", ty, false)?;
+    let same = cx.struct_equality(
+        0,
+        BinOp::Eq,
+        TExpr::Local(left, ty),
+        TExpr::Local(right, ty),
+    )?;
+    Ok(TFunc::new(
+        name,
+        2,
+        Ty::Bool,
+        cx.locals,
+        vec![TStmt::Return(Some(same))],
+    ))
+}
+
 fn always_exits(stmts: &[Stmt]) -> bool {
     exits(stmts, false, &[])
 }
@@ -265,6 +301,7 @@ struct FnCx<'a> {
     chain_values: Vec<TExpr>,
     targets: Vec<Target>,
     pending_label: Option<String>,
+    bounds: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1838,6 +1875,15 @@ impl FnCx<'_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let lhs = self.value(lhs)?;
                 let rhs = self.value(rhs)?;
+                if let (Ty::Param(index), true) = (
+                    lhs.ty(),
+                    matches!(
+                        op,
+                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
+                    ),
+                ) {
+                    return self.parameter_operator(line, *op, index, lhs, rhs);
+                }
                 self.operands(line, *op, lhs.ty(), rhs.ty())?;
                 if matches!(op, BinOp::Eq | BinOp::Ne) && lhs.ty().is_struct() {
                     return self.struct_equality(line, *op, lhs, rhs);
@@ -1916,6 +1962,9 @@ impl FnCx<'_> {
         } else {
             let receiver = self.value(base)?;
             let ty = receiver.ty();
+            if let Ty::Param(index) = ty {
+                return self.witness_call(line, base, receiver, index, name, args);
+            }
             (receiver, ty, true)
         };
         let owner = sigs.owner_name(lookup_ty).ok_or_else(|| {
@@ -2377,49 +2426,119 @@ impl FnCx<'_> {
         })
     }
 
-    fn equality_leaves(
-        &self,
+    fn witness_call(
+        &mut self,
         line: u32,
-        ty: Ty,
-        path: &mut Vec<(usize, Ty)>,
-        leaves: &mut Vec<Vec<(usize, Ty)>>,
-    ) -> CResult<()> {
-        let Ty::Struct(id) = ty else {
-            return Ok(());
-        };
-        let sig = self
-            .sigs
-            .struct_sig(id)
-            .ok_or_else(|| CheckError::at(line, "internal error: unknown struct"))?;
-        for (index, field) in sig.members() {
-            let member = field.ty();
-            path.push((index, member));
-            match member {
-                Ty::Int | Ty::Bool | Ty::Str | Ty::Enum(_) => leaves.push(path.clone()),
-                Ty::Struct(_) if self.sigs.enum_of(member).is_none() => {
-                    self.equality_leaves(line, member, path, leaves)?;
-                }
-                _ => {
-                    return Err(CheckError::at(
-                        line,
-                        format!(
-                            "equality is not supported for {}: member '{}' has type {}",
-                            self.name_of(ty),
-                            field.name(),
-                            self.name_of(member)
-                        ),
-                    ));
-                }
-            }
-            path.pop();
+        base: &Expr,
+        receiver: TExpr,
+        index: usize,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let ty = Ty::Param(index);
+        let bound = self.bounds.get(index).cloned().unwrap_or_default();
+        let (protocol, requirement) = sigs.find_requirement(&bound, name).ok_or_else(|| {
+            CheckError::at(
+                line,
+                format!(
+                    "'{name}' is not a requirement of the constraints of {}",
+                    self.name_of(ty)
+                ),
+            )
+        })?;
+        if requirement.is_mutating() && !self.is_mutable_variable(base) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "cannot call the mutating method '{name}' on a constant or a temporary value"
+                ),
+            ));
         }
-        Ok(())
+        let params = requirement.params();
+        if args.len() != params.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{name}' takes {} argument(s), but {} were given",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut checked = vec![receiver];
+        for (arg, param) in args.iter().zip(params) {
+            self.expect_label(line, arg, param.label())?;
+            let wanted = sigs.subst(param.ty(), &[ty], &self.scope, line)?;
+            if !sigs.has_param(wanted) {
+                self.expected = Some(wanted);
+            }
+            let value = self.value(arg.value())?;
+            checked.push(self.coerce(line, wanted, value)?);
+        }
+        let ret = sigs.subst(requirement.ret(), &[ty], &self.scope, line)?;
+        Ok(TExpr::Witness {
+            protocol: protocol.name().to_string(),
+            method: name.to_string(),
+            self_ty: ty,
+            args: checked,
+            ret,
+        })
+    }
+
+    fn parameter_operator(
+        &mut self,
+        line: u32,
+        op: BinOp,
+        index: usize,
+        lhs: TExpr,
+        rhs: TExpr,
+    ) -> CResult<TExpr> {
+        let ty = Ty::Param(index);
+        let bound = self.bounds.get(index).cloned().unwrap_or_default();
+        let (protocol, method) = match op {
+            BinOp::Eq | BinOp::Ne => (EQUATABLE, "=="),
+            BinOp::Lt => (COMPARABLE, "<"),
+            BinOp::Gt => (COMPARABLE, ">"),
+            BinOp::Le => (COMPARABLE, "<="),
+            BinOp::Ge => (COMPARABLE, ">="),
+            _ => {
+                return Err(CheckError::at(
+                    line,
+                    format!("the operator is not supported for {}", self.name_of(ty)),
+                ));
+            }
+        };
+        if !bound_includes(&bound, protocol) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "{} needs the constraint '{protocol}' to be used with this operator",
+                    self.name_of(ty)
+                ),
+            ));
+        }
+        self.expect(line, ty, rhs.ty())?;
+        let witness = TExpr::Witness {
+            protocol: protocol.to_string(),
+            method: method.to_string(),
+            self_ty: ty,
+            args: vec![lhs, rhs],
+            ret: Ty::Bool,
+        };
+        Ok(if op == BinOp::Ne {
+            TExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(witness),
+            }
+        } else {
+            witness
+        })
     }
 
     fn struct_equality(&mut self, line: u32, op: BinOp, lhs: TExpr, rhs: TExpr) -> CResult<TExpr> {
         let ty = lhs.ty();
-        let mut leaves = Vec::new();
-        self.equality_leaves(line, ty, &mut Vec::new(), &mut leaves)?;
+        let leaves = self.sigs.equality_leaves(line, ty)?;
         let left = self.temp(ty);
         let right = self.temp(ty);
         let mut operands = Some((lhs, rhs));
@@ -2620,6 +2739,16 @@ impl FnCx<'_> {
             let context = expected.map(|e| (sig.ret(), e));
             self.infer(line, callee, sig.generics(), &patterns, &checked, context)?
         };
+        if let Some((ty, protocol)) = sigs.unsatisfied_bound(sig.bounds(), &type_args, &self.bounds)
+        {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "type '{}' does not conform to the protocol '{protocol}' required by '{callee}'",
+                    self.name_of(ty)
+                ),
+            ));
+        }
         let mut args = Vec::with_capacity(checked.len());
         for (pattern, value) in patterns.iter().zip(checked) {
             let wanted = sigs.subst(*pattern, &type_args, &self.scope, line)?;
