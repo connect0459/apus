@@ -279,7 +279,7 @@ pub struct StructDecl {
     bounds: Vec<Vec<String>>,
     fields: Vec<Field>,
     class: bool,
-    superclass: Option<String>,
+    superclass: Option<TypeRef>,
     conformances: Vec<String>,
     aliases: Vec<(String, TypeRef)>,
 }
@@ -341,7 +341,7 @@ impl StructDecl {
         self
     }
 
-    pub fn with_superclass(mut self, superclass: String) -> Self {
+    pub fn with_superclass(mut self, superclass: TypeRef) -> Self {
         self.superclass = Some(superclass);
         self
     }
@@ -350,8 +350,8 @@ impl StructDecl {
         self.class
     }
 
-    pub fn superclass(&self) -> Option<&str> {
-        self.superclass.as_deref()
+    pub fn superclass(&self) -> Option<&TypeRef> {
+        self.superclass.as_ref()
     }
 
     pub fn generics(&self) -> &[String] {

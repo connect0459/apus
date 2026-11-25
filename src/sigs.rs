@@ -413,10 +413,14 @@ impl Signatures {
             .iter()
             .map(|decl| match decl {
                 Decl::Struct(s)
-                    if s.superclass()
-                        .is_some_and(|name| sigs.protocols.contains_key(name)) =>
+                    if s.superclass().is_some_and(|parent| {
+                        parent.args().is_empty() && sigs.protocols.contains_key(parent.name())
+                    }) =>
                 {
-                    let mut names = vec![s.superclass().unwrap_or_default().to_string()];
+                    let mut names = vec![
+                        s.superclass()
+                            .map_or_else(String::new, |p| p.name().to_string()),
+                    ];
                     names.extend(s.conformances().iter().cloned());
                     Decl::Struct(s.clone().without_superclass().with_conformances(names))
                 }
@@ -1150,12 +1154,6 @@ impl Signatures {
                 format!("duplicate type '{}'", decl.name()),
             ));
         }
-        if decl.superclass().is_some() && !decl.generics().is_empty() {
-            return Err(CheckError::at(
-                decl.line(),
-                "generic classes cannot take part in inheritance yet",
-            ));
-        }
         self.struct_def_ids
             .insert(decl.name().to_string(), self.struct_defs.len());
         self.struct_defs.push(decl.clone());
@@ -1294,6 +1292,14 @@ impl Signatures {
             .superclass(ty)
             .and_then(|parent| self.resolve_method(parent, name));
         let line = func.line();
+        if func.is_override() && inherited.is_some() && self.hierarchy_has_generic(ty) {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{name}' overrides a method of a hierarchy that includes a generic class, which is not supported yet"
+                ),
+            ));
+        }
         match (func.is_override(), inherited) {
             (true, None) => Err(CheckError::at(
                 line,
@@ -1625,7 +1631,7 @@ impl Signatures {
                 weak: false,
             }));
             if let Some(superclass) = decl.superclass() {
-                let id = self.superclass_id(decl, superclass, at)?;
+                let id = self.superclass_id(decl, superclass, &own_scope, at)?;
                 let inherited = self.struct_sig(id).ok_or_else(|| {
                     CheckError::at(at, "internal error: unknown superclass layout")
                 })?;
@@ -1677,32 +1683,34 @@ impl Signatures {
         Ok((fields, parent))
     }
 
-    fn superclass_id(&self, decl: &StructDecl, superclass: &str, at: u32) -> CResult<StructId> {
-        let Some(def) = self.struct_def_ids.get(superclass).copied() else {
-            return Err(CheckError::at(at, format!("unknown type '{superclass}'")));
+    fn superclass_id(
+        &self,
+        decl: &StructDecl,
+        superclass: &TypeRef,
+        scope: &Scope,
+        at: u32,
+    ) -> CResult<StructId> {
+        let name = superclass.name();
+        let Some(def) = self.struct_def_ids.get(name).copied() else {
+            return Err(CheckError::at(at, format!("unknown type '{name}'")));
         };
         let parent = &self.struct_defs[def];
         if !parent.is_class() {
             return Err(CheckError::at(
                 at,
                 format!(
-                    "'{superclass}' is not a class, so '{}' cannot inherit from it",
+                    "'{name}' is not a class, so '{}' cannot inherit from it",
                     decl.name()
                 ),
             ));
         }
-        if !decl.generics().is_empty() || !parent.generics().is_empty() {
-            return Err(CheckError::at(
-                at,
-                "generic classes cannot take part in inheritance yet",
-            ));
-        }
-        if superclass == decl.name()
+        if name == decl.name()
             || self
                 .instances
                 .borrow()
                 .struct_pending
-                .contains(&(def, Vec::new()))
+                .iter()
+                .any(|(pending, _)| *pending == def)
         {
             return Err(CheckError::at(
                 at,
@@ -1712,7 +1720,29 @@ impl Signatures {
                 ),
             ));
         }
-        self.instantiate_struct(def, Vec::new(), &[], at)
+        match self.resolve_type(superclass, scope, at)? {
+            Ty::Class(id) => Ok(id),
+            _ => Err(CheckError::at(
+                at,
+                format!(
+                    "'{name}' is not a class, so '{}' cannot inherit from it",
+                    decl.name()
+                ),
+            )),
+        }
+    }
+
+    pub fn hierarchy_has_generic(&self, ty: Ty) -> bool {
+        let mut current = Some(ty).filter(|t| t.is_class());
+        while let Some(t) = current {
+            if let Some((Kind::Struct, def, _)) = self.origin_of(t)
+                && !self.struct_defs[def].generics().is_empty()
+            {
+                return true;
+            }
+            current = self.superclass(t);
+        }
+        false
     }
 
     pub fn drop_name(&self, id: StructId) -> String {
@@ -2112,6 +2142,24 @@ impl Signatures {
                 None => false,
             };
         }
+        if pattern.is_class()
+            && let Some((_, pattern_def, _)) = self.origin_of(pattern)
+        {
+            let mut current = Some(actual);
+            while let Some(candidate) = current {
+                if self
+                    .origin_of(candidate)
+                    .is_some_and(|(_, d, _)| d == pattern_def)
+                {
+                    return self.unify_instances(pattern, candidate, bound);
+                }
+                current = self.superclass(candidate);
+            }
+        }
+        self.unify_instances(pattern, actual, bound)
+    }
+
+    fn unify_instances(&self, pattern: Ty, actual: Ty, bound: &mut [Option<Ty>]) -> bool {
         match (self.origin_of(pattern), self.origin_of(actual)) {
             (Some((pk, pd, pargs)), Some((ak, ad, aargs))) if pk == ak && pd == ad => pargs
                 .iter()

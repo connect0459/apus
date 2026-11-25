@@ -321,6 +321,18 @@ impl Parser<'_> {
         Ok((name, self.type_ref()?))
     }
 
+    fn class_inheritance(&mut self) -> PResult<(Option<TypeRef>, Vec<String>)> {
+        if !self.eat_punct(":") {
+            return Ok((None, Vec::new()));
+        }
+        let superclass = self.type_ref()?;
+        let mut names = Vec::new();
+        while self.eat_punct(",") {
+            names.push(self.name()?);
+        }
+        Ok((Some(superclass), names))
+    }
+
     fn conformance_list(&mut self) -> PResult<Vec<String>> {
         let mut names = Vec::new();
         if self.eat_punct(":") {
@@ -496,16 +508,10 @@ impl Parser<'_> {
     fn struct_decl(&mut self, line: u32, class: bool) -> PResult<StructDecl> {
         let name = self.name()?;
         let (generics, bounds) = self.generic_params()?;
-        let mut inherited = self.conformance_list()?;
-        if self.is_punct("<") {
-            return self.fail(
-                "a superclass cannot take type arguments: generic classes cannot take part in inheritance yet",
-            );
-        }
-        let superclass = if class && !inherited.is_empty() {
-            Some(inherited.remove(0))
+        let (superclass, inherited) = if class {
+            self.class_inheritance()?
         } else {
-            None
+            (None, self.conformance_list()?)
         };
         self.expect_punct("{")?;
         let mut fields = Vec::new();
@@ -1519,7 +1525,7 @@ mod tests {
         let Decl::Struct(class) = try_parse("class B: A { var y: Int }").unwrap() else {
             panic!("expected a class");
         };
-        assert_eq!(class.superclass(), Some("A"));
+        assert_eq!(class.superclass(), Some(&TypeRef::from("A")));
         assert_eq!(class.fields().len(), 1);
     }
 
@@ -2122,7 +2128,7 @@ mod tests {
         let Decl::Struct(c) = try_parse("class C: Base, P { var x: Int }").unwrap() else {
             panic!("expected a class");
         };
-        assert_eq!(c.superclass(), Some("Base"));
+        assert_eq!(c.superclass(), Some(&TypeRef::from("Base")));
         assert_eq!(c.conformances(), ["P"]);
     }
 
@@ -2393,6 +2399,29 @@ mod tests {
                     args: None,
                 })
             )
+        );
+    }
+
+    #[test]
+    fn a_class_may_inherit_from_an_instance_of_a_generic_class() {
+        let Decl::Struct(c) = try_parse("class D<T>: Base<T>, P { var x: Int }").unwrap() else {
+            panic!("expected a class");
+        };
+        assert_eq!(c.generics(), ["T"]);
+        assert_eq!(
+            c.superclass(),
+            Some(&TypeRef::new("Base".to_string(), vec![TypeRef::from("T")]))
+        );
+        assert_eq!(c.conformances(), ["P"]);
+        let Decl::Struct(e) = try_parse("class E: Base<Int> { var x: Int }").unwrap() else {
+            panic!("expected a class");
+        };
+        assert_eq!(
+            e.superclass(),
+            Some(&TypeRef::new(
+                "Base".to_string(),
+                vec![TypeRef::from("Int")]
+            ))
         );
     }
 

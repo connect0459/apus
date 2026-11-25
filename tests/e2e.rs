@@ -1370,14 +1370,6 @@ fn a_subclass_cannot_redeclare_an_inherited_member() {
     assert!(build_error(source).contains("duplicate"));
 }
 
-#[test]
-fn generic_classes_cannot_take_part_in_inheritance() {
-    let sub = "class A { var x: Int }\nclass B<T>: A { var y: T }\nfunc main() { }";
-    assert!(build_error(sub).contains("generic"));
-    let sup = "class A<T> { var x: T }\nclass B: A<Int> { var y: Int }\nfunc main() { }";
-    assert!(build_error(sup).contains("generic"));
-}
-
 const ANIMALS: &str = "class Animal {\n  var legs: Int\n  func sound() -> Int { return 1 }\n  func describe() -> Int { return self.sound() * 100 + legs }\n}\n\
 class Dog: Animal {\n  override func sound() -> Int { return 2 }\n}\n\
 class Puppy: Dog {\n  override func sound() -> Int { return super.sound() + 10 }\n}\n\
@@ -4260,4 +4252,76 @@ fn an_implicit_case_with_values_follows_the_rules_of_a_qualified_one() {
 fn a_local_named_like_the_enum_does_not_hide_an_implicit_case() {
     let source = "enum Color { case red, green }\nfunc main() {\n  let Color = 5\n  let c: Color = .red\n  print(c == .red)\n  print(Color)\n}";
     assert_eq!(run(source), "true\n5\n");
+}
+
+const GENERIC_BASE: &str = "class Base<T> {\n  var value: T\n  func get() -> T { return value }\n  func set(_ v: T) { value = v }\n}\n";
+
+#[test]
+fn a_generic_class_may_extend_a_generic_class() {
+    let source = format!(
+        "{GENERIC_BASE}class Derived<T>: Base<T> {{\n  var extra: Int\n  func describe() -> Int {{ return extra * 10 }}\n}}\nfunc main() {{\n  let d = Derived<Int>(value: 3, extra: 4)\n  print(d.get())\n  print(d.value)\n  print(d.describe())\n  d.set(9)\n  print(d.get())\n  let s = Derived<String>(value: \"s\", extra: 1)\n  print(s.get())\n}}"
+    );
+    assert_eq!(run(&source), "3\n3\n40\n9\ns\n");
+}
+
+#[test]
+fn a_plain_class_may_extend_an_instance_of_a_generic_class() {
+    let source = format!(
+        "{GENERIC_BASE}class IntBox: Base<Int> {{\n  func doubled() -> Int {{ return get() * 2 }}\n}}\nfunc main() {{\n  let b = IntBox(value: 21)\n  print(b.doubled())\n  b.set(4)\n  print(b.doubled())\n  print(b.value + 1)\n}}"
+    );
+    assert_eq!(run(&source), "42\n8\n5\n");
+}
+
+#[test]
+fn a_subclass_may_add_type_parameters_or_fix_those_of_its_superclass() {
+    let source = format!(
+        "{GENERIC_BASE}class Pair<A, B>: Base<A> {{\n  var second: B\n  func other() -> B {{ return second }}\n}}\nclass Tagged<T>: Base<Int> {{\n  var tag: T\n}}\nfunc main() {{\n  let p = Pair<Int, String>(value: 1, second: \"two\")\n  print(p.get())\n  print(p.other())\n  let t = Tagged<Bool>(value: 5, tag: true)\n  print(t.get())\n  print(t.tag)\n}}"
+    );
+    assert_eq!(run(&source), "1\ntwo\n5\ntrue\n");
+}
+
+#[test]
+fn an_instance_of_a_generic_subclass_is_usable_as_its_superclass() {
+    let source = format!(
+        "{GENERIC_BASE}class Derived<T>: Base<T> {{\n  var extra: Int\n}}\nfunc first<T>(_ b: Base<T>) -> T {{ return b.get() }}\nfunc read(_ b: Base<Int>) -> Int {{ return b.get() + b.value }}\nfunc main() {{\n  let d = Derived<Int>(value: 3, extra: 0)\n  let up: Base<Int> = d\n  print(up.get())\n  print(read(d))\n  print(first(d))\n  let s = Derived<String>(value: \"x\", extra: 0)\n  print(first(s))\n}}"
+    );
+    assert_eq!(run(&source), "3\n6\n3\nx\n");
+}
+
+#[test]
+fn a_generic_subclass_initializer_calls_the_superclass_initializer() {
+    let source = "class Base<T> {\n  var value: T\n  init(value: T) { self.value = value }\n  func get() -> T { return value }\n}\nclass Derived<T>: Base<T> {\n  var extra: Int\n  init(v: T, extra: Int) {\n    self.extra = extra\n    super.init(value: v)\n  }\n  func both() -> T { return super.get() }\n}\nclass Fixed: Base<Int> {\n  init() { super.init(value: 7) }\n}\nfunc main() {\n  let d = Derived(v: \"q\", extra: 2)\n  print(d.both())\n  print(d.extra)\n  print(Fixed().get())\n}";
+    assert_eq!(run(source), "q\n2\n7\n");
+}
+
+#[test]
+fn members_of_a_generic_hierarchy_are_counted_and_released() {
+    let source = format!(
+        "{TRACKED}class Base<T> {{\n  var item: T\n}}\nclass Holder<T>: Base<T> {{\n  var extra: Tracked\n}}\nfunc main() {{\n  let h = Holder<Tracked>(item: Tracked(id: 1), extra: Tracked(id: 2))\n  print(h.item.id + h.extra.id)\n}}"
+    );
+    assert_eq!(run(&source), "3\n-1\n-2\n");
+}
+
+#[test]
+fn a_generic_class_cannot_inherit_from_a_struct_from_itself_or_with_the_wrong_arguments() {
+    let from_struct = "struct S<T> { var x: T }\nclass C<T>: S<T> { var y: T }\nfunc main() { }";
+    assert!(build_error(from_struct).contains("not a class"));
+    let itself = "class A<T>: A<T> { var x: T }\nfunc main() { }";
+    assert!(build_error(itself).contains("itself"));
+    let arity = "class A<T> { var x: T }\nclass B: A<Int, Bool> { var y: Int }\nfunc main() { }";
+    assert!(build_error(arity).contains("expects 1 type argument"));
+    let bare = "class A<T> { var x: T }\nclass B: A { var y: Int }\nfunc main() { }";
+    assert!(!build_error(bare).is_empty());
+}
+
+#[test]
+fn a_hierarchy_that_includes_a_generic_class_cannot_override_or_cast_yet() {
+    let overriding = format!(
+        "{GENERIC_BASE}class IntBox: Base<Int> {{\n  override func get() -> Int {{ return 1 }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&overriding).contains("generic"));
+    let casting = format!(
+        "{GENERIC_BASE}class IntBox: Base<Int> {{ }}\nfunc main() {{\n  let b: Base<Int> = IntBox(value: 1)\n  print(b is IntBox)\n}}"
+    );
+    assert!(build_error(&casting).contains("generic"));
 }

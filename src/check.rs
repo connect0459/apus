@@ -515,6 +515,12 @@ impl FnCx<'_> {
             ));
         }
         let source = value.ty();
+        if self.sigs.hierarchy_has_generic(source) || self.sigs.hierarchy_has_generic(target) {
+            return Err(CheckError::at(
+                line,
+                "'is' and 'as' cannot be used on a hierarchy that includes a generic class yet",
+            ));
+        }
         let (class, through_optional) = if source.is_class() {
             (source, false)
         } else if let Some(inner) = self.sigs.unwrapped(source).filter(|t| t.is_class()) {
@@ -2536,7 +2542,7 @@ impl FnCx<'_> {
         }
         let sigs = self.sigs;
         let parent_name = sigs.owner_name(parent).unwrap_or_default();
-        let built = self.call(line, &parent_name, args, None)?;
+        let built = self.call(line, &parent_name, args, Some(parent))?;
         self.expect(line, parent, built.ty())?;
         let Ty::Class(parent_id) = parent else {
             return Err(CheckError::at(
