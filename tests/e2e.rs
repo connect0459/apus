@@ -917,10 +917,53 @@ fn a_type_cannot_have_two_initializers() {
     assert!(build_error(source).contains("duplicate"));
 }
 
+const SWITCH: &str = "enum Switch {\n  case off, on\n  init(enabled: Bool) {\n    if enabled { self = Switch.on } else { self = Switch.off }\n  }\n}\n";
+
 #[test]
-fn an_enum_cannot_have_an_initializer_yet() {
+fn an_initializer_of_an_enum_without_payloads_chooses_a_case() {
+    let source = format!(
+        "{SWITCH}func main() {{\n  print(Switch(enabled: true) == Switch.on)\n  print(Switch(enabled: false) == Switch.on)\n}}"
+    );
+    assert_eq!(run(&source), "true\nfalse\n");
+}
+
+#[test]
+fn an_initializer_of_an_enum_with_payloads_builds_a_case() {
+    let source = "enum Shape {\n  case empty\n  case circle(Int)\n  init(radius: Int) { self = Shape.circle(radius) }\n  func size() -> Int {\n    switch self {\n    case .empty: return 0\n    case .circle(let r): return r\n    }\n  }\n}\n\
+         func main() {\n  print(Shape(radius: 7).size())\n}";
+    assert_eq!(run(source), "7\n");
+}
+
+#[test]
+fn an_initializer_of_a_generic_enum_infers_the_type_arguments() {
+    let source = "enum Opt<T> {\n  case none\n  case some(T)\n  init(_ v: T) { self = Opt<T>.some(v) }\n  func orElse(_ d: T) -> T {\n    switch self {\n    case .none: return d\n    case .some(let v): return v\n    }\n  }\n}\n\
+         func main() {\n  let o = Opt(5)\n  print(o.orElse(0))\n}";
+    assert_eq!(run(source), "5\n");
+}
+
+#[test]
+fn an_enum_initializer_may_use_self_once_it_is_set() {
+    let source = "enum Light {\n  case red, green\n  init() {\n    self = Light.green\n    if self == Light.green { print(1) }\n  }\n}\n\
+         func main() { let l = Light()\n print(l == Light.green) }";
+    assert_eq!(run(source), "1\ntrue\n");
+}
+
+#[test]
+fn an_enum_initializer_must_assign_self() {
     let source = "enum E {\n  case a\n  init() { }\n}\nfunc main() { }";
-    assert!(build_error(source).contains("initializer"));
+    assert!(build_error(source).contains("self"));
+}
+
+#[test]
+fn an_enum_initializer_cannot_use_self_before_assigning_it() {
+    let source = "enum E {\n  case a, b\n  init() {\n    if self == E.a { print(1) }\n    self = E.b\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("self"));
+}
+
+#[test]
+fn an_enum_initializer_cannot_assign_self_only_in_a_branch() {
+    let source = "enum E {\n  case a, b\n  init(flag: Bool) {\n    if flag { self = E.a }\n  }\n}\nfunc main() { }";
+    assert!(build_error(source).contains("self"));
 }
 
 #[test]

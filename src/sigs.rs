@@ -388,12 +388,6 @@ impl Signatures {
                 ),
             ));
         }
-        if func.is_init() && (self.is_enum_ty(ty)) {
-            return Err(CheckError::at(
-                line,
-                format!("the enum '{owner}' cannot have an initializer yet"),
-            ));
-        }
         Ok((ty, generics))
     }
 

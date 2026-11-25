@@ -82,7 +82,77 @@ pub fn check_initialization(
     }
 }
 
+pub fn check_enum_initialization(
+    body: &[Stmt],
+    scope: InitScope<'_>,
+    init_line: u32,
+) -> Result<(), InitViolation> {
+    let mut scan = Scan {
+        scope,
+        locals: vec![scope.params.iter().map(|p| (*p).to_string()).collect()],
+    };
+    if scan.assigns_self(body)? {
+        Ok(())
+    } else {
+        Err(InitViolation {
+            line: init_line,
+            message: "the initializer does not assign 'self' on every path".to_string(),
+        })
+    }
+}
+
 impl Scan<'_> {
+    fn assigns_self(&mut self, stmts: &[Stmt]) -> Result<bool, InitViolation> {
+        for stmt in stmts {
+            if self.plain_self_assignment(stmt) || self.branches_assign_self(stmt)? {
+                return Ok(true);
+            }
+            if self.stmt_uses_self(stmt) {
+                return Err(InitViolation {
+                    line: stmt.line(),
+                    message: "'self' is used before it is assigned".to_string(),
+                });
+            }
+            if returns(stmt) {
+                return Err(InitViolation {
+                    line: stmt.line(),
+                    message: "an initializer returns before it assigns 'self'".to_string(),
+                });
+            }
+        }
+        Ok(false)
+    }
+
+    fn branches_assign_self(&mut self, stmt: &Stmt) -> Result<bool, InitViolation> {
+        let StmtKind::If {
+            cond,
+            then_body,
+            else_body: Some(else_body),
+        } = stmt.kind()
+        else {
+            return Ok(false);
+        };
+        if self.expr_uses_self(cond) {
+            return Ok(false);
+        }
+        self.locals.push(HashSet::new());
+        let then_assigns = self.assigns_self(then_body);
+        self.locals.pop();
+        self.locals.push(HashSet::new());
+        let else_assigns = self.assigns_self(else_body);
+        self.locals.pop();
+        Ok(then_assigns? && else_assigns?)
+    }
+
+    fn plain_self_assignment(&self, stmt: &Stmt) -> bool {
+        matches!(
+            stmt.kind(),
+            StmtKind::Assign { target, op: None, value }
+                if matches!(target.kind(), ExprKind::Ident(n) if n == SELF)
+                    && !self.expr_uses_self(value)
+        )
+    }
+
     fn is_member(&self, name: &str) -> bool {
         self.scope.members.contains(&name) && !self.locals.iter().any(|set| set.contains(name))
     }
@@ -398,5 +468,44 @@ mod tests {
         );
         assert!(verdict(&["a"], "if true { } else { print(a) }\nself.a = 1").is_err());
         assert!(verdict(&["a"], "while a > 0 { }\nself.a = 1").is_err());
+    }
+
+    fn enum_verdict(body: &str) -> Result<(), InitViolation> {
+        let src = format!("init() {{\n{body}\n}}");
+        let Decl::Func(init) = parse_item(&lex(&src).unwrap()).unwrap() else {
+            panic!("expected an initializer");
+        };
+        check_enum_initialization(init.body(), InitScope::new(&[], &[], &[]), init.line())
+    }
+
+    #[test]
+    fn assigning_self_at_the_top_level_initializes_an_enum() {
+        assert!(enum_verdict("self = E.a").is_ok());
+    }
+
+    #[test]
+    fn assigning_self_in_both_branches_initializes_an_enum() {
+        assert!(enum_verdict("if true { self = E.a } else { self = E.b }").is_ok());
+    }
+
+    #[test]
+    fn assigning_self_in_one_branch_does_not_initialize_an_enum() {
+        assert!(enum_verdict("if true { self = E.a }").is_err());
+        assert!(enum_verdict("if true { } else { self = E.a }").is_err());
+    }
+
+    #[test]
+    fn an_enum_initializer_without_an_assignment_is_rejected() {
+        assert!(enum_verdict("let x = 1").is_err());
+    }
+
+    #[test]
+    fn using_self_before_assigning_it_is_rejected_for_an_enum() {
+        assert!(enum_verdict("print(self == E.a)\nself = E.a").is_err());
+    }
+
+    #[test]
+    fn returning_before_assigning_self_is_rejected_for_an_enum() {
+        assert!(enum_verdict("return\nself = E.a").is_err());
     }
 }

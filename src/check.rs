@@ -4,10 +4,10 @@ use crate::ast::{
     Arg, BinOp, CaseLabel, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind, SwitchCase, TypeRef,
     UnaryOp,
 };
-use crate::init_check::{InitScope, check_initialization};
+use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{CResult, EnumSig, FieldSig, FuncSig, PRINT, ParamSig, scope_of};
 use crate::tir::{LocalId, TExpr, TFunc, TStmt};
-use crate::types::Ty;
+use crate::types::{StructId, Ty};
 
 pub use crate::sigs::{CheckError, Signatures};
 
@@ -67,33 +67,51 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
 }
 
 fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
-    let (Ty::Struct(id) | Ty::Class(id)) = ty else {
-        return Err(CheckError::at(
-            func.line(),
-            "internal error: an initializer needs a struct or a class",
-        ));
-    };
-    let sig = cx
-        .sigs
-        .struct_sig(id)
-        .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
-    let members: Vec<&str> = sig.fields().iter().map(FieldSig::name).collect();
     let owner = cx.sigs.owner_name(ty).unwrap_or_default();
     let methods = cx.sigs.method_names(&owner);
     let methods: Vec<&str> = methods.iter().map(String::as_str).collect();
     let params: Vec<&str> = func.params().iter().map(|p| p.name()).collect();
-    let scope = InitScope::new(&members, &methods, &params);
-    check_initialization(func.body(), scope, func.line())
-        .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
-    let zeros: Vec<TExpr> = sig.fields().iter().map(|f| TExpr::Zero(f.ty())).collect();
-    let init = if ty.is_class() {
-        TExpr::New { ty, args: zeros }
+    let init = if cx.sigs.is_enum_ty(ty) {
+        let scope = InitScope::new(&[], &methods, &params);
+        check_enum_initialization(func.body(), scope, func.line())
+            .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
+        match ty {
+            Ty::Struct(id) => zero_struct(cx, func, id, ty)?,
+            _ => TExpr::Zero(ty),
+        }
     } else {
-        TExpr::StructInit { ty, args: zeros }
+        let (Ty::Struct(id) | Ty::Class(id)) = ty else {
+            return Err(CheckError::at(
+                func.line(),
+                "internal error: an initializer needs a struct, a class or an enum",
+            ));
+        };
+        let sig = cx
+            .sigs
+            .struct_sig(id)
+            .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
+        let members: Vec<&str> = sig.fields().iter().map(FieldSig::name).collect();
+        let scope = InitScope::new(&members, &methods, &params);
+        check_initialization(func.body(), scope, func.line())
+            .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
+        zero_struct(cx, func, id, ty)?
     };
     let local = cx.declare(func.line(), "self", ty, true)?;
     cx.init_self = Some(local);
     Ok(vec![TStmt::Let { local, init }])
+}
+
+fn zero_struct(cx: &FnCx, func: &FuncDecl, id: StructId, ty: Ty) -> CResult<TExpr> {
+    let sig = cx
+        .sigs
+        .struct_sig(id)
+        .ok_or_else(|| CheckError::at(func.line(), "internal error: unknown struct"))?;
+    let zeros: Vec<TExpr> = sig.fields().iter().map(|f| TExpr::Zero(f.ty())).collect();
+    Ok(if ty.is_class() {
+        TExpr::New { ty, args: zeros }
+    } else {
+        TExpr::StructInit { ty, args: zeros }
+    })
 }
 
 fn always_returns(stmts: &[Stmt]) -> bool {
@@ -1159,7 +1177,8 @@ impl FnCx<'_> {
             return self.method_call(line, &base, callee, args, expected);
         }
         let init_name = format!("{callee}.init");
-        let callee = if sigs.struct_def(callee).is_some() && sigs.func(&init_name).is_some() {
+        let is_type = sigs.struct_def(callee).is_some() || sigs.enum_def(callee).is_some();
+        let callee = if is_type && sigs.func(&init_name).is_some() {
             init_name.as_str()
         } else {
             callee
@@ -1260,10 +1279,9 @@ impl FnCx<'_> {
         args: &[Arg],
     ) -> CResult<TExpr> {
         let init_name = format!("{callee}.init");
+        let has_init = self.sigs.func(&init_name).is_some();
         match self.sigs.struct_def(callee) {
-            Some(_) if self.sigs.func(&init_name).is_some() => {
-                self.call_with(line, &init_name, args, None, Some(type_args))
-            }
+            _ if has_init => self.call_with(line, &init_name, args, None, Some(type_args)),
             Some(def) => self.struct_init(line, def, Some(type_args), args, None),
             None => Err(CheckError::at(
                 line,
