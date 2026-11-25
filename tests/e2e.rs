@@ -4437,3 +4437,79 @@ fn a_pattern_cannot_name_a_label_that_the_case_does_not_have() {
     let unlabeled = "enum E { case a(Int) }\nfunc main() {\n  let e = E.a(1)\n  switch e {\n  case .a(value: let v): print(v)\n  }\n}";
     assert!(build_error(unlabeled).contains("label"));
 }
+
+const MULTI: &str = "enum Shape {\n  case circle(Int)\n  case square(Int)\n  case rect(Int, Int)\n  case pair(Int, Int)\n  case label(String)\n  case empty\n}\n";
+
+#[test]
+fn one_case_may_list_several_patterns_that_bind_the_same_name() {
+    let source = format!(
+        "{MULTI}func size(_ s: Shape) -> Int {{\n  switch s {{\n  case .circle(let r), .square(let r): return r * 10\n  case .rect(let w, _), .pair(_, let w): return w\n  case .label(let t): return t.count\n  case .empty: return 0\n  }}\n}}\nfunc main() {{\n  print(size(.circle(2)))\n  print(size(.square(3)))\n  print(size(.rect(4, 9)))\n  print(size(.pair(9, 5)))\n  print(size(.label(\"abc\")))\n  print(size(.empty))\n}}"
+    );
+    assert_eq!(run(&source), "20\n30\n4\n5\n3\n0\n");
+}
+
+#[test]
+fn a_shared_body_may_declare_locals_return_and_use_the_bound_name_many_times() {
+    let source = format!(
+        "{MULTI}func describe(_ s: Shape) -> Int {{\n  switch s {{\n  case .circle(let n), .square(let n), .rect(_, let n):\n    var total = 0\n    var i = 0\n    while i < n {{\n      total += i\n      i += 1\n    }}\n    if total > 5 {{ return total }}\n    return 0 - total\n  default:\n    return 99\n  }}\n}}\nfunc main() {{\n  print(describe(.circle(4)))\n  print(describe(.square(2)))\n  print(describe(.rect(1, 5)))\n  print(describe(.empty))\n}}"
+    );
+    assert_eq!(run(&source), "6\n-1\n10\n99\n");
+}
+
+#[test]
+fn a_switch_over_several_patterns_with_bindings_is_exhaustive_without_a_default() {
+    let source = "enum E {\n  case a(Int)\n  case b(Int)\n  case c(Int)\n}\nfunc f(_ e: E) -> Int {\n  switch e {\n  case .a(let x), .b(let x): return x\n  case .c(let y): return y + 100\n  }\n}\nfunc main() {\n  print(f(.a(1)))\n  print(f(.b(2)))\n  print(f(.c(3)))\n}";
+    assert_eq!(run(source), "1\n2\n103\n");
+}
+
+#[test]
+fn patterns_of_one_case_may_repeat_labels_and_mix_with_patterns_without_bindings() {
+    let source = "enum E {\n  case a(x: Int)\n  case b(y: Int, z: Int)\n  case c\n  case d\n}\nfunc f(_ e: E) -> Int {\n  switch e {\n  case .a(x: let v), .b(y: _, z: let v): return v\n  case .c, .d: return 0\n  }\n}\nfunc main() {\n  print(f(.a(x: 5)))\n  print(f(.b(y: 1, z: 7)))\n  print(f(.c))\n}";
+    assert_eq!(run(source), "5\n7\n0\n");
+}
+
+#[test]
+fn a_class_bound_by_several_patterns_is_released_once() {
+    let source = format!(
+        "{TRACKED}enum Holder {{\n  case first(Tracked)\n  case second(Tracked, Int)\n}}\nfunc main() {{\n  let h = Holder.second(Tracked(id: 1), 0)\n  switch h {{\n  case .first(let t), .second(let t, _):\n    print(t.id)\n  }}\n  print(9)\n}}"
+    );
+    assert_eq!(run(&source), "1\n9\n-1\n");
+}
+
+#[test]
+fn a_generic_enum_may_bind_one_name_in_several_patterns() {
+    let source = "enum Either<T> {\n  case left(T)\n  case right(T)\n  case both(T, T)\n}\nfunc first<T>(_ e: Either<T>) -> T {\n  switch e {\n  case .left(let v), .right(let v), .both(let v, _): return v\n  }\n}\nfunc main() {\n  print(first(Either.left(1)))\n  print(first(Either.right(2)))\n  print(first(Either.both(3, 4)))\n  print(first(Either.right(\"s\")))\n}";
+    assert_eq!(run(source), "1\n2\n3\ns\n");
+}
+
+#[test]
+fn the_patterns_of_a_case_must_bind_the_same_names_with_the_same_types() {
+    let names = format!(
+        "{MULTI}func f(_ s: Shape) {{\n  switch s {{\n  case .circle(let a), .square(let b): print(a)\n  default: print(0)\n  }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&names).contains("same names"));
+    let types = format!(
+        "{MULTI}func f(_ s: Shape) {{\n  switch s {{\n  case .circle(let a), .label(let a): print(1)\n  default: print(0)\n  }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&types).contains("type"));
+    let mixed = format!(
+        "{MULTI}func f(_ s: Shape) {{\n  switch s {{\n  case .circle(let a), .empty: print(a)\n  default: print(0)\n  }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&mixed).contains("same names"));
+}
+
+#[test]
+fn a_name_cannot_be_bound_twice_by_one_pattern() {
+    let source = format!(
+        "{MULTI}func f(_ s: Shape) {{\n  switch s {{\n  case .rect(let a, let a): print(a)\n  default: print(0)\n  }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&source).contains("already declared"));
+}
+
+#[test]
+fn bound_names_are_not_visible_outside_their_case() {
+    let source = format!(
+        "{MULTI}func f(_ s: Shape) {{\n  switch s {{\n  case .circle(let a), .square(let a): print(a)\n  default: print(a)\n  }}\n}}\nfunc main() {{ }}"
+    );
+    assert!(build_error(&source).contains("cannot find 'a'"));
+}

@@ -1225,25 +1225,41 @@ impl FnCx<'_> {
                     ));
                 }
                 CaseLabel::Patterns(patterns) => {
-                    let mut condition: Option<TExpr> = None;
-                    let mut prelude = Vec::new();
                     self.scopes.push(HashMap::new());
                     let outcome = self.case_patterns(
                         case,
                         patterns,
                         (&sig, temporary, subject_ty),
                         &mut covered,
-                        &mut condition,
-                        &mut prelude,
                     );
-                    let body = outcome.and_then(|()| self.block(case.body()));
+                    let checked =
+                        outcome.and_then(|tests| self.block(case.body()).map(|body| (tests, body)));
                     self.scopes.pop();
-                    let mut body = body?;
-                    prelude.append(&mut body);
-                    let Some(condition) = condition else {
+                    let (tests, body) = checked?;
+                    if tests.is_empty() {
                         return Err(CheckError::at(case.line(), "a case needs a pattern"));
-                    };
-                    branches.push((condition, prelude));
+                    }
+                    if tests.iter().all(|(_, prelude)| prelude.is_empty()) {
+                        let mut combined: Option<TExpr> = None;
+                        for (test, _) in tests {
+                            combined = Some(match combined.take() {
+                                None => test,
+                                Some(previous) => TExpr::Binary {
+                                    op: BinOp::Or,
+                                    lhs: Box::new(previous),
+                                    rhs: Box::new(test),
+                                },
+                            });
+                        }
+                        if let Some(condition) = combined {
+                            branches.push((condition, body));
+                        }
+                    } else {
+                        for (test, mut prelude) in tests {
+                            prelude.extend(body.iter().cloned());
+                            branches.push((test, prelude));
+                        }
+                    }
                 }
             }
         }
@@ -1412,11 +1428,12 @@ impl FnCx<'_> {
         patterns: &[Pattern],
         subject: (&EnumSig, LocalId, Ty),
         covered: &mut [bool],
-        condition: &mut Option<TExpr>,
-        prelude: &mut Vec<TStmt>,
-    ) -> CResult<()> {
+    ) -> CResult<Vec<(TExpr, Vec<TStmt>)>> {
         let (sig, temporary, subject_ty) = subject;
+        let mut tests: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
+        let mut first_names: Option<Vec<String>> = None;
         for pattern in patterns {
+            let mut prelude = Vec::new();
             if pattern.type_name().is_some_and(|n| n != sig.base_name()) {
                 return Err(CheckError::at(
                     case.line(),
@@ -1431,20 +1448,32 @@ impl FnCx<'_> {
             })?;
             covered[index] = true;
             if let Some(bindings) = pattern.bindings() {
-                if patterns.len() > 1 {
-                    return Err(CheckError::at(
-                        case.line(),
-                        "a case with bindings must have a single pattern",
-                    ));
-                }
                 self.bind_payload(
                     case.line(),
                     sig,
                     index,
                     (temporary, subject_ty),
                     (bindings, pattern.labels()),
-                    prelude,
+                    &mut prelude,
                 )?;
+            }
+            let mut names: Vec<String> = pattern
+                .bindings()
+                .unwrap_or_default()
+                .iter()
+                .flatten()
+                .cloned()
+                .collect();
+            names.sort();
+            match &first_names {
+                None => first_names = Some(names),
+                Some(expected) if *expected != names => {
+                    return Err(CheckError::at(
+                        case.line(),
+                        "the patterns of a case must bind the same names",
+                    ));
+                }
+                Some(_) => {}
             }
             let tag = if sig.has_payload() {
                 TExpr::Field {
@@ -1460,16 +1489,9 @@ impl FnCx<'_> {
                 lhs: Box::new(tag),
                 rhs: Box::new(self.case_tag(sig, subject_ty, index)),
             };
-            *condition = Some(match condition.take() {
-                None => test,
-                Some(previous) => TExpr::Binary {
-                    op: BinOp::Or,
-                    lhs: Box::new(previous),
-                    rhs: Box::new(test),
-                },
-            });
+            tests.push((test, prelude));
         }
-        Ok(())
+        Ok(tests)
     }
 
     fn case_tag(&self, sig: &EnumSig, ty: Ty, index: usize) -> TExpr {
@@ -1519,9 +1541,35 @@ impl FnCx<'_> {
             ));
         }
         let (temporary, subject_ty) = subject;
+        let mut bound_here: Vec<&str> = Vec::new();
         for (position, (binding, ty)) in bindings.iter().zip(case.payload()).enumerate() {
             let Some(name) = binding else { continue };
-            let local = self.declare(line, name, *ty, false)?;
+            if bound_here.contains(&name.as_str()) {
+                return Err(CheckError::at(
+                    line,
+                    format!("'{name}' is already declared in this scope"),
+                ));
+            }
+            bound_here.push(name);
+            let shared = self
+                .scopes
+                .last()
+                .and_then(|scope| scope.get(name))
+                .copied();
+            let local = match shared {
+                Some(existing) if existing.ty == *ty => existing.local,
+                Some(existing) => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "'{name}' is bound with the types {} and {} by the patterns of one case",
+                            self.name_of(existing.ty),
+                            self.name_of(*ty)
+                        ),
+                    ));
+                }
+                None => self.declare(line, name, *ty, false)?,
+            };
             prelude.push(TStmt::Let {
                 local,
                 init: TExpr::Field {
