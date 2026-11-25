@@ -46,6 +46,7 @@
   - [x] M6c: protocols as types: `let x: P`, parameters, results and members, optionals of them, requirement calls through a tag comparison chain, `is` and `as?` to a class conformer
 
 - [x] M7: `fatalError()` and `fatalError("message")` as a statement that ends the path
+- [x] M8: deep input: a nesting limit as an error, and a large stack for every pass
 
 ## Open decisions
 
@@ -307,3 +308,13 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `fatalError()` and `fatalError("literal")` are statements, checked like `print` (a reserved name, no value). The checker turns them into `TStmt::Fatal(text)` holding `Fatal error: <message>` and a newline. The backend flushes every C stream with `fflush(NULL)`, so output printed before the call survives, writes the text with `write(2, ...)` and traps. `always_returns` and the `guard` exit analysis treat it as the end of a path, as they treat `return`.
 
 **Consequences.** The message must be a string literal, because a `String` has no operations yet. There is no `Never` type, so `x ?? fatalError()` and `-> Never` are rejected. Live objects are not released, so their `deinit` does not run. The process ends with a trap signal and not with a status code.
+
+### Deep input is bounded by the parser and every pass runs on a large stack (2026-11-25)
+
+**Problem.** The parser, the checker, `mono`, the reference counting pass, the key and the code generator recurse over the depth of an expression, so a long chain such as `1 + 1 + ... ` overflowed the default 2 MiB thread stack, and the limit depended on the frame size of each function: adding a match arm to `Rewriter::expr` made a 120-term expression crash twice.
+
+**Options.** Swift's parser caps structure nesting at 256 (`StructureMarkerRAII`, the error `structure nesting level exceeded maximum of 256`) and parses an operator chain as a flat sequence, with only a complexity limit in the type checker; `rustc` grows the stack on demand with `stacker`; a flat representation of chains in the syntax tree and the typed IR with iterative passes.
+
+**Decision.** Two limits in `limits.rs`, both enforced by the parser as errors with a line number. `MAX_NESTING` (256, as in Swift) bounds the recursion of the parser itself: blocks, parentheses, argument lists, type arguments, prefix operators, `??` and `?.` chains. `MAX_DEPTH` (8000) bounds the depth of the tree that the later passes walk: `Expr` carries its own depth, computed when a node is built, and the parser adds the depth of the open blocks, of an `else if` chain and of the cases of a `switch` (lowered to nested `if` statements), so a chain of operators, of member accesses or of calls is accepted up to 8000 links. `driver::build_with` runs on a thread with a `STACK_SIZE` of 256 MiB and the code generation workers use the same size. The limit was measured in a debug build, which has the largest frames: 15000 operator terms fit in 256 MiB, so 8000 leaves a margin of nearly two, and tests build every shape (operators, methods, `else if`, `switch`, nested blocks, parentheses, prefix operators) at its limit, plus a parallel build.
+
+**Consequences.** A program beyond a limit gets an error instead of a crash. Unlike Swift, a long operator chain is limited, by 8000 terms, because the tree is deep and not flat. The 256 MiB is address space and is committed only when used. Postfix parsing now moves the expression instead of cloning it at every link, which was quadratic. A new construct that adds a recursion level or a lowering that nests statements must be counted in the parser, and the frame size of the recursive functions no longer decides the limit as long as the margin holds.
