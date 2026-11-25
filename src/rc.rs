@@ -24,6 +24,16 @@ pub fn insert(func: &TFunc, sigs: &Signatures) -> (TFunc, Vec<StructId>) {
     (rewritten, pass.created)
 }
 
+fn needs_rc(sigs: &Signatures, ty: Ty) -> bool {
+    match ty {
+        Ty::Class(_) => true,
+        Ty::Struct(id) => sigs
+            .struct_sig(id)
+            .is_some_and(|sig| sig.fields().iter().any(|f| needs_rc(sigs, f.ty()))),
+        _ => false,
+    }
+}
+
 pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
     let class = Ty::Class(id);
     let this = LocalId::new(0);
@@ -50,7 +60,7 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
     }
     if let Some(layout) = sigs.struct_sig(id) {
         for (index, field) in layout.members() {
-            if !matches!(field.ty(), Ty::Class(_)) {
+            if !needs_rc(sigs, field.ty()) {
                 continue;
             }
             let member = TExpr::Field {
@@ -96,14 +106,7 @@ struct Pass<'a> {
 
 impl Pass<'_> {
     fn needs_rc(&self, ty: Ty) -> bool {
-        match ty {
-            Ty::Class(_) => true,
-            Ty::Struct(id) => self
-                .sigs
-                .struct_sig(id)
-                .is_some_and(|sig| sig.fields().iter().any(|f| matches!(f.ty(), Ty::Class(_)))),
-            _ => false,
-        }
+        needs_rc(self.sigs, ty)
     }
 
     fn is_unowned_field(&self, base: Ty, index: usize) -> bool {

@@ -1904,7 +1904,7 @@ mod tests {
 
     #[test]
     fn struct_fields_must_have_a_supported_type() {
-        assert!(check_all("struct Q { var a: Int }\nstruct P { var q: Q }").is_err());
+        assert!(check_all("struct Q { var a: Int }\nstruct P { var q: Q }").is_ok());
         assert!(check_all("struct P { var a: Foo }").is_err());
         assert!(check_all("struct P { var a: Int; var a: Int }").is_err());
     }
@@ -2156,9 +2156,9 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_field_cannot_be_an_enum_that_carries_values() {
+    fn a_struct_field_can_be_an_enum_that_carries_values() {
         let source = format!("{SHAPE}struct P {{ var s: Shape }}");
-        assert!(check_all(&source).is_err());
+        assert!(check_all(&source).is_ok());
     }
 
     #[test]
@@ -2241,10 +2241,9 @@ mod tests {
     }
 
     #[test]
-    fn a_generic_struct_cannot_hold_a_struct_through_its_type_argument() {
+    fn a_generic_struct_can_hold_a_struct_through_its_type_argument() {
         let source = format!("{BOX}struct P {{ var x: Int }}\nfunc f(_ b: Box<P>) {{ }}");
-        let (_, message) = rejected_at(&source);
-        assert!(message.contains("struct type"), "{message}");
+        assert!(check_all(&source).is_ok());
     }
 
     #[test]

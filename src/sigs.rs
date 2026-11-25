@@ -698,15 +698,6 @@ impl Signatures {
         }
         for field in decl.fields() {
             let ty = self.resolve_type(field.ty(), &own_scope, at)?;
-            if let Ty::Struct(_) = ty {
-                return Err(CheckError::at(
-                    at,
-                    format!(
-                        "a struct field cannot have a struct type yet: '{}' in '{name}'",
-                        self.display(ty, scope)
-                    ),
-                ));
-            }
             if fields.iter().any(|f| f.name == field.name()) {
                 return Err(CheckError::at(
                     at,
@@ -1112,11 +1103,33 @@ impl Signatures {
     }
 
     pub fn layouts(&self) -> Vec<TStruct> {
-        self.instances
-            .borrow()
+        let instances = self.instances.borrow();
+        instances
             .structs
             .iter()
-            .map(|s| TStruct::new(s.name.clone(), s.fields.iter().map(|f| f.ty).collect()))
+            .map(|s| {
+                let mut slots = Vec::new();
+                let mut starts = Vec::new();
+                for field in &s.fields {
+                    starts.push(slots.len());
+                    Self::flatten(&instances, field.ty, &mut slots);
+                }
+                TStruct::new(s.name.clone(), slots, starts)
+            })
             .collect()
+    }
+
+    fn flatten(instances: &Instances, ty: Ty, slots: &mut Vec<Ty>) {
+        match ty {
+            Ty::Struct(id) => match instances.structs.get(id.index()) {
+                Some(sig) => {
+                    for field in &sig.fields {
+                        Self::flatten(instances, field.ty, slots);
+                    }
+                }
+                None => slots.push(ty),
+            },
+            other => slots.push(other),
+        }
     }
 }

@@ -56,13 +56,20 @@ impl Encoder<'_> {
             }
             Ty::Struct(id) | Ty::Class(id) => {
                 self.tag(if ty.is_class() { 8 } else { 5 });
-                let fields = self
-                    .structs
-                    .get(id.index())
-                    .map_or(&[][..], TStruct::fields);
+                let layout = self.structs.get(id.index());
+                let fields = layout.map_or(&[][..], TStruct::fields);
                 self.usize(fields.len());
                 for field in fields {
-                    self.ty(*field);
+                    if field.is_class() {
+                        self.tag(8);
+                    } else {
+                        self.ty(*field);
+                    }
+                }
+                let starts = layout.map_or(&[][..], TStruct::starts);
+                self.usize(starts.len());
+                for start in starts {
+                    self.usize(*start);
                 }
             }
         }

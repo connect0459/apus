@@ -24,11 +24,20 @@ impl LocalId {
 pub struct TStruct {
     name: String,
     fields: Vec<Ty>,
+    starts: Vec<usize>,
 }
 
 impl TStruct {
-    pub fn new(name: String, fields: Vec<Ty>) -> Self {
-        Self { name, fields }
+    pub fn new(name: String, fields: Vec<Ty>, starts: Vec<usize>) -> Self {
+        Self {
+            name,
+            fields,
+            starts,
+        }
+    }
+
+    pub fn starts(&self) -> &[usize] {
+        &self.starts
     }
 
     pub fn name(&self) -> &str {

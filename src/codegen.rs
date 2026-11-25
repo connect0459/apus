@@ -458,6 +458,36 @@ impl Emitter<'_, '_> {
         }
     }
 
+    fn slot_start(&self, ty: Ty, index: usize) -> usize {
+        match ty {
+            Ty::Struct(id) | Ty::Class(id) => self
+                .structs
+                .get(id.index())
+                .and_then(|s| s.starts().get(index).copied())
+                .unwrap_or(index),
+            _ => index,
+        }
+    }
+
+    fn store_field(
+        &mut self,
+        dest: Value,
+        owner: Ty,
+        index: usize,
+        value: Value,
+        value_ty: Ty,
+    ) -> GResult<()> {
+        let offset = field_offset(self.slot_start(owner, index));
+        if value_ty.is_struct() {
+            let target = self.builder.ins().iadd_imm_s(dest, i64::from(offset));
+            return self.copy_struct(target, value, value_ty);
+        }
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), value, dest, offset);
+        Ok(())
+    }
+
     fn alloc_struct(&mut self, ty: Ty) -> GResult<Value> {
         let count = u32::try_from(self.struct_fields(ty)?.len())?;
         let size = count.max(1) * FIELD_SIZE;
@@ -539,12 +569,11 @@ impl Emitter<'_, '_> {
                 index,
                 value,
             } => {
+                let value_ty = value.ty();
                 let value = self.value(value)?;
                 let base = self.builder.use_var(self.vars[local.index()]);
-                let flags = MemFlagsData::trusted();
-                self.builder
-                    .ins()
-                    .store(flags, value, base, field_offset(*index));
+                let owner = self.local_types[local.index()];
+                self.store_field(base, owner, *index, value, value_ty)?;
                 Ok(false)
             }
             TStmt::Return(value) => {
@@ -913,6 +942,19 @@ impl Emitter<'_, '_> {
                 .builder
                 .ins()
                 .iconst(types::I64, i64::try_from(*index)?),
+            TExpr::Zero(ty) if ty.is_struct() => {
+                let dest = self.alloc_struct(*ty)?;
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                for slot in 0..self.struct_fields(*ty)?.len() {
+                    self.builder.ins().store(
+                        MemFlagsData::trusted(),
+                        zero,
+                        dest,
+                        field_offset(slot),
+                    );
+                }
+                dest
+            }
             TExpr::Zero(ty) => {
                 let clif = clif_type(*ty)
                     .ok_or_else(|| CodegenError::from("a zero value has no representable type"))?;
@@ -991,11 +1033,8 @@ impl Emitter<'_, '_> {
                     .map(|a| self.value(a))
                     .collect::<GResult<Vec<_>>>()?;
                 let dest = self.alloc_struct(*ty)?;
-                let flags = MemFlagsData::trusted();
-                for (index, value) in values.into_iter().enumerate() {
-                    self.builder
-                        .ins()
-                        .store(flags, value, dest, field_offset(index));
+                for (index, (value, arg)) in values.into_iter().zip(args).enumerate() {
+                    self.store_field(dest, *ty, index, value, arg.ty())?;
                 }
                 dest
             }
@@ -1005,22 +1044,23 @@ impl Emitter<'_, '_> {
                     .map(|a| self.value(a))
                     .collect::<GResult<Vec<_>>>()?;
                 let dest = self.alloc_object(*ty)?;
-                let flags = MemFlagsData::trusted();
-                for (index, value) in values.into_iter().enumerate() {
-                    self.builder
-                        .ins()
-                        .store(flags, value, dest, field_offset(index));
+                for (index, (value, arg)) in values.into_iter().zip(args).enumerate() {
+                    self.store_field(dest, *ty, index, value, arg.ty())?;
                 }
                 dest
             }
             TExpr::Field { base, index, ty } => {
+                let owner = base.ty();
                 let base = self.value(base)?;
-                let clif = clif_type(*ty)
-                    .ok_or_else(|| CodegenError::from("a field has no representable type"))?;
-                let flags = MemFlagsData::trusted();
-                self.builder
-                    .ins()
-                    .load(clif, flags, base, field_offset(*index))
+                let offset = field_offset(self.slot_start(owner, *index));
+                if ty.is_struct() {
+                    self.builder.ins().iadd_imm_s(base, i64::from(offset))
+                } else {
+                    let clif = clif_type(*ty)
+                        .ok_or_else(|| CodegenError::from("a field has no representable type"))?;
+                    let flags = MemFlagsData::trusted();
+                    self.builder.ins().load(clif, flags, base, offset)
+                }
             }
         };
         Ok(Some(value))

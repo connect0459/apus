@@ -610,12 +610,6 @@ fn a_class_instance_cannot_be_printed_or_compared() {
     assert!(build_error(&compare).contains("equality"));
 }
 
-#[test]
-fn a_class_cannot_hold_a_struct_member_yet() {
-    let source = "struct P { var x: Int }\nclass Wrapper { var p: P }\nfunc main() { }";
-    assert!(build_error(source).contains("cannot have a struct type"));
-}
-
 const GAUGE: &str = "class Gauge {\n  var level: Int\n  func raise(by amount: Int) { self.level += amount }\n  func read() -> Int { return self.level }\n}\n";
 
 #[test]
@@ -2004,4 +1998,96 @@ fn unowned_is_rejected_on_a_struct_member() {
 fn unowned_is_rejected_on_a_member_that_is_not_a_class() {
     let source = "class C {\n  unowned var n: Int\n}\nfunc main() { }";
     assert!(build_error(source).contains("unowned"));
+}
+
+const REGION: &str = "struct Point {\n  var x: Int\n  var y: Int\n}\nstruct Region {\n  var origin: Point\n  var size: Int\n  var visible: Bool\n}\n";
+
+#[test]
+fn a_struct_can_hold_another_struct() {
+    let source = format!(
+        "{REGION}func main() {{\n  let r = Region(origin: Point(x: 1, y: 2), size: 3, visible: true)\n  print(r.origin.x)\n  print(r.origin.y)\n  print(r.size)\n  print(r.visible)\n}}"
+    );
+    assert_eq!(run(&source), "1\n2\n3\ntrue\n");
+}
+
+#[test]
+fn a_nested_struct_is_copied_by_value() {
+    let source = format!(
+        "{REGION}func main() {{\n  var r = Region(origin: Point(x: 1, y: 2), size: 3, visible: true)\n  let copy = r\n  r.origin = Point(x: 9, y: 8)\n  print(copy.origin.x)\n  print(r.origin.x)\n  let p = r.origin\n  r.origin = Point(x: 0, y: 0)\n  print(p.y)\n}}"
+    );
+    assert_eq!(run(&source), "1\n9\n8\n");
+}
+
+#[test]
+fn a_struct_holding_a_struct_can_be_passed_and_returned() {
+    let source = format!(
+        "{REGION}func grow(_ r: Region) -> Region {{\n  return Region(origin: r.origin, size: r.size + 1, visible: r.visible)\n}}\n\
+         func main() {{\n  let r = grow(Region(origin: Point(x: 4, y: 5), size: 1, visible: false))\n  print(r.origin.y)\n  print(r.size)\n  print(r.visible)\n}}"
+    );
+    assert_eq!(run(&source), "5\n2\nfalse\n");
+}
+
+#[test]
+fn a_member_of_a_nested_struct_stays_in_place_when_a_neighbour_is_assigned() {
+    let source = format!(
+        "{REGION}func main() {{\n  var r = Region(origin: Point(x: 1, y: 2), size: 3, visible: true)\n  r.size = 7\n  r.visible = false\n  print(r.origin.x)\n  print(r.origin.y)\n  print(r.size)\n  print(r.visible)\n}}"
+    );
+    assert_eq!(run(&source), "1\n2\n7\nfalse\n");
+}
+
+#[test]
+fn a_mutating_method_can_replace_a_nested_struct() {
+    let source = "struct Point {\n  var x: Int\n}\nstruct Box {\n  var corner: Point\n  var n: Int\n  mutating func move(to p: Point) { self.corner = p }\n  func cornerX() -> Int { return corner.x }\n}\n\
+         func main() {\n  var b = Box(corner: Point(x: 1), n: 0)\n  b.move(to: Point(x: 6))\n  print(b.cornerX())\n}";
+    assert_eq!(run(source), "6\n");
+}
+
+#[test]
+fn a_class_can_hold_a_struct_member() {
+    let source = "struct Point {\n  var x: Int\n  var y: Int\n}\nclass Sprite {\n  var at: Point\n  var id: Int\n  func shift() { self.at = Point(x: self.at.x + 1, y: self.at.y) }\n}\n\
+         func main() {\n  let s = Sprite(at: Point(x: 1, y: 2), id: 5)\n  s.shift()\n  print(s.at.x)\n  print(s.at.y)\n  print(s.id)\n}";
+    assert_eq!(run(source), "2\n2\n5\n");
+}
+
+#[test]
+fn an_initializer_can_set_a_struct_member() {
+    let source = "struct Point {\n  var x: Int\n}\nstruct Wrap {\n  var p: Point\n  var n: Int\n  init(x: Int) {\n    self.p = Point(x: x)\n    self.n = x + 1\n  }\n}\n\
+         func main() {\n  let w = Wrap(x: 4)\n  print(w.p.x)\n  print(w.n)\n}";
+    assert_eq!(run(source), "4\n5\n");
+}
+
+#[test]
+fn an_enum_with_payloads_can_be_a_struct_member() {
+    let source = "enum Shape {\n  case empty\n  case circle(Int)\n}\nstruct Slot {\n  var shape: Shape\n  var n: Int\n}\n\
+         func main() {\n  let s = Slot(shape: Shape.circle(7), n: 2)\n  switch s.shape {\n  case .empty: print(0)\n  case .circle(let r): print(r)\n  }\n  print(s.n)\n}";
+    assert_eq!(run(source), "7\n2\n");
+}
+
+#[test]
+fn a_struct_cannot_contain_itself() {
+    let source = "struct Loop {\n  var inner: Loop\n}\nfunc main() { }";
+    assert!(build_error(source).contains("contain itself"));
+}
+
+#[test]
+fn a_struct_nested_two_levels_deep_keeps_every_member() {
+    let source = "struct A { var a: Int }\nstruct B { var x: Int\n var a: A }\nstruct C { var y: Int\n var b: B\n var z: Int }\n\
+         func main() {\n  let c = C(y: 1, b: B(x: 2, a: A(a: 3)), z: 4)\n  let d = c\n  print(d.y)\n  print(d.b.x)\n  print(d.b.a.a)\n  print(d.z)\n}";
+    assert_eq!(run(source), "1\n2\n3\n4\n");
+}
+
+#[test]
+fn a_nested_struct_that_holds_an_instance_retains_it_on_copy() {
+    let source = tracked(
+        "struct Inner {\n  var item: Tracked\n}\nstruct Outer {\n  var inner: Inner\n  var n: Int\n}\nfunc main() {\n  let o = Outer(inner: Inner(item: Tracked(id: 1)), n: 0)\n  if true {\n    let q = o\n    print(10)\n  }\n  print(20)\n}",
+    );
+    assert_eq!(run(&source), "10\n20\n-1\n");
+}
+
+#[test]
+fn replacing_a_nested_struct_releases_the_instance_it_held() {
+    let source = tracked(
+        "struct Inner {\n  var item: Tracked\n}\nclass Holder {\n  var inner: Inner\n}\nfunc main() {\n  let h = Holder(inner: Inner(item: Tracked(id: 1)))\n  h.inner = Inner(item: Tracked(id: 2))\n  print(10)\n}",
+    );
+    assert_eq!(run(&source), "-1\n10\n-2\n");
 }
