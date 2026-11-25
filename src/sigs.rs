@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{Decl, EnumCaseDecl, EnumDecl, FuncDecl, ProtocolDecl, StructDecl, TypeRef};
+use crate::ast::{
+    Decl, EnumCaseDecl, EnumDecl, Field, FuncDecl, ProtocolDecl, StructDecl, TypeRef,
+};
 use crate::tir::{TExpr, TStruct};
 use crate::types::{EnumId, StructId, Ty};
 
@@ -37,9 +39,26 @@ fn identity(generics: &[String]) -> Vec<Ty> {
 
 const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
 
+pub const BOX: &str = "$Box";
 pub const OPTIONAL: &str = "Optional";
 pub const NONE_CASE: usize = 0;
 pub const SOME_CASE: usize = 1;
+
+fn box_decl() -> StructDecl {
+    StructDecl::new(
+        0,
+        BOX.to_string(),
+        vec![Field::new("value".to_string(), false, TypeRef::from("T"))],
+    )
+    .with_generics(vec!["T".to_string()])
+    .as_class()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Conformer {
+    Class(Ty),
+    Boxed { value: Ty, boxed: Ty },
+}
 
 fn optional_decl() -> EnumDecl {
     EnumDecl::new(
@@ -325,6 +344,7 @@ enum Origin {
     Struct { def: usize, args: Vec<Ty> },
     EnumLayout(EnumId),
     EnumCell(EnumId),
+    Existential(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -347,6 +367,7 @@ struct Instances {
     superclass: HashMap<StructId, StructId>,
     cell_owner: HashMap<StructId, EnumId>,
     cell_index: HashMap<EnumId, StructId>,
+    existentials: HashMap<String, StructId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -396,6 +417,7 @@ impl Signatures {
             .collect();
         let decls = &normalized[..];
         sigs.register_enum_def(&optional_decl())?;
+        sigs.register_struct_def(&box_decl())?;
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -414,6 +436,7 @@ impl Signatures {
                 sigs.instantiate_struct(def, Vec::new(), &[], decl.line())?;
             }
         }
+        sigs.instantiate_boxes()?;
         for decl in protocol_decls {
             sigs.resolve_protocol(decl)?;
         }
@@ -429,6 +452,39 @@ impl Signatures {
         }
         sigs.check_conformances()?;
         Ok(sigs)
+    }
+
+    fn declares_user_protocol(&self, conformances: &[String]) -> bool {
+        conformances
+            .iter()
+            .any(|name| name != EQUATABLE && name != COMPARABLE)
+    }
+
+    fn instantiate_boxes(&self) -> CResult<()> {
+        for def in 0..self.struct_defs.len() {
+            let decl = &self.struct_defs[def];
+            if decl.name() == BOX
+                || decl.is_class()
+                || !decl.generics().is_empty()
+                || !self.declares_user_protocol(decl.conformances())
+            {
+                continue;
+            }
+            let id = self.instantiate_struct(def, Vec::new(), &[], decl.line())?;
+            self.box_of(self.struct_ty(def, id), decl.line())?;
+        }
+        for def in 0..self.enum_defs.len() {
+            let decl = &self.enum_defs[def];
+            if decl.name() == OPTIONAL
+                || !decl.generics().is_empty()
+                || !self.declares_user_protocol(decl.conformances())
+            {
+                continue;
+            }
+            let id = self.instantiate_enum(def, Vec::new(), &[], decl.line())?;
+            self.box_of(self.enum_ty(id), decl.line())?;
+        }
+        Ok(())
     }
 
     fn register_protocol_name(&mut self, decl: &ProtocolDecl) -> CResult<()> {
@@ -680,6 +736,106 @@ impl Signatures {
         self.origin_of(ty)
             .map(|(_, _, args)| args)
             .unwrap_or_default()
+    }
+
+    pub fn existential_protocol(&self, ty: Ty) -> Option<String> {
+        let Ty::Class(id) = ty else { return None };
+        match self.instances.borrow().struct_origin.get(id.index())? {
+            Origin::Existential(name) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn existential(&self, protocol: &str, line: u32) -> CResult<Ty> {
+        let sig = self
+            .protocols
+            .get(protocol)
+            .ok_or_else(|| CheckError::at(line, format!("unknown protocol '{protocol}'")))?;
+        let standard = protocol == EQUATABLE || protocol == COMPARABLE;
+        let mentions_self = sig
+            .requirements()
+            .iter()
+            .any(|r| self.has_param(r.ret()) || r.params().iter().any(|p| self.has_param(p.ty())));
+        if standard || mentions_self || !sig.associated().is_empty() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "the protocol '{protocol}' can only be used as a constraint: it has associated types or requirements that mention Self"
+                ),
+            ));
+        }
+        let mut instances = self.instances.borrow_mut();
+        if let Some(id) = instances.existentials.get(protocol) {
+            return Ok(Ty::Class(*id));
+        }
+        let id = StructId::new(instances.structs.len());
+        let fields = HEADER_FIELDS
+            .iter()
+            .map(|name| FieldSig {
+                name: (*name).to_string(),
+                ty: Ty::Int,
+                mutable: true,
+                unowned: false,
+                weak: false,
+            })
+            .collect();
+        instances.structs.push(Rc::new(StructSig {
+            name: protocol.to_string(),
+            fields,
+        }));
+        instances
+            .struct_origin
+            .push(Origin::Existential(protocol.to_string()));
+        instances.existentials.insert(protocol.to_string(), id);
+        Ok(Ty::Class(id))
+    }
+
+    pub fn box_of(&self, value: Ty, line: u32) -> CResult<Ty> {
+        let def = self
+            .struct_def_ids
+            .get(BOX)
+            .copied()
+            .ok_or_else(|| CheckError::at(line, "internal error: no box class"))?;
+        let id = self.instantiate_struct(def, vec![value], &[], line)?;
+        Ok(self.struct_ty(def, id))
+    }
+
+    pub fn existential_conformers(&self, protocol: &str) -> CResult<Vec<Conformer>> {
+        let mut found = Vec::new();
+        for def in 0..self.struct_defs.len() {
+            let decl = &self.struct_defs[def];
+            if decl.name() == BOX || !decl.generics().is_empty() {
+                continue;
+            }
+            let id = self.instantiate_struct(def, Vec::new(), &[], decl.line())?;
+            let ty = self.struct_ty(def, id);
+            if !self.conforms(ty, protocol) {
+                continue;
+            }
+            found.push(if ty.is_class() {
+                Conformer::Class(ty)
+            } else {
+                Conformer::Boxed {
+                    value: ty,
+                    boxed: self.box_of(ty, decl.line())?,
+                }
+            });
+        }
+        for def in 0..self.enum_defs.len() {
+            let decl = &self.enum_defs[def];
+            if decl.name() == OPTIONAL || !decl.generics().is_empty() {
+                continue;
+            }
+            let id = self.instantiate_enum(def, Vec::new(), &[], decl.line())?;
+            let ty = self.enum_ty(id);
+            if self.conforms(ty, protocol) {
+                found.push(Conformer::Boxed {
+                    value: ty,
+                    boxed: self.box_of(ty, decl.line())?,
+                });
+            }
+        }
+        Ok(found)
     }
 
     pub fn conforms(&self, ty: Ty, protocol: &str) -> bool {
@@ -1301,6 +1457,10 @@ impl Signatures {
             let id = self.instantiate_enum(def, args, scope, line)?;
             return Ok(self.enum_ty(id));
         }
+        if self.protocols.contains_key(name) {
+            self.reject_args(args_given, name, line)?;
+            return self.existential(name, line);
+        }
         Err(CheckError::at(line, format!("unknown type '{name}'")))
     }
 
@@ -1559,6 +1719,15 @@ impl Signatures {
     }
 
     pub fn is_subclass(&self, sub: Ty, sup: Ty) -> bool {
+        if sub == sup {
+            return true;
+        }
+        if let Some(protocol) = self.existential_protocol(sup) {
+            return sub.is_class()
+                && self.existential_protocol(sub).is_none()
+                && self.type_arguments(sub).is_empty()
+                && self.conforms(sub, &protocol);
+        }
         let mut current = Some(sub);
         while let Some(ty) = current {
             if ty == sup {
@@ -1847,6 +2016,7 @@ impl Signatures {
                     let (def, args) = instances.enum_origin.get(owner.index())?;
                     Some((Kind::Enum, *def, args.clone()))
                 }
+                Origin::Existential(_) => None,
             },
             Ty::Enum(id) => {
                 let (def, args) = instances.enum_origin.get(id.index())?;

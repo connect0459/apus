@@ -244,6 +244,45 @@ pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFu
     ))
 }
 
+pub fn boxed_requirement(
+    sigs: &Signatures,
+    name: String,
+    boxed: Ty,
+    value: Ty,
+    qualified: &str,
+) -> CResult<TFunc> {
+    let sig = sigs
+        .func(qualified)
+        .ok_or_else(|| CheckError::at(0, format!("cannot find '{qualified}'")))?;
+    let mut locals = vec![boxed];
+    locals.extend(sig.params().iter().skip(1).map(ParamSig::ty));
+    let mut args = vec![TExpr::Field {
+        base: Box::new(TExpr::Local(LocalId::new(0), boxed)),
+        index: crate::tir::HEADER_SLOTS,
+        ty: value,
+    }];
+    args.extend(
+        locals
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, ty)| TExpr::Local(LocalId::new(index), *ty)),
+    );
+    let ret = sig.ret();
+    let call = TExpr::Call {
+        callee: qualified.to_string(),
+        type_args: Vec::new(),
+        args,
+        ret,
+    };
+    let body = if ret == Ty::Void {
+        vec![TStmt::Eval(call), TStmt::Return(None)]
+    } else {
+        vec![TStmt::Return(Some(call))]
+    };
+    Ok(TFunc::new(name, locals.len(), ret, locals, body))
+}
+
 fn always_exits(stmts: &[Stmt]) -> bool {
     exits(stmts, false, &[])
 }
@@ -351,6 +390,7 @@ impl FnCx<'_> {
     fn convertible(&self, expected: Ty, found: Ty) -> bool {
         expected == found
             || self.sigs.is_subclass(found, expected)
+            || self.boxable(expected, found)
             || self
                 .sigs
                 .unwrapped(expected)
@@ -417,6 +457,12 @@ impl FnCx<'_> {
     ) -> CResult<TExpr> {
         let value = self.value(expr)?;
         let target = self.sigs.resolve_type(ty, &self.scope, line)?;
+        if self.sigs.existential_protocol(target).is_some() {
+            return Err(CheckError::at(
+                line,
+                "'is' and 'as' cannot cast to a protocol type yet",
+            ));
+        }
         if !target.is_class() {
             return Err(CheckError::at(
                 line,
@@ -608,10 +654,44 @@ impl FnCx<'_> {
         })
     }
 
+    fn boxable(&self, expected: Ty, found: Ty) -> bool {
+        self.sigs
+            .existential_protocol(expected)
+            .is_some_and(|protocol| {
+                !found.is_class()
+                    && self.sigs.type_arguments(found).is_empty()
+                    && self.sigs.conforms(found, &protocol)
+            })
+    }
+
     fn coerce(&self, line: u32, expected: Ty, value: TExpr) -> CResult<TExpr> {
         let found = value.ty();
         if expected == found || self.sigs.is_subclass(found, expected) {
             return Ok(value);
+        }
+        if let Some(protocol) = self.sigs.existential_protocol(expected)
+            && !found.is_class()
+        {
+            if !self.sigs.conforms(found, &protocol) {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "type '{}' does not conform to the protocol '{protocol}'",
+                        self.name_of(found)
+                    ),
+                ));
+            }
+            if !self.boxable(expected, found) {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "{} is generic and cannot be stored in a value of the protocol '{protocol}' yet",
+                        self.name_of(found)
+                    ),
+                ));
+            }
+            let boxed = self.sigs.box_of(found, line)?;
+            return Ok(self.sigs.construct(boxed, vec![value]));
         }
         if let Some(inner) = self.sigs.unwrapped(expected)
             && self.convertible(inner, found)
@@ -1965,6 +2045,9 @@ impl FnCx<'_> {
             if let Ty::Param(index) = ty {
                 return self.witness_call(line, base, receiver, index, name, args);
             }
+            if let Some(protocol) = sigs.existential_protocol(ty) {
+                return self.dispatch_call(line, receiver, &protocol, name, args);
+            }
             (receiver, ty, true)
         };
         let owner = sigs.owner_name(lookup_ty).ok_or_else(|| {
@@ -2423,6 +2506,58 @@ impl FnCx<'_> {
                 ty: Ty::Int,
             }),
             rhs: Box::new(TExpr::Int(NONE_CASE as i64)),
+        })
+    }
+
+    fn dispatch_call(
+        &mut self,
+        line: u32,
+        receiver: TExpr,
+        protocol: &str,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let requirement = sigs
+            .protocol(protocol)
+            .and_then(|p| p.requirement(name))
+            .ok_or_else(|| {
+                CheckError::at(
+                    line,
+                    format!("'{name}' is not a requirement of the protocol '{protocol}'"),
+                )
+            })?;
+        if requirement.is_mutating() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "the mutating requirement '{name}' cannot be called through a value of the protocol '{protocol}'"
+                ),
+            ));
+        }
+        let params = requirement.params();
+        if args.len() != params.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{name}' takes {} argument(s), but {} were given",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut checked = vec![receiver];
+        for (arg, param) in args.iter().zip(params) {
+            self.expect_label(line, arg, param.label())?;
+            self.expected = Some(param.ty());
+            let value = self.value(arg.value())?;
+            checked.push(self.coerce(line, param.ty(), value)?);
+        }
+        Ok(TExpr::Dispatch {
+            protocol: protocol.to_string(),
+            method: name.to_string(),
+            args: checked,
+            ret: requirement.ret(),
         })
     }
 

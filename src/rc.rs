@@ -625,6 +625,17 @@ impl Pass<'_> {
                 args: self.borrowed_all(args),
                 ret: *ret,
             },
+            TExpr::Dispatch {
+                protocol,
+                method,
+                args,
+                ret,
+            } => TExpr::Dispatch {
+                protocol: protocol.clone(),
+                method: method.clone(),
+                args: self.borrowed_all(args),
+                ret: *ret,
+            },
             TExpr::Witness {
                 protocol,
                 method,

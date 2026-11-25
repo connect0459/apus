@@ -530,3 +530,32 @@ fn editing_a_deinit_body_compiles_only_that_deinit() {
     assert_eq!(report.compiled(), 1);
     assert_eq!(project.run(), "5\n1\n");
 }
+
+const SHAPE_PROGRAM: &str = "protocol Shape {\n  func area() -> Int\n}\nstruct Square: Shape {\n  var side: Int\n  func area() -> Int { return side * side }\n}\nfunc unrelated() -> Int { return 40 }\nfunc total(_ s: Shape) -> Int { return s.area() }\nfunc main() {\n  print(total(Square(side: 2)) + unrelated())\n}\n";
+
+#[test]
+fn a_new_conformer_recompiles_the_functions_that_call_a_requirement_through_the_protocol() {
+    let project = Project::new();
+    project.build(SHAPE_PROGRAM);
+    assert_eq!(project.run(), "44\n");
+    let with_conformer = format!(
+        "{SHAPE_PROGRAM}struct Rect: Shape {{\n  var w: Int\n  var h: Int\n  func area() -> Int {{ return w * h }}\n}}\n"
+    );
+    let report = project.build(&with_conformer);
+    assert!(report.compiled() >= 1);
+    assert!(report.reused() >= 1, "unrelated code must stay cached");
+    assert_eq!(project.run(), "44\n");
+    let used = with_conformer.replace("Square(side: 2)", "Rect(w: 3, h: 4)");
+    project.build(&used);
+    assert_eq!(project.run(), "52\n");
+}
+
+#[test]
+fn editing_an_unrelated_function_keeps_the_protocol_dispatch_cached() {
+    let project = Project::new();
+    project.build(SHAPE_PROGRAM);
+    let edited = SHAPE_PROGRAM.replace("return 40", "return 41");
+    let report = project.build(&edited);
+    assert_eq!(report.compiled(), 1);
+    assert_eq!(project.run(), "45\n");
+}

@@ -198,6 +198,12 @@ pub enum TExpr {
         args: Vec<TExpr>,
         ret: Ty,
     },
+    Dispatch {
+        protocol: String,
+        method: String,
+        args: Vec<TExpr>,
+        ret: Ty,
+    },
     Select {
         cond: Box<TExpr>,
         then: Box<TExpr>,
@@ -226,9 +232,10 @@ impl TExpr {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => Ty::Int,
                 _ => Ty::Bool,
             },
-            TExpr::Call { ret, .. } | TExpr::Virtual { ret, .. } | TExpr::Witness { ret, .. } => {
-                *ret
-            }
+            TExpr::Call { ret, .. }
+            | TExpr::Virtual { ret, .. }
+            | TExpr::Witness { ret, .. }
+            | TExpr::Dispatch { ret, .. } => *ret,
             TExpr::Retain(inner)
             | TExpr::Moved(inner)
             | TExpr::RetainUnowned(inner)
@@ -250,6 +257,7 @@ impl TExpr {
 type TyMap<'a, E> = &'a mut dyn FnMut(Ty) -> Result<Ty, E>;
 type CallMap<'a, E> = &'a mut dyn FnMut(String, Vec<Ty>) -> Result<(String, Vec<Ty>), E>;
 type WitnessMap<'a, E> = &'a mut dyn FnMut(&str, &str, Ty) -> Result<Witnessed, E>;
+type DispatchMap<'a, E> = &'a mut dyn FnMut(&str, &str) -> Result<Option<Vec<(i64, String)>>, E>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Witnessed {
@@ -269,6 +277,7 @@ struct Rewriter<'a, E> {
     ty: TyMap<'a, E>,
     call: CallMap<'a, E>,
     witness: WitnessMap<'a, E>,
+    dispatch: DispatchMap<'a, E>,
 }
 
 impl TFunc {
@@ -278,8 +287,14 @@ impl TFunc {
         ty: TyMap<'_, E>,
         call: CallMap<'_, E>,
         witness: WitnessMap<'_, E>,
+        dispatch: DispatchMap<'_, E>,
     ) -> Result<TFunc, E> {
-        let mut rewriter = Rewriter { ty, call, witness };
+        let mut rewriter = Rewriter {
+            ty,
+            call,
+            witness,
+            dispatch,
+        };
         let ret = (rewriter.ty)(self.ret)?;
         let locals = self
             .locals
@@ -357,6 +372,98 @@ impl<E> Rewriter<'_, E> {
         })
     }
 
+    #[inline(never)]
+    fn witness_expr(
+        &mut self,
+        protocol: &str,
+        method: &str,
+        self_ty: Ty,
+        args: &[TExpr],
+        ret: Ty,
+    ) -> Result<TExpr, E> {
+        let self_ty = (self.ty)(self_ty)?;
+        let ret = (self.ty)(ret)?;
+        let mut args = self.exprs(args)?;
+        Ok(match (self.witness)(protocol, method, self_ty)? {
+            Witnessed::Keep => TExpr::Witness {
+                protocol: protocol.to_string(),
+                method: method.to_string(),
+                self_ty,
+                args,
+                ret,
+            },
+            Witnessed::Call { callee, type_args } => {
+                let (callee, type_args) = (self.call)(callee, type_args)?;
+                TExpr::Call {
+                    callee,
+                    type_args,
+                    args,
+                    ret,
+                }
+            }
+            Witnessed::Operator(op) => {
+                let rhs = args.pop();
+                let lhs = args.pop();
+                match (lhs, rhs) {
+                    (Some(lhs), Some(rhs)) => TExpr::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                    _ => TExpr::Bool(false),
+                }
+            }
+            Witnessed::Virtual { cases, default } => {
+                let mut renamed = Vec::with_capacity(cases.len());
+                for (tag, callee) in cases {
+                    renamed.push((tag, (self.call)(callee, Vec::new())?.0));
+                }
+                TExpr::Virtual {
+                    cases: renamed,
+                    default: (self.call)(default, Vec::new())?.0,
+                    args,
+                    ret,
+                }
+            }
+        })
+    }
+
+    #[inline(never)]
+    fn dispatch_expr(
+        &mut self,
+        protocol: &str,
+        method: &str,
+        args: &[TExpr],
+        ret: Ty,
+    ) -> Result<TExpr, E> {
+        let ret = (self.ty)(ret)?;
+        let args = self.exprs(args)?;
+        let keep = |args: Vec<TExpr>| TExpr::Dispatch {
+            protocol: protocol.to_string(),
+            method: method.to_string(),
+            args,
+            ret,
+        };
+        Ok(match (self.dispatch)(protocol, method)? {
+            None => keep(args),
+            Some(mut cases) => {
+                let Some((_, last)) = cases.pop() else {
+                    return Ok(keep(args));
+                };
+                let mut renamed = Vec::with_capacity(cases.len());
+                for (tag, callee) in cases {
+                    renamed.push((tag, (self.call)(callee, Vec::new())?.0));
+                }
+                TExpr::Virtual {
+                    cases: renamed,
+                    default: (self.call)(last, Vec::new())?.0,
+                    args,
+                    ret,
+                }
+            }
+        })
+    }
+
     fn exprs(&mut self, exprs: &[TExpr]) -> Result<Vec<TExpr>, E> {
         exprs.iter().map(|e| self.expr(e)).collect()
     }
@@ -415,53 +522,13 @@ impl<E> Rewriter<'_, E> {
                 self_ty,
                 args,
                 ret,
-            } => {
-                let self_ty = (self.ty)(*self_ty)?;
-                let ret = (self.ty)(*ret)?;
-                let mut args = self.exprs(args)?;
-                match (self.witness)(protocol, method, self_ty)? {
-                    Witnessed::Keep => TExpr::Witness {
-                        protocol: protocol.clone(),
-                        method: method.clone(),
-                        self_ty,
-                        args,
-                        ret,
-                    },
-                    Witnessed::Call { callee, type_args } => {
-                        let (callee, type_args) = (self.call)(callee, type_args)?;
-                        TExpr::Call {
-                            callee,
-                            type_args,
-                            args,
-                            ret,
-                        }
-                    }
-                    Witnessed::Operator(op) => {
-                        let rhs = args.pop();
-                        let lhs = args.pop();
-                        match (lhs, rhs) {
-                            (Some(lhs), Some(rhs)) => TExpr::Binary {
-                                op,
-                                lhs: Box::new(lhs),
-                                rhs: Box::new(rhs),
-                            },
-                            _ => TExpr::Bool(false),
-                        }
-                    }
-                    Witnessed::Virtual { cases, default } => {
-                        let mut renamed = Vec::with_capacity(cases.len());
-                        for (tag, callee) in cases {
-                            renamed.push((tag, (self.call)(callee, Vec::new())?.0));
-                        }
-                        TExpr::Virtual {
-                            cases: renamed,
-                            default: (self.call)(default, Vec::new())?.0,
-                            args,
-                            ret,
-                        }
-                    }
-                }
-            }
+            } => self.witness_expr(protocol, method, *self_ty, args, *ret)?,
+            TExpr::Dispatch {
+                protocol,
+                method,
+                args,
+                ret,
+            } => self.dispatch_expr(protocol, method, args, *ret)?,
             TExpr::StructInit { ty, args } => TExpr::StructInit {
                 ty: (self.ty)(*ty)?,
                 args: self.exprs(args)?,

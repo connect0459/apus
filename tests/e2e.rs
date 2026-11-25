@@ -3280,9 +3280,9 @@ fn a_protocol_name_cannot_be_reused() {
 }
 
 #[test]
-fn a_protocol_can_only_be_used_as_a_constraint_for_now() {
+fn a_protocol_without_self_requirements_can_be_used_as_a_type() {
     let source = "protocol P {\n  func a() -> Int\n}\nfunc f(_ x: P) { }\nfunc main() { }";
-    assert!(!build_error(source).is_empty());
+    assert_eq!(run(source), "");
 }
 
 const CONTAINER: &str = "protocol Container {\n  associatedtype Item\n  func first() -> Item\n  func count() -> Int\n}\nstruct IntBox: Container {\n  typealias Item = Int\n  var v: Int\n  func first() -> Int { return v }\n  func count() -> Int { return 1 }\n}\nstruct Label: Container {\n  typealias Item = String\n  var text: String\n  func first() -> String { return text }\n  func count() -> Int { return 2 }\n}\n";
@@ -3377,4 +3377,141 @@ fn the_associated_type_is_opaque_inside_a_generic_body() {
 fn an_associated_type_name_cannot_be_declared_twice() {
     let source = "protocol P {\n  associatedtype Item\n  associatedtype Item\n}\nfunc main() { }";
     assert!(build_error(source).contains("Item"));
+}
+
+const PROTOCOL_SHAPES: &str = "protocol Shape {\n  func area() -> Int\n}\nstruct Square: Shape {\n  var side: Int\n  func area() -> Int { return side * side }\n}\nstruct Rect: Shape {\n  var w: Int\n  var h: Int\n  func area() -> Int { return w * h }\n}\nclass Circle: Shape {\n  var r: Int\n  func area() -> Int { return 3 * r * r }\n}\nenum Unit: Shape {\n  case one\n  func area() -> Int { return 1 }\n}\n";
+
+#[test]
+fn a_protocol_value_holds_a_struct_a_class_or_an_enum() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}func main() {{\n  let a: Shape = Square(side: 3)\n  let b: Shape = Rect(w: 2, h: 5)\n  let c: Shape = Circle(r: 2)\n  let d: Shape = Unit.one\n  print(a.area())\n  print(b.area())\n  print(c.area())\n  print(d.area())\n}}"
+    );
+    assert_eq!(run(&source), "9\n10\n12\n1\n");
+}
+
+#[test]
+fn a_function_may_take_and_return_a_protocol_value() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}func show(_ s: Shape) {{ print(s.area()) }}\nfunc make(_ n: Int) -> Shape {{\n  if n == 0 {{ return Square(side: 4) }}\n  return Circle(r: n)\n}}\nfunc main() {{\n  show(Rect(w: 1, h: 7))\n  show(make(0))\n  show(make(3))\n}}"
+    );
+    assert_eq!(run(&source), "7\n16\n27\n");
+}
+
+#[test]
+fn a_protocol_variable_may_hold_a_different_type_after_an_assignment() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}func main() {{\n  var s: Shape = Square(side: 2)\n  print(s.area())\n  s = Circle(r: 1)\n  print(s.area())\n  s = Rect(w: 3, h: 3)\n  print(s.area())\n}}"
+    );
+    assert_eq!(run(&source), "4\n3\n9\n");
+}
+
+#[test]
+fn a_member_and_an_optional_may_have_a_protocol_type() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}struct Frame {{\n  var shape: Shape\n  var id: Int\n}}\nfunc main() {{\n  let f = Frame(shape: Rect(w: 2, h: 2), id: 1)\n  print(f.shape.area() + f.id)\n  var o: Shape? = Square(side: 5)\n  if let s = o {{ print(s.area()) }}\n  o = nil\n  if o == nil {{ print(0) }}\n}}"
+    );
+    assert_eq!(run(&source), "5\n25\n0\n");
+}
+
+#[test]
+fn a_requirement_with_arguments_and_no_result_works_through_a_protocol_value() {
+    let source = "protocol Logger {\n  func log(_ code: Int, times: Int)\n}\nstruct Plain: Logger {\n  var base: Int\n  func log(_ code: Int, times: Int) {\n    var i = 0\n    while i < times {\n      print(base + code)\n      i += 1\n    }\n  }\n}\nfunc main() {\n  let l: Logger = Plain(base: 100)\n  l.log(5, times: 2)\n}";
+    assert_eq!(run(source), "105\n105\n");
+}
+
+#[test]
+fn an_overriding_method_of_a_subclass_is_called_through_a_protocol_value() {
+    let source = "protocol Named {\n  func code() -> Int\n}\nclass Animal: Named {\n  func code() -> Int { return 1 }\n}\nclass Cat: Animal {\n  override func code() -> Int { return 2 }\n}\nfunc main() {\n  let a: Named = Animal()\n  let c: Named = Cat()\n  print(a.code())\n  print(c.code())\n}";
+    assert_eq!(run(source), "1\n2\n");
+}
+
+#[test]
+fn a_class_held_as_a_protocol_value_is_released_with_its_last_reference() {
+    let source = format!(
+        "{TRACKED}protocol Idea {{\n  func code() -> Int\n}}\nclass Thought: Tracked, Idea {{\n  func code() -> Int {{ return 7 }}\n}}\nfunc main() {{\n  var i: Idea = Thought(id: 1)\n  print(i.code())\n  i = Thought(id: 2)\n  print(i.code())\n}}"
+    );
+    assert_eq!(run(&source), "7\n-1\n7\n-2\n");
+}
+
+#[test]
+fn a_boxed_struct_releases_the_class_it_holds() {
+    let source = format!(
+        "{TRACKED}protocol Idea {{\n  func code() -> Int\n}}\nstruct Holder: Idea {{\n  var t: Tracked\n  func code() -> Int {{ return t.id }}\n}}\nfunc main() {{\n  let i: Idea = Holder(t: Tracked(id: 5))\n  print(i.code())\n}}"
+    );
+    assert_eq!(run(&source), "5\n-5\n");
+}
+
+#[test]
+fn a_protocol_value_can_be_tested_and_cast_to_a_class() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}func main() {{\n  let a: Shape = Circle(r: 2)\n  let b: Shape = Square(side: 2)\n  print(a is Circle)\n  print(b is Circle)\n  if let c = a as? Circle {{ print(c.r) }}\n}}"
+    );
+    assert_eq!(run(&source), "true\nfalse\n2\n");
+}
+
+#[test]
+fn a_type_that_does_not_conform_cannot_become_a_protocol_value() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}struct Other {{\n  var x: Int\n}}\nfunc main() {{\n  let s: Shape = Other(x: 1)\n}}"
+    );
+    assert!(build_error(&source).contains("Shape"));
+}
+
+#[test]
+fn a_protocol_with_an_associated_type_cannot_be_used_as_a_type() {
+    let source = format!("{CONTAINER}func f(_ c: Container) {{ }}\nfunc main() {{ }}");
+    assert!(build_error(&source).contains("constraint"));
+}
+
+#[test]
+fn a_protocol_that_mentions_self_cannot_be_used_as_a_type() {
+    let source = "protocol Joinable {\n  func join(_ other: Self) -> Int\n}\nfunc f(_ j: Joinable) { }\nfunc main() { }";
+    assert!(build_error(source).contains("constraint"));
+    let standard = "func f(_ e: Equatable) { }\nfunc main() { }";
+    assert!(build_error(standard).contains("constraint"));
+}
+
+#[test]
+fn a_mutating_requirement_cannot_be_called_through_a_protocol_value() {
+    let source = "protocol Counter {\n  mutating func bump()\n}\nstruct Tally: Counter {\n  var n: Int\n  mutating func bump() { n += 1 }\n}\nfunc main() {\n  var c: Counter = Tally(n: 0)\n  c.bump()\n}";
+    assert!(build_error(source).contains("mutating"));
+}
+
+#[test]
+fn a_generic_type_cannot_become_a_protocol_value_yet() {
+    let source = "protocol Holder {\n  func get() -> Int\n}\nstruct Box<T>: Holder {\n  var v: T\n  func get() -> Int { return 1 }\n}\nfunc main() {\n  let h: Holder = Box(v: 1)\n}";
+    assert!(!build_error(source).is_empty());
+}
+
+#[test]
+fn a_method_that_is_not_a_requirement_cannot_be_called_on_a_protocol_value() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}func main() {{\n  let s: Shape = Square(side: 1)\n  print(s.side)\n}}"
+    );
+    assert!(!build_error(&source).is_empty());
+    let method = format!(
+        "{PROTOCOL_SHAPES}func main() {{\n  let s: Shape = Square(side: 1)\n  print(s.perimeter())\n}}"
+    );
+    assert!(build_error(&method).contains("perimeter"));
+}
+
+#[test]
+fn a_protocol_value_does_not_satisfy_a_constraint_yet() {
+    let source = format!(
+        "{PROTOCOL_SHAPES}func area_of<T: Shape>(_ s: T) -> Int {{ return s.area() }}\nfunc main() {{\n  let s: Shape = Square(side: 1)\n  print(area_of(s))\n}}"
+    );
+    assert!(build_error(&source).contains("conform"));
+}
+
+#[test]
+fn calling_a_requirement_of_a_protocol_nobody_conforms_to_is_rejected() {
+    let source = "protocol P {\n  func a() -> Int\n}\nfunc f(_ x: P) -> Int { return x.a() }\nfunc main() { }";
+    assert!(build_error(source).contains("conform"));
+}
+
+#[test]
+fn a_cast_to_a_protocol_is_rejected() {
+    let source =
+        format!("{PROTOCOL_SHAPES}func main() {{\n  let c = Circle(r: 1)\n  print(c is Shape)\n}}");
+    assert!(!build_error(&source).is_empty());
 }

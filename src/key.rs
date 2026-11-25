@@ -247,6 +247,21 @@ impl Encoder<'_> {
                     self.expr(arg);
                 }
             }
+            TExpr::Dispatch {
+                protocol,
+                method,
+                args,
+                ret,
+            } => {
+                self.tag(54);
+                self.str(protocol);
+                self.str(method);
+                self.ty(*ret);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
             TExpr::Witness {
                 protocol,
                 method,

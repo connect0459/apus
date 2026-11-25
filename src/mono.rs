@@ -1,14 +1,22 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::BinOp;
-use crate::check::equality_function;
-use crate::sigs::{COMPARABLE, EQUATABLE, Signatures};
+use crate::check::{boxed_requirement, equality_function};
+use crate::sigs::{COMPARABLE, Conformer, EQUATABLE, Signatures};
 use crate::tir::{TFunc, Witnessed};
 use crate::types::Ty;
 
 const INSTANCE_LIMIT: usize = 2000;
 const EQUAL: &str = "$equal";
+
+fn note_dependency(direct: &RefCell<Vec<usize>>, id: usize) {
+    let mut direct = direct.borrow_mut();
+    if !direct.contains(&id) {
+        direct.push(id);
+    }
+}
 
 fn resolve_witness(
     sigs: &Signatures,
@@ -99,26 +107,99 @@ impl<'a> Instantiator<'a> {
     }
 
     pub fn resolve(&mut self, func: &TFunc) -> Result<(TFunc, Vec<usize>), String> {
-        let mut direct: Vec<usize> = Vec::new();
+        let direct: RefCell<Vec<usize>> = RefCell::new(Vec::new());
         let sigs = self.sigs;
+        let me = RefCell::new(&mut *self);
         let rewritten = {
             let mut ty = |t: Ty| Ok::<Ty, String>(t);
             let mut call = |callee: String, type_args: Vec<Ty>| {
                 if type_args.is_empty() {
                     return Ok((callee, type_args));
                 }
-                let id = self.instance_for(&callee, &type_args)?;
-                if !direct.contains(&id) {
-                    direct.push(id);
-                }
-                Ok((self.funcs[id].name().to_string(), Vec::new()))
+                let mut me = me.borrow_mut();
+                let id = me.instance_for(&callee, &type_args)?;
+                note_dependency(&direct, id);
+                Ok((me.funcs[id].name().to_string(), Vec::new()))
             };
             let mut witness = |protocol: &str, method: &str, self_ty: Ty| {
                 resolve_witness(sigs, protocol, method, self_ty)
             };
-            func.rewrite(func.name().to_string(), &mut ty, &mut call, &mut witness)?
+            let mut dispatch = |protocol: &str, method: &str| {
+                me.borrow_mut()
+                    .dispatch_cases(protocol, method, &direct)
+                    .map(Some)
+            };
+            func.rewrite(
+                func.name().to_string(),
+                &mut ty,
+                &mut call,
+                &mut witness,
+                &mut dispatch,
+            )?
         };
-        Ok((rewritten, direct))
+        Ok((rewritten, direct.into_inner()))
+    }
+
+    fn dispatch_cases(
+        &mut self,
+        protocol: &str,
+        method: &str,
+        direct: &RefCell<Vec<usize>>,
+    ) -> Result<Vec<(i64, String)>, String> {
+        let sigs = self.sigs;
+        let conformers = sigs
+            .existential_conformers(protocol)
+            .map_err(|e| e.message().to_string())?;
+        if conformers.is_empty() {
+            return Err(format!("no type conforms to the protocol '{protocol}'"));
+        }
+        let tag = |ty: Ty| match ty {
+            Ty::Class(id) => i64::try_from(id.index()).unwrap_or(i64::MAX),
+            _ => -1,
+        };
+        let mut cases = Vec::with_capacity(conformers.len());
+        for conformer in conformers {
+            match conformer {
+                Conformer::Class(ty) => {
+                    let callee = sigs.resolve_method(ty, method).ok_or_else(|| {
+                        format!("'{}' has no method '{method}'", sigs.type_name(ty))
+                    })?;
+                    cases.push((tag(ty), callee));
+                }
+                Conformer::Boxed { value, boxed } => {
+                    let id = self.boxed_instance(value, boxed, method)?;
+                    note_dependency(direct, id);
+                    cases.push((tag(boxed), self.funcs[id].name().to_string()));
+                }
+            }
+        }
+        Ok(cases)
+    }
+
+    fn boxed_instance(&mut self, value: Ty, boxed: Ty, method: &str) -> Result<usize, String> {
+        let sigs = self.sigs;
+        let name = format!("$box<{}>.{method}", sigs.type_name(value));
+        if let Some(id) = self.ids.get(&name) {
+            return Ok(*id);
+        }
+        if self.funcs.len() >= INSTANCE_LIMIT {
+            return Err(format!(
+                "too many generic instances while creating '{name}'"
+            ));
+        }
+        let qualified = sigs
+            .resolve_method(value, method)
+            .ok_or_else(|| format!("'{}' has no method '{method}'", sigs.type_name(value)))?;
+        let func = boxed_requirement(sigs, name.clone(), boxed, value, &qualified)
+            .map_err(|e| e.message().to_string())?;
+        let id = self.funcs.len();
+        self.ids.insert(name, id);
+        self.funcs.push(func.clone());
+        self.deps.push(Vec::new());
+        let (rewritten, direct) = self.resolve(&func)?;
+        self.funcs[id] = rewritten;
+        self.deps[id] = direct;
+        Ok(id)
     }
 
     fn instance_for(&mut self, callee: &str, args: &[Ty]) -> Result<usize, String> {
@@ -149,8 +230,14 @@ impl<'a> Instantiator<'a> {
         };
         let mut keep = |c: String, a: Vec<Ty>| Ok::<_, String>((c, a));
         let mut keep_witness = |_: &str, _: &str, _: Ty| Ok::<_, String>(Witnessed::Keep);
-        let substituted =
-            generic.rewrite(mangled.clone(), &mut ty, &mut keep, &mut keep_witness)?;
+        let mut keep_dispatch = |_: &str, _: &str| Ok::<_, String>(None);
+        let substituted = generic.rewrite(
+            mangled.clone(),
+            &mut ty,
+            &mut keep,
+            &mut keep_witness,
+            &mut keep_dispatch,
+        )?;
         let id = self.funcs.len();
         self.ids.insert(mangled, id);
         self.funcs.push(substituted.clone());

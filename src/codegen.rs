@@ -1014,7 +1014,7 @@ impl Emitter<'_, '_> {
 
     fn expr(&mut self, expr: &TExpr) -> GResult<Option<Value>> {
         let value = match expr {
-            TExpr::Witness { .. } => {
+            TExpr::Witness { .. } | TExpr::Dispatch { .. } => {
                 return Err(CodegenError::from(
                     "a protocol requirement was not resolved",
                 ));
