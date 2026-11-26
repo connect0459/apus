@@ -1092,6 +1092,7 @@ impl Parser<'_> {
                 | ExprKind::Index { .. }
                 | ExprKind::IndexDefault { .. }
                 | ExprKind::OptionalChain { .. }
+                | ExprKind::Tuple(..)
         ) {
             return self
                 .fail("the left side of an assignment must be a variable, a member or an element");

@@ -6807,3 +6807,37 @@ fn tuple_labels_are_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_tuple_of_places_is_assigned_from_a_tuple_at_once() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var y: Int\n}\nfunc fib(_ n: Int) -> Int {\n  var (a, b) = (0, 1)\n  var i = 0\n  while i < n {\n    (a, b) = (b, a + b)\n    i += 1\n  }\n  return a\n}\nfunc main() {\n  var a = 1\n  var b = 2\n  (a, b) = (b, a)\n  print(a * 10 + b)\n  print(fib(10))\n  var p = P(x: 1, y: 2)\n  (p.x, p.y) = (p.y, p.x)\n  print(p.x * 10 + p.y)\n  var xs = [1, 2, 3]\n  (xs[0], xs[2]) = (xs[2], xs[0])\n  print(xs[0] * 100 + xs[1] * 10 + xs[2])\n  var s = \"a\"\n  var n = 0\n  (s, _) = (\"b\", 5)\n  (n, _) = (7, \"ignored\")\n  print(s)\n  print(n)\n  let pair = (4, 5)\n  (a, b) = pair\n  print(a + b)\n}"
+        ),
+        "21\n55\n21\n321\nb\n7\n9\n"
+    );
+}
+
+#[test]
+fn a_tuple_assignment_is_checked() {
+    for (body, message) in [
+        ("var a = 1\n  var b = 2\n  (a, b) = 5", "is not a tuple"),
+        (
+            "var a = 1\n  var b = 2\n  (a, b) = (1, 2, 3)",
+            "assigns 2 element(s), but the tuple has 3",
+        ),
+        (
+            "var a = 1\n  var b = 2\n  (a, b) += (1, 2)",
+            "compound operator",
+        ),
+        ("let a = 1\n  var b = 2\n  (a, b) = (3, 4)", "constant"),
+        (
+            "var a = 1\n  var b = 2\n  (a, b) = (\"s\", 2)",
+            "expected Int",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

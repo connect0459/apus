@@ -2881,6 +2881,11 @@ impl<'a> FnCx<'a> {
                 mutable,
                 init,
             } => self.let_tuple(stmt.line(), names, *mutable, init, out),
+            StmtKind::Assign { target, op, value }
+                if matches!(target.kind(), ExprKind::Tuple(..)) =>
+            {
+                self.assign_tuple(stmt.line(), target, *op, value, out)
+            }
             StmtKind::Switch { subject, cases } => {
                 let mut lowered = Vec::new();
                 self.in_target(TargetKind::Switch, |cx| {
@@ -5884,6 +5889,59 @@ impl<'a> FnCx<'a> {
             line,
         )?;
         Ok(TExpr::StructInit { ty, args: values })
+    }
+
+    fn assign_tuple(
+        &mut self,
+        line: u32,
+        target: &Expr,
+        op: Option<BinOp>,
+        value: &Expr,
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let ExprKind::Tuple(targets, _) = target.kind() else {
+            return Ok(());
+        };
+        if op.is_some() {
+            return Err(CheckError::at(
+                line,
+                "a tuple can only be assigned with '=', not with a compound operator",
+            ));
+        }
+        let held = self.value(value)?;
+        let Some(elements) = self.sigs.tuple_elements(held.ty()) else {
+            return Err(CheckError::at(
+                line,
+                format!("{} is not a tuple", self.name_of(held.ty())),
+            ));
+        };
+        if elements.len() != targets.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "this assigns {} element(s), but the tuple has {}",
+                    targets.len(),
+                    elements.len()
+                ),
+            ));
+        }
+        let name = format!("$assign{}", self.locals.len());
+        let local = self.declare(line, &name, held.ty(), false)?;
+        out.push(TStmt::Let { local, init: held });
+        for (index, place) in targets.iter().enumerate() {
+            if matches!(place.kind(), ExprKind::Ident(n) if n == "_") {
+                continue;
+            }
+            let part = Expr::new(
+                line,
+                ExprKind::Member {
+                    base: Box::new(Expr::new(line, ExprKind::Ident(name.clone()))),
+                    name: index.to_string(),
+                },
+            );
+            out.push(self.assign(line, place, None, &part)?);
+        }
+        Ok(())
     }
 
     fn let_tuple(
