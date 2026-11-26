@@ -317,7 +317,7 @@ fn clif_type(ty: Ty) -> Option<Type> {
             Some(types::I64)
         }
         Ty::Bool => Some(types::I8),
-        Ty::Void | Ty::Param(_) | Ty::Assoc(_) => None,
+        Ty::Void | Ty::Param(_) | Ty::Assoc(_) | Ty::Tag(_) => None,
     }
 }
 
@@ -2721,6 +2721,7 @@ impl Emitter<'_, '_> {
                     field_offset(HEADER_SLOTS + 2 + index),
                 )
             }
+            TExpr::Retag(inner, _) => self.value(inner)?,
             TExpr::EnvCount(env) => {
                 let env = self.value(env)?;
                 self.builder.ins().load(

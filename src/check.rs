@@ -1699,7 +1699,11 @@ pub fn pairs_function(
         (
             None,
             left_elem,
-            sigs.tuple_of(vec![Ty::Int, left_elem], 0)?,
+            sigs.tuple_of_labeled(
+                vec![Ty::Int, left_elem],
+                &[Some("offset".to_string()), Some("element".to_string())],
+                0,
+            )?,
             1,
         )
     } else {
@@ -2714,6 +2718,21 @@ impl<'a> FnCx<'a> {
         let found = value.ty();
         if expected == found || self.sigs.is_subclass(found, expected) {
             return Ok(value);
+        }
+        if let (Some(wanted), Some(have)) = (
+            self.sigs.tuple_elements(expected),
+            self.sigs.tuple_elements(found),
+        ) && wanted == have
+            && let (Some(to), Some(from)) = (
+                self.sigs.tuple_labels(expected),
+                self.sigs.tuple_labels(found),
+            )
+            && to
+                .iter()
+                .zip(&from)
+                .all(|(a, b)| a == b || a.is_none() || b.is_none())
+        {
+            return Ok(TExpr::Retag(Box::new(value), expected));
         }
         if let Some(protocol) = self.sigs.existential_protocol(expected)
             && !found.is_class()
@@ -4783,6 +4802,17 @@ impl<'a> FnCx<'a> {
     }
 
     fn member_of(&self, line: u32, ty: Ty, name: &str) -> CResult<(usize, FieldSig)> {
+        let position;
+        let name = match self.sigs.tuple_labels(ty) {
+            Some(labels) => match labels.iter().position(|l| l.as_deref() == Some(name)) {
+                Some(index) => {
+                    position = index.to_string();
+                    position.as_str()
+                }
+                None => name,
+            },
+            None => name,
+        };
         let (Ty::Struct(id) | Ty::Class(id)) = ty else {
             return Err(CheckError::at(
                 line,
@@ -4924,7 +4954,11 @@ impl<'a> FnCx<'a> {
             if !args.is_empty() {
                 return Err(CheckError::at(line, "enumerated takes no arguments"));
             }
-            let tuple = self.sigs.tuple_of(vec![Ty::Int, elem], line)?;
+            let tuple = self.sigs.tuple_of_labeled(
+                vec![Ty::Int, elem],
+                &[Some("offset".to_string()), Some("element".to_string())],
+                line,
+            )?;
             let ret = self.sigs.array_of(tuple, line)?;
             return Ok(TExpr::Call {
                 callee: ENUMERATED.to_string(),
@@ -5809,10 +5843,32 @@ impl<'a> FnCx<'a> {
         })
     }
 
-    fn tuple_literal(&mut self, line: u32, items: &[Expr], expected: Option<Ty>) -> CResult<TExpr> {
+    fn tuple_literal(
+        &mut self,
+        line: u32,
+        items: &[Expr],
+        labels: &[Option<String>],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
         let hint = expected
             .and_then(|ty| self.sigs.tuple_elements(ty))
             .filter(|elements| elements.len() == items.len());
+        let mut final_labels = labels.to_vec();
+        if hint.is_some()
+            && let Some(wanted) = expected.and_then(|ty| self.sigs.tuple_labels(ty))
+        {
+            for (written, declared) in labels.iter().zip(&wanted) {
+                if let (Some(a), Some(b)) = (written, declared)
+                    && a != b
+                {
+                    return Err(CheckError::at(
+                        line,
+                        format!("the tuple label '{a}' does not match the expected label '{b}'"),
+                    ));
+                }
+            }
+            final_labels = wanted;
+        }
         let mut values = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             self.expected = hint.as_ref().map(|h| h[index]);
@@ -5822,9 +5878,11 @@ impl<'a> FnCx<'a> {
             }
             values.push(value);
         }
-        let ty = self
-            .sigs
-            .tuple_of(values.iter().map(TExpr::ty).collect(), line)?;
+        let ty = self.sigs.tuple_of_labeled(
+            values.iter().map(TExpr::ty).collect(),
+            &final_labels,
+            line,
+        )?;
         Ok(TExpr::StructInit { ty, args: values })
     }
 
@@ -7683,6 +7741,15 @@ impl<'a> FnCx<'a> {
                         args: vec![lhs, rhs],
                     });
                 }
+                let rhs = if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && self.sigs.tuple_elements(lhs.ty()).is_some()
+                    && self.sigs.tuple_elements(rhs.ty()).is_some()
+                    && lhs.ty() != rhs.ty()
+                {
+                    self.coerce(line, lhs.ty(), rhs)?
+                } else {
+                    rhs
+                };
                 self.operands(line, *op, lhs.ty(), rhs.ty())?;
                 if matches!(op, BinOp::Eq | BinOp::Ne) && lhs.ty().is_struct() {
                     return self.struct_equality(line, *op, lhs, rhs);
@@ -7764,7 +7831,7 @@ impl<'a> FnCx<'a> {
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
             ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
-            ExprKind::Tuple(items) => self.tuple_literal(line, items, expected),
+            ExprKind::Tuple(items, labels) => self.tuple_literal(line, items, labels, expected),
             ExprKind::Apply { func, args } => {
                 let target = self.value(func)?;
                 self.apply_value(line, "function", target, None, args)

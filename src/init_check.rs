@@ -483,7 +483,7 @@ impl Scan<'_> {
                 self.expr_uses_self(subject) || self.expr_uses_self(link)
             }
             ExprKind::Cast { expr, .. } => self.expr_uses_self(expr),
-            ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items) => {
+            ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items, _) => {
                 items.iter().any(|e| self.expr_uses_self(e))
             }
             ExprKind::DictLiteral(pairs) => pairs

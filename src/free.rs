@@ -109,7 +109,7 @@ fn expression(expr: &Expr, found: &mut Vec<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Str(_)
         | ExprKind::GenericName { .. } => {}
-        ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items) => {
+        ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items, _) => {
             items.iter().for_each(|e| expression(e, found))
         }
         ExprKind::DictLiteral(pairs) => {

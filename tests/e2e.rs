@@ -6767,3 +6767,43 @@ fn a_weak_capture_may_name_the_value_it_holds() {
         "6\n6\n"
     );
 }
+
+#[test]
+fn a_tuple_member_is_read_and_assigned_by_label() {
+    assert_eq!(
+        run(
+            "func bounds(_ xs: [Int]) -> (min: Int, max: Int) {\n  var lo = xs[0]\n  var hi = xs[0]\n  for x in xs {\n    if x < lo { lo = x }\n    if x > hi { hi = x }\n  }\n  return (min: lo, max: hi)\n}\nfunc main() {\n  let r = bounds([3, 9, 1, 4])\n  print(r.min)\n  print(r.max)\n  print(r.0 + r.1)\n  var p = (x: 1, y: 2)\n  p.x = 10\n  p.y += 5\n  print(p.x * 100 + p.y)\n  let (a, b) = p\n  print(a + b)\n  let named: (id: Int, name: String) = (id: 7, name: \"seven\")\n  print(named.name)\n  for (i, n) in [\"a\", \"b\"].enumerated() { print(String(i) + n) }\n  let e = [5, 6].enumerated()\n  print(e[1].offset + e[1].element)\n}"
+        ),
+        "1\n9\n10\n1007\n17\nseven\n0a\n1b\n7\n"
+    );
+}
+
+#[test]
+fn labeled_and_unlabeled_tuples_convert_where_the_labels_agree() {
+    assert_eq!(
+        run(
+            "func pair() -> (Int, Int) { return (x: 1, y: 2) }\nfunc named(_ p: (a: Int, b: Int)) -> Int { return p.a * 10 + p.b }\nfunc main() {\n  let plain: (Int, Int) = (x: 3, y: 4)\n  print(plain.0 + plain.1)\n  let labeled: (x: Int, y: Int) = (5, 6)\n  print(labeled.y)\n  let p = pair()\n  print(p.1)\n  print(named((7, 8)))\n  print(named((a: 1, b: 2)))\n  let u = (1, 2)\n  let again: (first: Int, second: Int) = u\n  print(again.second)\n  print((x: 1, y: 2) == (1, 2))\n}"
+        ),
+        "7\n6\n2\n78\n12\n2\ntrue\n"
+    );
+}
+
+#[test]
+fn tuple_labels_are_checked() {
+    for (body, message) in [
+        ("let t = (x: 1, y: 2)\n  print(t.z)", "has no member 'z'"),
+        (
+            "let t: (a: Int, b: Int) = (x: 1, y: 2)",
+            "does not match the expected label",
+        ),
+        ("let t = (x: 1)", "at least two elements"),
+        (
+            "let u: (a: Int, b: Int) = (1, 2)\n  let v: (c: Int, d: Int) = u",
+            "expected",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

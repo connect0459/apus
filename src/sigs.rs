@@ -108,7 +108,7 @@ fn table_fields() -> Vec<Field> {
 }
 
 fn tuple_decl(count: usize) -> StructDecl {
-    let generics: Vec<String> = (0..count).map(|i| format!("T{i}")).collect();
+    let mut generics: Vec<String> = (0..count).map(|i| format!("T{i}")).collect();
     let fields = generics
         .iter()
         .enumerate()
@@ -116,6 +116,7 @@ fn tuple_decl(count: usize) -> StructDecl {
             Field::new(index.to_string(), true, TypeRef::from(generic.as_str()))
         })
         .collect();
+    generics.extend((0..count).map(|i| format!("L{i}")));
     StructDecl::new(0, format!("$Tuple{count}"), fields).with_generics(generics)
 }
 
@@ -494,6 +495,8 @@ struct Instances {
     existentials: HashMap<String, StructId>,
     funcs: Vec<(Vec<Ty>, Ty)>,
     func_index: HashMap<(Vec<Ty>, Ty), usize>,
+    labels: Vec<String>,
+    label_index: HashMap<String, usize>,
     closures: HashMap<String, Rc<TFunc>>,
 }
 
@@ -1739,6 +1742,22 @@ impl Signatures {
             };
             return Ok(self.func_ty(params, ret));
         }
+        if let Some(rest) = name.strip_prefix("$Tuple") {
+            let labels: Vec<Option<String>> = match rest.split_once('(') {
+                Some((_, labels)) => labels
+                    .trim_end_matches(')')
+                    .split(',')
+                    .map(|l| (!l.is_empty()).then(|| l.to_string()))
+                    .collect(),
+                None => vec![None; tr.args().len()],
+            };
+            let elements = tr
+                .args()
+                .iter()
+                .map(|arg| self.resolve_type(arg, scope, line))
+                .collect::<CResult<Vec<_>>>()?;
+            return self.tuple_of_labeled(elements, &labels, line);
+        }
         if let Some((_, ty)) = scope.iter().find(|(n, _)| n == name) {
             return self.reject_args(args_given, name, line).map(|()| *ty);
         }
@@ -2406,7 +2425,18 @@ impl Signatures {
             return format!("{}?", self.display(inner, scope));
         }
         if let Some(elements) = self.tuple_elements(ty) {
-            let shown: Vec<String> = elements.iter().map(|e| self.display(*e, scope)).collect();
+            let labels = self.tuple_labels(ty).unwrap_or_default();
+            let shown: Vec<String> = elements
+                .iter()
+                .enumerate()
+                .map(|(index, e)| {
+                    let text = self.display(*e, scope);
+                    match labels.get(index).cloned().flatten() {
+                        Some(label) => format!("{label}: {text}"),
+                        None => text,
+                    }
+                })
+                .collect();
             return format!("({})", shown.join(", "));
         }
         if let Some((params, ret)) = self.func_parts(ty) {
@@ -2454,6 +2484,13 @@ impl Signatures {
                 .enum_sig(id)
                 .map_or_else(String::new, |e| e.name.clone()),
             Ty::Func(_) => "function".to_string(),
+            Ty::Tag(index) => self
+                .instances
+                .borrow()
+                .labels
+                .get(index)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
@@ -2476,15 +2513,64 @@ impl Signatures {
         }
     }
 
+    pub fn label_tag(&self, label: Option<&str>) -> Ty {
+        let Some(text) = label.filter(|l| !l.is_empty()) else {
+            return Ty::Tag(0);
+        };
+        let mut instances = self.instances.borrow_mut();
+        if instances.labels.is_empty() {
+            instances.labels.push(String::new());
+        }
+        if let Some(index) = instances.label_index.get(text) {
+            return Ty::Tag(*index);
+        }
+        let index = instances.labels.len();
+        instances.labels.push(text.to_string());
+        instances.label_index.insert(text.to_string(), index);
+        Ty::Tag(index)
+    }
+
     pub fn tuple_of(&self, elements: Vec<Ty>, line: u32) -> CResult<Ty> {
+        let labels = vec![None; elements.len()];
+        self.tuple_of_labeled(elements, &labels, line)
+    }
+
+    pub fn tuple_of_labeled(
+        &self,
+        elements: Vec<Ty>,
+        labels: &[Option<String>],
+        line: u32,
+    ) -> CResult<Ty> {
         let def = TUPLE_DEF + elements.len().saturating_sub(2);
-        let id = self.instantiate_struct(def, elements, &[], line)?;
+        let mut args = elements;
+        args.extend(labels.iter().map(|l| self.label_tag(l.as_deref())));
+        let id = self.instantiate_struct(def, args, &[], line)?;
         Ok(self.struct_ty(def, id))
     }
 
     pub fn tuple_elements(&self, ty: Ty) -> Option<Vec<Ty>> {
         match self.origin_of(ty)? {
-            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => Some(args),
+            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => {
+                Some(args[..args.len() / 2].to_vec())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn tuple_labels(&self, ty: Ty) -> Option<Vec<Option<String>>> {
+        match self.origin_of(ty)? {
+            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => {
+                let instances = self.instances.borrow();
+                Some(
+                    args[args.len() / 2..]
+                        .iter()
+                        .map(|tag| match tag {
+                            Ty::Tag(index) if *index > 0 => instances.labels.get(*index).cloned(),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            }
             _ => None,
         }
     }

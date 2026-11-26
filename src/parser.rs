@@ -115,9 +115,9 @@ fn expr_as_type(expr: &Expr) -> Option<TypeRef> {
         ExprKind::GenericName { name, type_args } => {
             Some(TypeRef::new(name.clone(), type_args.clone()))
         }
-        ExprKind::Tuple(items) => {
+        ExprKind::Tuple(items, labels) => {
             let parts: Option<Vec<TypeRef>> = items.iter().map(expr_as_type).collect();
-            Some(TypeRef::new(format!("$Tuple{}", items.len()), parts?))
+            Some(TypeRef::new(tuple_type_name(items.len(), labels), parts?))
         }
         ExprKind::ArrayLiteral(items) => match items.as_slice() {
             [element] => Some(TypeRef::new(
@@ -301,19 +301,28 @@ impl Parser<'_> {
         self.expect_punct("(")?;
         self.enter()?;
         let mut parts = Vec::new();
+        let mut labels = Vec::new();
         while !self.is_punct(")") {
             if !parts.is_empty() {
                 self.expect_punct(",")?;
+            }
+            let labeled = self.peek_name().is_some()
+                && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":");
+            if labeled {
+                labels.push(Some(self.name()?));
+                self.expect_punct(":")?;
+            } else {
+                labels.push(None);
             }
             parts.push(self.type_ref()?);
         }
         self.leave();
         self.expect_punct(")")?;
-        if !self.is_punct("->") && parts.len() == 1 {
+        if !self.is_punct("->") && parts.len() == 1 && labels[0].is_none() {
             return Ok(parts.remove(0));
         }
         if !self.is_punct("->") && (2..=4).contains(&parts.len()) {
-            return Ok(TypeRef::new(format!("$Tuple{}", parts.len()), parts));
+            return Ok(TypeRef::new(tuple_type_name(parts.len(), &labels), parts));
         }
         self.expect_punct("->")?;
         parts.push(self.type_ref()?);
@@ -1474,6 +1483,17 @@ impl Parser<'_> {
         parsed
     }
 
+    fn tuple_label(&mut self) -> Option<String> {
+        let labeled = self.peek_name().is_some()
+            && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":");
+        if !labeled {
+            return None;
+        }
+        let label = self.peek_name().map(str::to_string);
+        self.pos += 2;
+        label
+    }
+
     fn closure_signature(
         &mut self,
         allow_empty: bool,
@@ -1774,10 +1794,14 @@ impl Parser<'_> {
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;
                 self.enter()?;
+                let mut labels = Vec::new();
+                let first_label = self.tuple_label();
+                labels.push(first_label);
                 let inner = self.expr();
                 let mut rest = Vec::new();
                 if inner.is_ok() {
                     while self.eat_punct(",") {
+                        labels.push(self.tuple_label());
                         match self.expr() {
                             Ok(next) => rest.push(next),
                             Err(error) => {
@@ -1790,15 +1814,18 @@ impl Parser<'_> {
                 self.leave();
                 let inner = inner?;
                 self.expect_punct(")")?;
-                if rest.is_empty() {
+                if rest.is_empty() && labels[0].is_none() {
                     return Ok(inner);
+                }
+                if rest.is_empty() {
+                    return self.fail("a tuple has at least two elements");
                 }
                 if rest.len() > 3 {
                     return self.fail("a tuple has at most four elements");
                 }
                 let mut items = vec![inner];
                 items.extend(rest);
-                return Ok(Expr::new(line, ExprKind::Tuple(items)));
+                return Ok(Expr::new(line, ExprKind::Tuple(items, labels)));
             }
             _ => return self.fail("expected an expression"),
         };

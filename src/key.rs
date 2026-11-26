@@ -52,6 +52,7 @@ impl Encoder<'_> {
             Ty::Void => self.tag(4),
             Ty::Enum(_) => self.tag(6),
             Ty::Func(_) => self.tag(11),
+            Ty::Tag(_) => self.tag(12),
             Ty::Param(index) => {
                 self.tag(7);
                 self.usize(index);
@@ -304,6 +305,11 @@ impl Encoder<'_> {
                 self.tag(59);
                 self.expr(object);
                 self.expr(class);
+            }
+            TExpr::Retag(inner, ty) => {
+                self.tag(69);
+                self.expr(inner);
+                self.ty(*ty);
             }
             TExpr::EnvCount(env) => {
                 self.tag(68);

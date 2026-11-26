@@ -603,6 +603,9 @@ impl Pass<'_> {
     }
 
     fn is_owned(&self, expr: &TExpr) -> bool {
+        if let TExpr::Retag(inner, _) = expr {
+            return self.is_owned(inner);
+        }
         if let TExpr::Field { base, index, .. } = expr {
             return self.is_unowned_field(base.ty(), *index)
                 || self.is_weak_field(base.ty(), *index);
@@ -681,6 +684,7 @@ impl Pass<'_> {
                 args: self.borrowed_all(args),
             },
             TExpr::EnvCount(env) => TExpr::EnvCount(Box::new(self.borrowed(env))),
+            TExpr::Retag(inner, ty) => TExpr::Retag(Box::new(self.expr(inner)), *ty),
             TExpr::Closure {
                 func,
                 type_args,

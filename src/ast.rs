@@ -1,3 +1,11 @@
+pub fn tuple_type_name(count: usize, labels: &[Option<String>]) -> String {
+    if labels.iter().all(Option::is_none) {
+        return format!("$Tuple{count}");
+    }
+    let shown: Vec<&str> = labels.iter().map(|l| l.as_deref().unwrap_or("")).collect();
+    format!("$Tuple{count}({})", shown.join(","))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeRef {
     name: String,
@@ -732,7 +740,7 @@ fn depth_of(kind: &ExprKind) -> u32 {
         | ExprKind::Ident(_)
         | ExprKind::GenericName { .. } => 0,
         ExprKind::ImplicitMember { args, .. } => args.as_deref().map_or(0, deepest),
-        ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items) => {
+        ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items, _) => {
             items.iter().map(|e| e.depth).max().unwrap_or(0)
         }
         ExprKind::DictLiteral(pairs) => pairs
@@ -982,7 +990,7 @@ pub enum ExprKind {
         func: Box<Expr>,
         args: Vec<Arg>,
     },
-    Tuple(Vec<Expr>),
+    Tuple(Vec<Expr>, Vec<Option<String>>),
     Closure(Box<ClosureExpr>),
 }
 

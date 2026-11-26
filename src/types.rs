@@ -37,6 +37,7 @@ pub enum Ty {
     Param(usize),
     Assoc(usize),
     Func(usize),
+    Tag(usize),
 }
 
 impl Ty {

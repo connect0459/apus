@@ -508,6 +508,7 @@ pub enum TExpr {
         drop: String,
     },
     EnvCount(Box<TExpr>),
+    Retag(Box<TExpr>, Ty),
     CallValue {
         func: Box<TExpr>,
         args: Vec<TExpr>,
@@ -576,7 +577,10 @@ impl TExpr {
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::Then { value, .. } => value.ty(),
             TExpr::HashMix { .. } | TExpr::EnvCount(_) => Ty::Int,
-            TExpr::Closure { ty, .. } | TExpr::EnvCell { ty, .. } | TExpr::Capture(_, ty) => *ty,
+            TExpr::Closure { ty, .. }
+            | TExpr::EnvCell { ty, .. }
+            | TExpr::Capture(_, ty)
+            | TExpr::Retag(_, ty) => *ty,
             TExpr::CallValue { ret, .. } => *ret,
             TExpr::DictOp { ty, .. } => *ty,
             TExpr::FuncAddr(_) | TExpr::ClassDesc(_) | TExpr::Descriptor(_) => Ty::Int,
@@ -981,6 +985,7 @@ impl<E> Rewriter<'_, E> {
                 ty: (self.ty)(*ty)?,
             },
             TExpr::EnvCount(env) => TExpr::EnvCount(Box::new(self.expr(env)?)),
+            TExpr::Retag(inner, ty) => TExpr::Retag(Box::new(self.expr(inner)?), (self.ty)(*ty)?),
             TExpr::Closure {
                 func,
                 type_args,
