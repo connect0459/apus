@@ -249,17 +249,26 @@ impl Parser<'_> {
     }
 
     fn type_ref(&mut self) -> PResult<TypeRef> {
-        let mut name = self.name()?;
-        if self.is_punct(".") && !self.on_new_line_before_dot() {
-            self.pos += 1;
-            name = format!("{name}.{}", self.name()?);
-        }
-        let args = if self.is_punct("<") {
-            self.type_args()?
+        let mut ty = if self.eat_punct("[") {
+            self.enter()?;
+            let element = self.type_ref();
+            self.leave();
+            let element = element?;
+            self.expect_punct("]")?;
+            TypeRef::new("Array".to_string(), vec![element])
         } else {
-            Vec::new()
+            let mut name = self.name()?;
+            if self.is_punct(".") && !self.on_new_line_before_dot() {
+                self.pos += 1;
+                name = format!("{name}.{}", self.name()?);
+            }
+            let args = if self.is_punct("<") {
+                self.type_args()?
+            } else {
+                Vec::new()
+            };
+            TypeRef::new(name, args)
         };
-        let mut ty = TypeRef::new(name, args);
         loop {
             let wraps = if self.eat_punct("??") {
                 2
@@ -1177,6 +1186,21 @@ impl Parser<'_> {
                         name,
                     },
                 );
+            } else if self.is_punct("[") {
+                self.pos += 1;
+                self.enter()?;
+                let index = self.expr();
+                self.leave();
+                let index = index?;
+                self.expect_punct("]")?;
+                expr = Expr::new(
+                    line,
+                    ExprKind::Index {
+                        base: Box::new(expr),
+                        index: Box::new(index),
+                    },
+                );
+                self.check_depth(expr.depth())?;
             } else if self.is_punct("(") {
                 let args = self.args()?;
                 expr = match expr.into_kind() {
@@ -1293,6 +1317,19 @@ impl Parser<'_> {
         Ok(joined.unwrap_or_else(|| Expr::new(line, ExprKind::Str(String::new()))))
     }
 
+    fn array_items(&mut self) -> PResult<Vec<Expr>> {
+        let mut items = Vec::new();
+        if self.is_punct("]") {
+            return Ok(items);
+        }
+        loop {
+            items.push(self.expr()?);
+            if !self.eat_punct(",") {
+                return Ok(items);
+            }
+        }
+    }
+
     fn primary(&mut self) -> PResult<Expr> {
         let line = self.line();
         let kind = match self.peek() {
@@ -1316,6 +1353,15 @@ impl Parser<'_> {
                 let pieces = pieces.clone();
                 self.pos += 1;
                 return self.interpolation(line, &pieces);
+            }
+            Some(Token::Punct(p)) if p == "[" => {
+                self.pos += 1;
+                self.enter()?;
+                let items = self.array_items();
+                self.leave();
+                let items = items?;
+                self.expect_punct("]")?;
+                return Ok(Expr::new(line, ExprKind::ArrayLiteral(items)));
             }
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;
@@ -1370,6 +1416,71 @@ mod tests {
 
     fn int(n: i64) -> Expr {
         ex(ExprKind::Int(n))
+    }
+
+    #[test]
+    fn an_array_literal_lists_its_elements() {
+        assert_eq!(
+            expr("[1, 2, 3]"),
+            ex(ExprKind::ArrayLiteral(vec![int(1), int(2), int(3)]))
+        );
+        assert_eq!(expr("[]"), ex(ExprKind::ArrayLiteral(Vec::new())));
+    }
+
+    #[test]
+    fn a_subscript_indexes_the_expression_before_it_on_the_same_line() {
+        assert_eq!(
+            expr("a[1 + 2]"),
+            ex(ExprKind::Index {
+                base: Box::new(ex(ExprKind::Ident("a".to_string()))),
+                index: Box::new(ex(ExprKind::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(int(1)),
+                    rhs: Box::new(int(2)),
+                })),
+            })
+        );
+    }
+
+    #[test]
+    fn a_bracket_on_the_next_line_starts_a_new_array_literal() {
+        let stmts = body("let a = b\n[1]");
+        assert_eq!(stmts.len(), 2);
+    }
+
+    #[test]
+    fn an_array_type_in_brackets_means_array_of_its_element() {
+        let f = func("func f(a: [Int], b: [[String]]) -> [Bool] {\n}");
+        assert_eq!(
+            f.params()[0].ty(),
+            &TypeRef::new("Array".to_string(), vec![TypeRef::from("Int")])
+        );
+        assert_eq!(
+            f.params()[1].ty(),
+            &TypeRef::new(
+                "Array".to_string(),
+                vec![TypeRef::new(
+                    "Array".to_string(),
+                    vec![TypeRef::from("String")]
+                )]
+            )
+        );
+        assert_eq!(
+            f.ret(),
+            Some(&TypeRef::new(
+                "Array".to_string(),
+                vec![TypeRef::from("Bool")]
+            ))
+        );
+    }
+
+    #[test]
+    fn an_optional_array_and_an_array_of_optionals_are_both_written() {
+        let f = func("func f(a: [Int]?, b: [Int?]) {\n}");
+        let array = |inner: TypeRef| TypeRef::new("Array".to_string(), vec![inner]);
+        let optional = |inner: TypeRef| TypeRef::new("Optional".to_string(), vec![inner]);
+        assert_eq!(f.params()[0].ty(), &optional(array(TypeRef::from("Int"))));
+        assert_eq!(f.params()[1].ty(), &array(optional(TypeRef::from("Int"))));
     }
 
     #[test]

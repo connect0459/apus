@@ -460,6 +460,10 @@ impl Scan<'_> {
                 self.expr_uses_self(subject) || self.expr_uses_self(link)
             }
             ExprKind::Cast { expr, .. } => self.expr_uses_self(expr),
+            ExprKind::ArrayLiteral(items) => items.iter().any(|e| self.expr_uses_self(e)),
+            ExprKind::Index { base, index } => {
+                self.expr_uses_self(base) || self.expr_uses_self(index)
+            }
             ExprKind::ChainValue => false,
             ExprKind::Nil
             | ExprKind::Int(_)

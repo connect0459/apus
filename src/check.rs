@@ -2822,6 +2822,9 @@ impl FnCx<'_> {
                 line,
                 "a range can only be used in a for loop",
             )),
+            ExprKind::ArrayLiteral(_) | ExprKind::Index { .. } => {
+                Err(CheckError::at(line, "arrays are not supported yet"))
+            }
         }
     }
 
