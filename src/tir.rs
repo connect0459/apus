@@ -59,6 +59,29 @@ impl Descriptor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrayOp {
+    Buffer,
+    Get,
+    Append,
+    Set,
+}
+
+impl ArrayOp {
+    pub fn code(self) -> u8 {
+        match self {
+            ArrayOp::Buffer => 1,
+            ArrayOp::Get => 2,
+            ArrayOp::Append => 3,
+            ArrayOp::Set => 4,
+        }
+    }
+
+    pub fn allocates(self) -> bool {
+        matches!(self, ArrayOp::Append | ArrayOp::Set)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrOp {
     Concat,
     Count,
@@ -307,6 +330,10 @@ pub enum TStmt {
     Clear(LocalId),
     Free(TExpr),
     ReleaseUnowned(TExpr),
+    DropArray {
+        array: TExpr,
+        elem: Ty,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -377,6 +404,12 @@ pub enum TExpr {
         op: StrOp,
         args: Vec<TExpr>,
     },
+    ArrayOp {
+        op: ArrayOp,
+        elem: Ty,
+        args: Vec<TExpr>,
+        ty: Ty,
+    },
     Witness {
         protocol: String,
         method: String,
@@ -434,7 +467,7 @@ impl TExpr {
             TExpr::FuncAddr(_) | TExpr::ClassDesc(_) | TExpr::Descriptor(_) => Ty::Int,
             TExpr::InstanceOf { .. } => Ty::Bool,
             TExpr::StrOp { op, .. } => op.result(),
-            TExpr::Unwrap { ty, .. } | TExpr::Select { ty, .. } => *ty,
+            TExpr::Unwrap { ty, .. } | TExpr::Select { ty, .. } | TExpr::ArrayOp { ty, .. } => *ty,
             TExpr::StructInit { ty, .. }
             | TExpr::New { ty, .. }
             | TExpr::Field { ty, .. }
@@ -563,6 +596,10 @@ impl<E> Rewriter<'_, E> {
             TStmt::Clear(local) => TStmt::Clear(*local),
             TStmt::Free(expr) => TStmt::Free(self.expr(expr)?),
             TStmt::ReleaseUnowned(expr) => TStmt::ReleaseUnowned(self.expr(expr)?),
+            TStmt::DropArray { array, elem } => TStmt::DropArray {
+                array: self.expr(array)?,
+                elem: (self.ty)(*elem)?,
+            },
         })
     }
 
@@ -777,6 +814,15 @@ impl<E> Rewriter<'_, E> {
             },
             TExpr::Unwrap { base, ty } => TExpr::Unwrap {
                 base: Box::new(self.expr(base)?),
+                ty: (self.ty)(*ty)?,
+            },
+            TExpr::ArrayOp { op, elem, args, ty } => TExpr::ArrayOp {
+                op: *op,
+                elem: (self.ty)(*elem)?,
+                args: args
+                    .iter()
+                    .map(|a| self.expr(a))
+                    .collect::<Result<Vec<_>, E>>()?,
                 ty: (self.ty)(*ty)?,
             },
             TExpr::RetainUnowned(inner) => TExpr::RetainUnowned(Box::new(self.expr(inner)?)),

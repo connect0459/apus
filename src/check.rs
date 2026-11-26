@@ -6,10 +6,10 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    COMPARABLE, CResult, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig, NONE_CASE, PRINT,
-    ParamSig, SOME_CASE, bound_includes, scope_of,
+    ARRAY_COUNT, COMPARABLE, CResult, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig,
+    NONE_CASE, PRINT, ParamSig, SOME_CASE, bound_includes, scope_of,
 };
-use crate::tir::{LocalId, StrOp, TExpr, TFunc, TStmt};
+use crate::tir::{ArrayOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
 const SUPER: &str = "super";
@@ -443,6 +443,17 @@ impl FnCx<'_> {
             return Ok(TExpr::StrOp {
                 op,
                 args: vec![base],
+            });
+        }
+        if name == "isEmpty" && self.sigs.array_element(base.ty()).is_some() {
+            return Ok(TExpr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(TExpr::Field {
+                    base: Box::new(base),
+                    index: ARRAY_COUNT,
+                    ty: Ty::Int,
+                }),
+                rhs: Box::new(TExpr::Int(0)),
             });
         }
         let (index, field) = self.member_of(line, base.ty(), name)?;
@@ -1996,10 +2007,13 @@ impl FnCx<'_> {
     fn for_stmt(&mut self, line: u32, var: &str, iter: &Expr, body: &[Stmt]) -> CResult<TStmt> {
         let ExprKind::Range { lo, hi, inclusive } = iter.kind() else {
             let text = self.value(iter)?;
+            if let Some(elem) = self.sigs.array_element(text.ty()) {
+                return self.for_elements(line, var, text, elem, body);
+            }
             if text.ty() != Ty::Str {
                 return Err(CheckError::at(
                     line,
-                    "a for loop iterates over a range or a string",
+                    "a for loop iterates over a range, a string or an array",
                 ));
             }
             return self.for_characters(line, var, text, body);
@@ -2019,6 +2033,122 @@ impl FnCx<'_> {
         });
         self.scopes.pop();
         result
+    }
+
+    fn array_literal(&mut self, line: u32, items: &[Expr], expected: Option<Ty>) -> CResult<TExpr> {
+        let mut element = expected.and_then(|ty| self.sigs.array_element(ty));
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            self.expected = element;
+            let mut value = self.value(item)?;
+            match element {
+                Some(ty) => value = self.coerce(item.line(), ty, value)?,
+                None => element = Some(value.ty()),
+            }
+            values.push(value);
+        }
+        let Some(element) = element else {
+            return Err(CheckError::at(
+                line,
+                "an empty array needs a type from its context, such as 'let x: [Int] = []'",
+            ));
+        };
+        let ty = self.sigs.array_of(element, line)?;
+        let count = i64::try_from(values.len()).unwrap_or(i64::MAX);
+        let buffer = TExpr::ArrayOp {
+            op: ArrayOp::Buffer,
+            elem: element,
+            args: values,
+            ty: Ty::Int,
+        };
+        Ok(self
+            .sigs
+            .construct(ty, vec![TExpr::Int(count), TExpr::Int(count), buffer]))
+    }
+
+    fn subscript(&mut self, line: u32, base: &Expr, index: &Expr) -> CResult<TExpr> {
+        let array = self.value(base)?;
+        let Some(elem) = self.sigs.array_element(array.ty()) else {
+            return Err(CheckError::at(
+                line,
+                format!("{} cannot be subscripted", self.name_of(array.ty())),
+            ));
+        };
+        let position = self.int_value(index)?;
+        Ok(TExpr::ArrayOp {
+            op: ArrayOp::Get,
+            elem,
+            args: vec![array, position],
+            ty: elem,
+        })
+    }
+
+    fn for_elements(
+        &mut self,
+        line: u32,
+        var: &str,
+        array: TExpr,
+        elem: Ty,
+        body: &[Stmt],
+    ) -> CResult<TStmt> {
+        let array_ty = array.ty();
+        let held = self.temp(array_ty);
+        let position = self.temp(Ty::Int);
+        let count = |held: LocalId| TExpr::Field {
+            base: Box::new(TExpr::Local(held, array_ty)),
+            index: ARRAY_COUNT,
+            ty: Ty::Int,
+        };
+        self.scopes.push(HashMap::new());
+        let result = self.declare(line, var, elem, false).and_then(|local| {
+            let mut stmts = vec![
+                TStmt::Let {
+                    local,
+                    init: TExpr::ArrayOp {
+                        op: ArrayOp::Get,
+                        elem,
+                        args: vec![
+                            TExpr::Local(held, array_ty),
+                            TExpr::Local(position, Ty::Int),
+                        ],
+                        ty: elem,
+                    },
+                },
+                TStmt::Assign {
+                    local: position,
+                    value: TExpr::Binary {
+                        op: BinOp::Add,
+                        lhs: Box::new(TExpr::Local(position, Ty::Int)),
+                        rhs: Box::new(TExpr::Int(1)),
+                    },
+                },
+            ];
+            stmts.extend(self.in_target(TargetKind::Loop, |cx| cx.block(body))?);
+            Ok(TStmt::While {
+                cond: TExpr::Binary {
+                    op: BinOp::Lt,
+                    lhs: Box::new(TExpr::Local(position, Ty::Int)),
+                    rhs: Box::new(count(held)),
+                },
+                body: stmts,
+            })
+        });
+        self.scopes.pop();
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: vec![
+                TStmt::Let {
+                    local: held,
+                    init: array,
+                },
+                TStmt::Let {
+                    local: position,
+                    init: TExpr::Int(0),
+                },
+                result?,
+            ],
+            else_body: Vec::new(),
+        })
     }
 
     fn for_characters(
@@ -2822,9 +2952,8 @@ impl FnCx<'_> {
                 line,
                 "a range can only be used in a for loop",
             )),
-            ExprKind::ArrayLiteral(_) | ExprKind::Index { .. } => {
-                Err(CheckError::at(line, "arrays are not supported yet"))
-            }
+            ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
+            ExprKind::Index { base, index } => self.subscript(line, base, index),
         }
     }
 

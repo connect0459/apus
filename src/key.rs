@@ -194,6 +194,11 @@ impl Encoder<'_> {
                 self.tag(22);
                 self.expr(expr);
             }
+            TStmt::DropArray { array, elem } => {
+                self.tag(23);
+                self.expr(array);
+                self.ty(*elem);
+            }
         }
     }
 
@@ -292,6 +297,16 @@ impl Encoder<'_> {
                 self.tag(59);
                 self.expr(object);
                 self.expr(class);
+            }
+            TExpr::ArrayOp { op, elem, args, ty } => {
+                self.tag(60);
+                self.tag(op.code());
+                self.ty(*elem);
+                self.ty(*ty);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
             }
             TExpr::StrOp { op, args } => {
                 self.tag(55);

@@ -22,17 +22,21 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
+use crate::sigs::{ARRAY_BUFFER, ARRAY_CAPACITY, ARRAY_COUNT};
 use crate::tir::{
-    DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, RC_SLOT, StrOp, TExpr, TFunc, TStmt, TStruct,
-    UNOWNED_SLOT,
+    ArrayOp, DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, RC_SLOT, StrOp, TExpr, TFunc, TStmt,
+    TStruct, UNOWNED_SLOT,
 };
 use crate::types::Ty;
 
 const VARIADIC_PADDING: usize = 7;
 const FIELD_SIZE: u32 = 8;
+const ELEMENT_SIZE: i64 = 8;
 const UNREACHABLE: TrapCode = TrapCode::unwrap_user(1);
 const UNOWNED_DEAD: TrapCode = TrapCode::unwrap_user(2);
 const UNWRAPPED_NIL: TrapCode = TrapCode::unwrap_user(3);
+const INDEX_OUT_OF_RANGE: TrapCode = TrapCode::unwrap_user(4);
+const MIN_ARRAY_CAPACITY: i64 = 4;
 const NAMESPACE_FUNC: u32 = 0;
 const NAMESPACE_DATA: u32 = 1;
 
@@ -711,12 +715,274 @@ impl Emitter<'_, '_> {
                 self.free_pointer(value);
                 Ok(false)
             }
+            TStmt::DropArray { array, elem } => {
+                let array = self.value(array)?;
+                self.drop_array(array, *elem)?;
+                Ok(false)
+            }
             TStmt::ReleaseUnowned(expr) => {
                 let value = self.value(expr)?;
                 self.release_unowned(value)?;
                 Ok(false)
             }
         }
+    }
+
+    fn array_op(&mut self, op: ArrayOp, elem: Ty, args: &[TExpr]) -> GResult<Value> {
+        let values = args
+            .iter()
+            .map(|a| self.value(a))
+            .collect::<GResult<Vec<_>>>()?;
+        let clif = clif_type(elem)
+            .ok_or_else(|| CodegenError::from("an array element has no representable type"))?;
+        let flags = MemFlagsData::trusted();
+        match op {
+            ArrayOp::Buffer => {
+                let slots = i64::try_from(values.len().max(1))?;
+                let size = self.builder.ins().iconst(types::I64, slots * ELEMENT_SIZE);
+                let buffer = self.allocate(size)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    let offset = i32::try_from(index)?.saturating_mul(ELEMENT_SIZE as i32);
+                    self.builder.ins().store(flags, value, buffer, offset);
+                }
+                Ok(buffer)
+            }
+            ArrayOp::Get => {
+                let address = self.element_address(values[0], values[1]);
+                Ok(self.builder.ins().load(clif, flags, address, 0))
+            }
+            ArrayOp::Append => {
+                let array = self.unique_array(values[0], elem, 1)?;
+                let count =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+                let buffer =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+                let at = self.builder.ins().imul_imm_s(count, ELEMENT_SIZE);
+                let address = self.builder.ins().iadd(buffer, at);
+                self.builder.ins().store(flags, values[1], address, 0);
+                let next = self.builder.ins().iadd_imm_s(count, 1);
+                self.builder
+                    .ins()
+                    .store(flags, next, array, field_offset(ARRAY_COUNT));
+                Ok(array)
+            }
+            ArrayOp::Set => {
+                self.element_address(values[0], values[1]);
+                let array = self.unique_array(values[0], elem, 0)?;
+                let address = self.element_address(array, values[1]);
+                let old = self.builder.ins().load(clif, flags, address, 0);
+                self.builder.ins().store(flags, values[2], address, 0);
+                self.release(old, elem)?;
+                Ok(array)
+            }
+        }
+    }
+
+    fn allocate(&mut self, size: Value) -> GResult<Value> {
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let malloc = self.import_func("malloc", sig, false);
+        let call = self.builder.ins().call(malloc, &[size]);
+        self.builder
+            .inst_results(call)
+            .first()
+            .copied()
+            .ok_or_else(|| CodegenError::from("malloc returned no value"))
+    }
+
+    fn element_address(&mut self, array: Value, index: Value) -> Value {
+        let flags = MemFlagsData::trusted();
+        let count = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+        let outside = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, index, count);
+        self.builder.ins().trapnz(outside, INDEX_OUT_OF_RANGE);
+        let buffer = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+        let at = self.builder.ins().imul_imm_s(index, ELEMENT_SIZE);
+        self.builder.ins().iadd(buffer, at)
+    }
+
+    fn unique_array(&mut self, array: Value, elem: Ty, extra: i64) -> GResult<Value> {
+        let flags = MemFlagsData::trusted();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I64);
+        let reuse = self.builder.create_block();
+        let copy = self.builder.create_block();
+        let strong = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(RC_SLOT));
+        let sole = self.builder.ins().icmp_imm_s(IntCC::Equal, strong, 1);
+        self.builder.ins().brif(sole, reuse, &[], copy, &[]);
+
+        self.builder.switch_to_block(reuse);
+        let count = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+        let capacity =
+            self.builder
+                .ins()
+                .load(types::I64, flags, array, field_offset(ARRAY_CAPACITY));
+        let needed = self.builder.ins().iadd_imm_s(count, extra);
+        let fits = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThanOrEqual, needed, capacity);
+        let grow = self.builder.create_block();
+        let keep = self.builder.create_block();
+        self.builder.ins().brif(fits, keep, &[], grow, &[]);
+        self.builder.switch_to_block(grow);
+        let wanted = self.grown_capacity(needed, capacity);
+        let bytes = self.builder.ins().imul_imm_s(wanted, ELEMENT_SIZE);
+        let buffer = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+        let mut sig = Signature::new(self.call_conv);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let realloc = self.import_func("realloc", sig, false);
+        let call = self.builder.ins().call(realloc, &[buffer, bytes]);
+        let moved = self
+            .builder
+            .inst_results(call)
+            .first()
+            .copied()
+            .ok_or_else(|| CodegenError::from("realloc returned no value"))?;
+        self.builder
+            .ins()
+            .store(flags, moved, array, field_offset(ARRAY_BUFFER));
+        self.builder
+            .ins()
+            .store(flags, wanted, array, field_offset(ARRAY_CAPACITY));
+        self.builder.ins().jump(keep, &[]);
+        self.builder.switch_to_block(keep);
+        self.retain_reference(array)?;
+        self.builder.ins().jump(merge, &[BlockArg::Value(array)]);
+
+        self.builder.switch_to_block(copy);
+        let count = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+        let needed = self.builder.ins().iadd_imm_s(count, extra);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let wanted = self.grown_capacity(needed, zero);
+        let object_size = self
+            .builder
+            .ins()
+            .iconst(types::I64, i64::try_from(ARRAY_BUFFER + 1)? * ELEMENT_SIZE);
+        let fresh = self.allocate(object_size)?;
+        for slot in 0..ARRAY_COUNT {
+            let value = self
+                .builder
+                .ins()
+                .load(types::I64, flags, array, field_offset(slot));
+            self.builder
+                .ins()
+                .store(flags, value, fresh, field_offset(slot));
+        }
+        let one = self.builder.ins().iconst(types::I64, 1);
+        self.builder
+            .ins()
+            .store(flags, one, fresh, field_offset(RC_SLOT));
+        self.builder
+            .ins()
+            .store(flags, zero, fresh, field_offset(UNOWNED_SLOT));
+        self.builder
+            .ins()
+            .store(flags, count, fresh, field_offset(ARRAY_COUNT));
+        self.builder
+            .ins()
+            .store(flags, wanted, fresh, field_offset(ARRAY_CAPACITY));
+        let bytes = self.builder.ins().imul_imm_s(wanted, ELEMENT_SIZE);
+        let target = self.allocate(bytes)?;
+        self.builder
+            .ins()
+            .store(flags, target, fresh, field_offset(ARRAY_BUFFER));
+        let source = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+        self.each_element(count, |this, index| {
+            let at = this.builder.ins().imul_imm_s(index, ELEMENT_SIZE);
+            let from = this.builder.ins().iadd(source, at);
+            let to = this.builder.ins().iadd(target, at);
+            let value = this.builder.ins().load(types::I64, flags, from, 0);
+            this.retain(value, elem)?;
+            this.builder.ins().store(flags, value, to, 0);
+            Ok(())
+        })?;
+        self.builder.ins().jump(merge, &[BlockArg::Value(fresh)]);
+
+        self.builder.switch_to_block(merge);
+        Ok(self.builder.block_params(merge)[0])
+    }
+
+    fn grown_capacity(&mut self, needed: Value, current: Value) -> Value {
+        let doubled = self.builder.ins().imul_imm_s(current, 2);
+        let wanted = self.builder.ins().smax(needed, doubled);
+        let floor = self.builder.ins().iconst(types::I64, MIN_ARRAY_CAPACITY);
+        self.builder.ins().smax(wanted, floor)
+    }
+
+    fn each_element(
+        &mut self,
+        count: Value,
+        mut body: impl FnMut(&mut Self, Value) -> GResult<()>,
+    ) -> GResult<()> {
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64);
+        let step = self.builder.create_block();
+        let exit = self.builder.create_block();
+        let start = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().jump(header, &[BlockArg::Value(start)]);
+        self.builder.switch_to_block(header);
+        let index = self.builder.block_params(header)[0];
+        let more = self.builder.ins().icmp(IntCC::SignedLessThan, index, count);
+        self.builder.ins().brif(more, step, &[], exit, &[]);
+        self.builder.switch_to_block(step);
+        body(self, index)?;
+        let next = self.builder.ins().iadd_imm_s(index, 1);
+        self.builder.ins().jump(header, &[BlockArg::Value(next)]);
+        self.builder.switch_to_block(exit);
+        Ok(())
+    }
+
+    fn drop_array(&mut self, array: Value, elem: Ty) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
+        let buffer = self
+            .builder
+            .ins()
+            .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+        if matches!(elem, Ty::Str | Ty::Class(_)) {
+            let count =
+                self.builder
+                    .ins()
+                    .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+            self.each_element(count, |this, index| {
+                let at = this.builder.ins().imul_imm_s(index, ELEMENT_SIZE);
+                let address = this.builder.ins().iadd(buffer, at);
+                let value = this.builder.ins().load(types::I64, flags, address, 0);
+                this.release(value, elem)
+            })?;
+        }
+        self.free_pointer(buffer);
+        Ok(())
     }
 
     fn counted_slots(&self, ty: Ty) -> GResult<Vec<(usize, Ty)>> {
@@ -2010,6 +2276,7 @@ impl Emitter<'_, '_> {
     fn expr(&mut self, expr: &TExpr) -> GResult<Option<Value>> {
         let value = match expr {
             TExpr::StrOp { op, args } => self.string_op(*op, args)?,
+            TExpr::ArrayOp { op, elem, args, .. } => self.array_op(*op, *elem, args)?,
             TExpr::Witness { .. } | TExpr::Dispatch { .. } => {
                 return Err(CodegenError::from(
                     "a protocol requirement was not resolved",

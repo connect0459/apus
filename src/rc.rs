@@ -1,6 +1,6 @@
 use crate::ast::BinOp;
 use crate::sigs::Signatures;
-use crate::tir::{LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
+use crate::tir::{ArrayOp, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
 use crate::types::{StructId, Ty};
 
 const DESTROYING: i64 = 1 << 40;
@@ -86,6 +86,12 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
                 TStmt::Release(member)
             });
         }
+    }
+    if let Some(elem) = sigs.array_element(class) {
+        body.push(TStmt::DropArray {
+            array: receiver(),
+            elem,
+        });
     }
     body.push(TStmt::AssignField {
         local: this,
@@ -379,6 +385,11 @@ impl Pass<'_> {
                 out.extend(self.release_temps(&temps));
             }
             TStmt::Clear(local) => out.push(TStmt::Clear(*local)),
+            TStmt::DropArray { array, elem } => {
+                let (array, temps) = self.scoped(|p| p.expr(array));
+                out.push(TStmt::DropArray { array, elem: *elem });
+                out.extend(self.release_temps(&temps));
+            }
             TStmt::Free(expr) => {
                 let (value, temps) = self.scoped(|p| p.expr(expr));
                 out.push(TStmt::Free(value));
@@ -596,6 +607,7 @@ impl Pass<'_> {
                 | TExpr::LoadWeak(_)
                 | TExpr::Select { .. }
         ) || matches!(expr, TExpr::StrOp { op, .. } if op.allocates())
+            || matches!(expr, TExpr::ArrayOp { op, .. } if op.allocates())
     }
 
     fn owned_value(&mut self, expr: &TExpr) -> TExpr {
@@ -648,6 +660,24 @@ impl Pass<'_> {
                 op: *op,
                 args: self.borrowed_all(args),
             },
+            TExpr::ArrayOp { op, elem, args, ty } => {
+                let args = match op {
+                    ArrayOp::Buffer => self.owned_all(args),
+                    ArrayOp::Get => self.borrowed_all(args),
+                    ArrayOp::Append | ArrayOp::Set => {
+                        let last = args.len() - 1;
+                        let mut rewritten = self.borrowed_all(&args[..last]);
+                        rewritten.push(self.owned_value(&args[last]));
+                        rewritten
+                    }
+                };
+                TExpr::ArrayOp {
+                    op: *op,
+                    elem: *elem,
+                    args,
+                    ty: *ty,
+                }
+            }
             TExpr::Dispatch {
                 protocol,
                 method,

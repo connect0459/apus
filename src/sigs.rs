@@ -41,6 +41,10 @@ fn identity(generics: &[String]) -> Vec<Ty> {
 const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
 
 pub const BOX: &str = "$Box";
+pub const ARRAY: &str = "Array";
+pub const ARRAY_COUNT: usize = 4;
+pub const ARRAY_CAPACITY: usize = 5;
+pub const ARRAY_BUFFER: usize = 6;
 pub const OPTIONAL: &str = "Optional";
 pub const NONE_CASE: usize = 0;
 pub const SOME_CASE: usize = 1;
@@ -52,6 +56,20 @@ fn box_decl() -> StructDecl {
         vec![Field::new("value".to_string(), false, TypeRef::from("T"))],
     )
     .with_generics(vec!["T".to_string()])
+    .as_class()
+}
+
+fn array_decl() -> StructDecl {
+    StructDecl::new(
+        0,
+        ARRAY.to_string(),
+        vec![
+            Field::new("count".to_string(), false, TypeRef::from("Int")),
+            Field::new("$capacity".to_string(), true, TypeRef::from("Int")),
+            Field::new("$buffer".to_string(), true, TypeRef::from("Int")),
+        ],
+    )
+    .with_generics(vec!["Element".to_string()])
     .as_class()
 }
 
@@ -435,6 +453,7 @@ impl Signatures {
         let decls = &normalized[..];
         sigs.register_enum_def(&optional_decl())?;
         sigs.register_struct_def(&box_decl())?;
+        sigs.register_struct_def(&array_decl())?;
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -1662,6 +1681,18 @@ impl Signatures {
         }
         let decl = &self.struct_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
+        if decl.name() == ARRAY
+            && let Some(element) = key.1.first()
+            && matches!(element, Ty::Struct(_) | Ty::Void)
+        {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "an array cannot hold {} yet: its elements must fit one slot",
+                    self.display(*element, scope)
+                ),
+            ));
+        }
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
             .map(|i| decl.bound(i).to_vec())
             .collect();
@@ -2172,6 +2203,18 @@ impl Signatures {
         Ok(self.enum_ty(id))
     }
 
+    pub fn array_element(&self, ty: Ty) -> Option<Ty> {
+        match self.origin_of(ty)? {
+            (Kind::Struct, 1, args) => args.first().copied(),
+            _ => None,
+        }
+    }
+
+    pub fn array_of(&self, element: Ty, line: u32) -> CResult<Ty> {
+        let id = self.instantiate_struct(1, vec![element], &[], line)?;
+        Ok(self.struct_ty(1, id))
+    }
+
     pub fn unwrapped(&self, ty: Ty) -> Option<Ty> {
         match self.origin_of(ty)? {
             (Kind::Enum, 0, args) => args.first().copied(),
@@ -2182,6 +2225,9 @@ impl Signatures {
     pub fn display(&self, ty: Ty, scope: &Scope) -> String {
         if let Some(inner) = self.unwrapped(ty) {
             return format!("{}?", self.display(inner, scope));
+        }
+        if let Some(element) = self.array_element(ty) {
+            return format!("[{}]", self.display(element, scope));
         }
         match ty {
             Ty::Int => "Int".to_string(),

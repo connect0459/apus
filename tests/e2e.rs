@@ -4848,3 +4848,88 @@ fn the_search_and_replace_members_check_their_arguments() {
     assert!(build_error("func main() { print(\"a\".firstIndex(\"a\")) }").contains("firstIndex"));
     assert!(build_error("func main() { print(\"a\".trimmed(1)) }").contains("trimmed"));
 }
+
+#[test]
+fn an_array_literal_has_a_count_and_elements_read_by_index() {
+    assert_eq!(
+        main_printing("let a = [10, 20, 30]\nprint(a.count)\nprint(a[0] + a[2])\nprint(a[1])"),
+        "3\n40\n20\n"
+    );
+}
+
+#[test]
+fn an_empty_array_takes_its_type_from_the_annotation() {
+    assert_eq!(
+        main_printing(
+            "let e: [Int] = []\nprint(e.count)\nprint(e.isEmpty)\nlet f = [1]\nprint(f.isEmpty)"
+        ),
+        "0\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn a_for_loop_visits_the_elements_in_order() {
+    assert_eq!(
+        main_printing(
+            "let names = [\"ada\", \"grace\", \"alan\"]\nfor n in names {\n  print(n)\n}\nvar total = 0\nfor x in [1, 2, 3, 4] {\n  if x == 3 { continue }\n  total += x\n}\nprint(total)"
+        ),
+        "ada\ngrace\nalan\n7\n"
+    );
+}
+
+#[test]
+fn an_array_is_a_parameter_a_result_and_an_element_of_another_array() {
+    assert_eq!(
+        run(
+            "func sum(_ xs: [Int]) -> Int {\n  var t = 0\n  for x in xs { t += x }\n  return t\n}\nfunc make() -> [Int] { return [4, 5, 6] }\nfunc main() {\n  print(sum(make()))\n  let grid = [[1, 2], [3, 4, 5]]\n  print(grid[1][2])\n  print(grid.count)\n}"
+        ),
+        "15\n5\n2\n"
+    );
+}
+
+#[test]
+fn reading_past_the_end_of_an_array_traps() {
+    run_expecting_a_crash("func main() {\n  let a = [1, 2]\n  var i = 2\n  print(a[i])\n}");
+    run_expecting_a_crash("func main() {\n  let a = [1, 2]\n  var i = -1\n  print(a[i])\n}");
+}
+
+#[test]
+fn an_array_of_class_instances_releases_them_with_the_array() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  do_it()\n  print(0)\n}\nfunc do_it() {\n  let boxes = [Box(n: 1), Box(n: 2)]\n  let first = boxes[0]\n  print(first.n)\n}"
+        ),
+        "1\n1\n2\n0\n"
+    );
+}
+
+#[test]
+fn an_array_holds_values_of_a_generic_element_type() {
+    assert_eq!(
+        run(
+            "func first<T>(_ xs: [T]) -> T { return xs[0] }\nfunc main() {\n  print(first([7, 8]))\n  print(first([\"x\", \"y\"]))\n}"
+        ),
+        "7\nx\n"
+    );
+}
+
+#[test]
+fn array_misuse_is_rejected_with_a_message() {
+    assert!(build_error("func main() { let a = [] \n print(a.count) }").contains("empty array"));
+    assert!(build_error("func main() { let a = [1, \"x\"] }").contains("expected Int"));
+    assert!(build_error("func main() { let a = [1]\n print(a[true]) }").contains("expected Int"));
+    assert!(
+        build_error("func main() { let a = 5\n print(a[0]) }").contains("cannot be subscripted")
+    );
+    assert!(build_error("func main() { let a = [1]\n a.count = 2 }").contains("count"));
+    assert!(
+        build_error("struct P { var x: Int }\nfunc main() { let a = [P(x: 1)] }")
+            .contains("cannot hold")
+    );
+}
+
+#[test]
+fn arrays_built_and_dropped_in_a_loop_keep_their_contents_intact() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 200000 {\n    let a = [String(i), \"k\", String(i + 1)]\n    let b = [a, a]\n    total += b[1][2].count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "1088895\n");
+}
