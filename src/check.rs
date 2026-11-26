@@ -738,6 +738,417 @@ pub fn set_function(sigs: &Signatures, ty: Ty, name: String, op: SetOp) -> CResu
     Ok(TFunc::new(name, 2, ret, cx.locals, body))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HofOp {
+    Map,
+    Filter,
+    Reduce,
+    ForEach,
+    ContainsWhere,
+    FirstWhere,
+    FirstIndexWhere,
+    AllSatisfy,
+    SortedBy,
+    Sorted,
+}
+
+impl HofOp {
+    const ALL: [HofOp; 10] = [
+        HofOp::Map,
+        HofOp::Filter,
+        HofOp::Reduce,
+        HofOp::ForEach,
+        HofOp::ContainsWhere,
+        HofOp::FirstWhere,
+        HofOp::FirstIndexWhere,
+        HofOp::AllSatisfy,
+        HofOp::SortedBy,
+        HofOp::Sorted,
+    ];
+
+    pub fn callee(self) -> &'static str {
+        match self {
+            HofOp::Map => "$map",
+            HofOp::Filter => "$filter",
+            HofOp::Reduce => "$reduce",
+            HofOp::ForEach => "$forEach",
+            HofOp::ContainsWhere => "$containsWhere",
+            HofOp::FirstWhere => "$firstWhere",
+            HofOp::FirstIndexWhere => "$firstIndexWhere",
+            HofOp::AllSatisfy => "$allSatisfy",
+            HofOp::SortedBy => "$sortedBy",
+            HofOp::Sorted => "$sorted",
+        }
+    }
+
+    pub fn from_callee(callee: &str) -> Option<HofOp> {
+        Self::ALL.into_iter().find(|op| op.callee() == callee)
+    }
+}
+
+pub fn higher_order_function(
+    sigs: &Signatures,
+    op: HofOp,
+    args: &[Ty],
+    name: String,
+) -> CResult<TFunc> {
+    let array = *args.first().ok_or_else(|| {
+        CheckError::at(0, "internal error: a higher-order function needs an array")
+    })?;
+    let elem = sigs
+        .array_element(array)
+        .ok_or_else(|| CheckError::at(0, "internal error: not an array"))?;
+    let func_ty = args.get(1).copied();
+    let (params, result) = func_ty
+        .and_then(|ty| sigs.func_parts(ty))
+        .unwrap_or((Vec::new(), Ty::Void));
+    let ret = match op {
+        HofOp::Map => sigs.array_of(result, 0)?,
+        HofOp::Filter | HofOp::SortedBy | HofOp::Sorted => array,
+        HofOp::Reduce => result,
+        HofOp::ForEach => Ty::Void,
+        HofOp::ContainsWhere | HofOp::AllSatisfy => Ty::Bool,
+        HofOp::FirstWhere => sigs.optional_of(elem)?,
+        HofOp::FirstIndexWhere => sigs.optional_of(Ty::Int)?,
+    };
+    let mut cx = synthetic_cx(sigs, &name, ret);
+    let source = cx.declare(0, "source", array, false)?;
+    let initial = if op == HofOp::Reduce {
+        Some(cx.declare(0, "initial", result, false)?)
+    } else {
+        None
+    };
+    let callable = match func_ty {
+        Some(ty) if op != HofOp::Sorted => Some(cx.declare(0, "body", ty, false)?),
+        _ => None,
+    };
+    let position = cx.temp(Ty::Int);
+    let item = array_get(source, array, position, elem);
+    let call = |arguments: Vec<TExpr>| -> TExpr {
+        let (Some(callable), Some(ty)) = (callable, func_ty) else {
+            return TExpr::Bool(false);
+        };
+        TExpr::CallValue {
+            func: Box::new(local(callable, ty)),
+            args: arguments,
+            params: params.clone(),
+            ret: result,
+        }
+    };
+    let mut body = Vec::new();
+    match op {
+        HofOp::Map | HofOp::Filter => {
+            let built = cx.temp(ret);
+            let (kept, stored) = if op == HofOp::Map {
+                (None, call(vec![item]))
+            } else {
+                (Some(call(vec![item.clone()])), item)
+            };
+            let append = TStmt::Assign {
+                local: built,
+                value: TExpr::ArrayOp {
+                    op: ArrayOp::Append,
+                    elem: if op == HofOp::Map { result } else { elem },
+                    args: vec![local(built, ret), stored],
+                    ty: ret,
+                },
+            };
+            let step_body = match kept {
+                Some(condition) => TStmt::If {
+                    cond: condition,
+                    then_body: vec![append],
+                    else_body: Vec::new(),
+                },
+                None => append,
+            };
+            body.push(TStmt::Let {
+                local: built,
+                init: empty_array(sigs, ret, if op == HofOp::Map { result } else { elem }),
+            });
+            body.extend(each_position(source, array, position, vec![step_body]));
+            body.push(TStmt::Return(Some(local(built, ret))));
+        }
+        HofOp::Reduce => {
+            let accumulator = cx.temp(result);
+            let Some(initial) = initial else {
+                return Err(CheckError::at(
+                    0,
+                    "internal error: reduce has no initial value",
+                ));
+            };
+            body.push(TStmt::Let {
+                local: accumulator,
+                init: local(initial, result),
+            });
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![TStmt::Assign {
+                    local: accumulator,
+                    value: call(vec![local(accumulator, result), item]),
+                }],
+            ));
+            body.push(TStmt::Return(Some(local(accumulator, result))));
+        }
+        HofOp::ForEach => {
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![TStmt::Eval(call(vec![item]))],
+            ));
+        }
+        HofOp::ContainsWhere => {
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![return_if(call(vec![item]), true)],
+            ));
+            body.push(TStmt::Return(Some(TExpr::Bool(false))));
+        }
+        HofOp::AllSatisfy => {
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![return_if(
+                    TExpr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(call(vec![item])),
+                    },
+                    false,
+                )],
+            ));
+            body.push(TStmt::Return(Some(TExpr::Bool(true))));
+        }
+        HofOp::FirstWhere | HofOp::FirstIndexWhere => {
+            let wrapped = if op == HofOp::FirstWhere {
+                item.clone()
+            } else {
+                local(position, Ty::Int)
+            };
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![TStmt::If {
+                    cond: call(vec![item]),
+                    then_body: vec![TStmt::Return(Some(TExpr::StructInit {
+                        ty: ret,
+                        args: vec![TExpr::Int(SOME_CASE as i64), wrapped],
+                    }))],
+                    else_body: Vec::new(),
+                }],
+            ));
+            body.push(TStmt::Return(Some(cx.none_of(ret))));
+        }
+        HofOp::SortedBy | HofOp::Sorted => {
+            let less = |left: TExpr, right: TExpr| -> TExpr {
+                if op == HofOp::Sorted {
+                    compare(BinOp::Lt, left, right)
+                } else {
+                    call(vec![left, right])
+                }
+            };
+            body = sort_body(&mut cx, source, array, elem, &less);
+        }
+    }
+    Ok(TFunc::new(
+        name,
+        cx.locals.len().min(param_count(op, func_ty)),
+        ret,
+        cx.locals,
+        body,
+    ))
+}
+
+fn param_count(op: HofOp, func_ty: Option<Ty>) -> usize {
+    let mut count = 1;
+    if op == HofOp::Reduce {
+        count += 1;
+    }
+    if func_ty.is_some() && op != HofOp::Sorted {
+        count += 1;
+    }
+    count
+}
+
+fn sort_body(
+    cx: &mut FnCx,
+    source: LocalId,
+    array: Ty,
+    elem: Ty,
+    less: &dyn Fn(TExpr, TExpr) -> TExpr,
+) -> Vec<TStmt> {
+    let current = cx.temp(array);
+    let buffer = cx.temp(array);
+    let spare = cx.temp(array);
+    let total = cx.temp(Ty::Int);
+    let width = cx.temp(Ty::Int);
+    let start = cx.temp(Ty::Int);
+    let middle = cx.temp(Ty::Int);
+    let end = cx.temp(Ty::Int);
+    let left = cx.temp(Ty::Int);
+    let right = cx.temp(Ty::Int);
+    let out = cx.temp(Ty::Int);
+    let take_right = cx.temp(Ty::Bool);
+    let int = |id: LocalId| local(id, Ty::Int);
+    let get = |table: LocalId, at: LocalId| TExpr::ArrayOp {
+        op: ArrayOp::Get,
+        elem,
+        args: vec![local(table, array), int(at)],
+        ty: elem,
+    };
+    let put = TStmt::Assign {
+        local: buffer,
+        value: TExpr::ArrayOp {
+            op: ArrayOp::Set,
+            elem,
+            args: vec![local(buffer, array), int(out), get(current, right)],
+            ty: array,
+        },
+    };
+    let put_left = TStmt::Assign {
+        local: buffer,
+        value: TExpr::ArrayOp {
+            op: ArrayOp::Set,
+            elem,
+            args: vec![local(buffer, array), int(out), get(current, left)],
+            ty: array,
+        },
+    };
+    let bump = |id: LocalId, by: i64| TStmt::Assign {
+        local: id,
+        value: compare(BinOp::Add, int(id), TExpr::Int(by)),
+    };
+    let clamp = |id: LocalId| TStmt::If {
+        cond: compare(BinOp::Gt, int(id), int(total)),
+        then_body: vec![TStmt::Assign {
+            local: id,
+            value: int(total),
+        }],
+        else_body: Vec::new(),
+    };
+    let merge_step = vec![
+        TStmt::Let {
+            local: take_right,
+            init: TExpr::Bool(false),
+        },
+        TStmt::If {
+            cond: compare(BinOp::Ge, int(left), int(middle)),
+            then_body: vec![TStmt::Assign {
+                local: take_right,
+                value: TExpr::Bool(true),
+            }],
+            else_body: vec![TStmt::If {
+                cond: compare(BinOp::Lt, int(right), int(end)),
+                then_body: vec![TStmt::Assign {
+                    local: take_right,
+                    value: less(get(current, right), get(current, left)),
+                }],
+                else_body: Vec::new(),
+            }],
+        },
+        TStmt::If {
+            cond: local(take_right, Ty::Bool),
+            then_body: vec![put, bump(right, 1)],
+            else_body: vec![put_left, bump(left, 1)],
+        },
+        bump(out, 1),
+    ];
+    let one_run = vec![
+        TStmt::Let {
+            local: middle,
+            init: compare(BinOp::Add, int(start), int(width)),
+        },
+        clamp(middle),
+        TStmt::Let {
+            local: end,
+            init: compare(
+                BinOp::Add,
+                int(start),
+                compare(BinOp::Mul, int(width), TExpr::Int(2)),
+            ),
+        },
+        clamp(end),
+        TStmt::Let {
+            local: left,
+            init: int(start),
+        },
+        TStmt::Let {
+            local: right,
+            init: int(middle),
+        },
+        TStmt::Let {
+            local: out,
+            init: int(start),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Lt, int(out), int(end)),
+            body: merge_step,
+        },
+        TStmt::Assign {
+            local: start,
+            value: compare(
+                BinOp::Add,
+                int(start),
+                compare(BinOp::Mul, int(width), TExpr::Int(2)),
+            ),
+        },
+    ];
+    let one_pass = vec![
+        TStmt::Let {
+            local: start,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Lt, int(start), int(total)),
+            body: one_run,
+        },
+        TStmt::Let {
+            local: spare,
+            init: local(current, array),
+        },
+        TStmt::Assign {
+            local: current,
+            value: local(buffer, array),
+        },
+        TStmt::Assign {
+            local: buffer,
+            value: local(spare, array),
+        },
+        TStmt::Assign {
+            local: width,
+            value: compare(BinOp::Mul, int(width), TExpr::Int(2)),
+        },
+    ];
+    vec![
+        TStmt::Let {
+            local: current,
+            init: local(source, array),
+        },
+        TStmt::Let {
+            local: buffer,
+            init: local(source, array),
+        },
+        TStmt::Let {
+            local: total,
+            init: array_count(source, array),
+        },
+        TStmt::Let {
+            local: width,
+            init: TExpr::Int(1),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Lt, int(width), int(total)),
+            body: one_pass,
+        },
+        TStmt::Return(Some(local(current, array))),
+    ]
+}
+
 pub fn set_from_array_function(sigs: &Signatures, array: Ty, name: String) -> CResult<TFunc> {
     let element = sigs
         .array_element(array)
@@ -3405,6 +3816,9 @@ impl<'a> FnCx<'a> {
         name: &str,
         args: &[Arg],
     ) -> CResult<TExpr> {
+        if let Some(call) = self.array_closure_method(line, &receiver, elem, name, args)? {
+            return Ok(call);
+        }
         match name {
             "contains" => {
                 let [arg] = args else {
@@ -3438,6 +3852,159 @@ impl<'a> FnCx<'a> {
                 format!("{} has no method '{name}'", self.name_of(receiver.ty())),
             )),
         }
+    }
+
+    fn callable(
+        &mut self,
+        line: u32,
+        arg: &Arg,
+        params: Vec<Ty>,
+        ret: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        if let ExprKind::Closure(closure) = arg.value().kind() {
+            return self.closure_value(line, closure, Some(params), ret);
+        }
+        self.expected = ret.map(|r| sigs.func_ty(params.clone(), r));
+        let value = self.value(arg.value())?;
+        let Some((got_params, got_ret)) = sigs.func_parts(value.ty()) else {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "expected a function, but found {}",
+                    self.name_of(value.ty())
+                ),
+            ));
+        };
+        if got_params != params || ret.is_some_and(|r| r != got_ret) {
+            let shown = sigs.func_ty(params, ret.unwrap_or(got_ret));
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "expected {}, but found {}",
+                    self.name_of(shown),
+                    self.name_of(value.ty())
+                ),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn array_closure_method(
+        &mut self,
+        line: u32,
+        receiver: &TExpr,
+        elem: Ty,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<Option<TExpr>> {
+        let sigs = self.sigs;
+        let array = receiver.ty();
+        let closure_arg = |arg: &Arg, label: &str| {
+            arg.label() == Some(label)
+                || (arg.label().is_none() && matches!(arg.value().kind(), ExprKind::Closure(_)))
+        };
+        let operation = match (name, args) {
+            ("map", [_]) => Some(HofOp::Map),
+            ("filter", [_]) => Some(HofOp::Filter),
+            ("forEach", [_]) => Some(HofOp::ForEach),
+            ("allSatisfy", [_]) => Some(HofOp::AllSatisfy),
+            ("reduce", [_, _]) => Some(HofOp::Reduce),
+            ("contains", [arg]) if closure_arg(arg, "where") => Some(HofOp::ContainsWhere),
+            ("first", [arg]) if closure_arg(arg, "where") => Some(HofOp::FirstWhere),
+            ("firstIndex", [arg]) if closure_arg(arg, "where") => Some(HofOp::FirstIndexWhere),
+            ("sorted", [arg]) if closure_arg(arg, "by") => Some(HofOp::SortedBy),
+            ("sorted", []) => Some(HofOp::Sorted),
+            _ => None,
+        };
+        let Some(op) = operation else {
+            return Ok(None);
+        };
+        let usage = format!("'{name}' takes a closure");
+        let unlabeled_only = matches!(
+            op,
+            HofOp::Map | HofOp::Filter | HofOp::ForEach | HofOp::AllSatisfy
+        );
+        if unlabeled_only && args.iter().any(|a| a.label().is_some()) {
+            return Err(CheckError::at(line, usage));
+        }
+        let (extra, closure_at) = match op {
+            HofOp::Reduce => {
+                if args[0].label().is_some() || args[1].label().is_some() {
+                    return Err(CheckError::at(
+                        line,
+                        "reduce takes an initial value and a closure",
+                    ));
+                }
+                let initial = self.value(args[0].value())?;
+                (Some(initial), 1)
+            }
+            _ => (None, 0),
+        };
+        let (callable_args, ret): (Vec<Ty>, Option<Ty>) = match op {
+            HofOp::Map => (vec![elem], None),
+            HofOp::Filter
+            | HofOp::ContainsWhere
+            | HofOp::FirstWhere
+            | HofOp::FirstIndexWhere
+            | HofOp::AllSatisfy => (vec![elem], Some(Ty::Bool)),
+            HofOp::ForEach => (vec![elem], Some(Ty::Void)),
+            HofOp::SortedBy => (vec![elem, elem], Some(Ty::Bool)),
+            HofOp::Reduce => {
+                let initial = extra.as_ref().map_or(Ty::Void, TExpr::ty);
+                (vec![initial, elem], Some(initial))
+            }
+            HofOp::Sorted => (Vec::new(), None),
+        };
+        if op == HofOp::Sorted {
+            if !matches!(elem, Ty::Int | Ty::Char | Ty::Str) {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "sorted() needs elements that can be ordered, but {} cannot: use sorted(by:)",
+                        self.name_of(elem)
+                    ),
+                ));
+            }
+            return Ok(Some(TExpr::Call {
+                callee: op.callee().to_string(),
+                type_args: vec![array],
+                args: vec![receiver.clone()],
+                ret: array,
+            }));
+        }
+        let function = self.callable(line, &args[closure_at], callable_args, ret)?;
+        let function_ty = function.ty();
+        let Some((_, result)) = sigs.func_parts(function_ty) else {
+            return Err(CheckError::at(line, "internal error: not a function"));
+        };
+        let ret = match op {
+            HofOp::Map => {
+                if result == Ty::Void {
+                    return Err(CheckError::at(
+                        line,
+                        "map needs a closure that returns a value",
+                    ));
+                }
+                sigs.array_of(result, line)?
+            }
+            HofOp::Filter | HofOp::SortedBy => array,
+            HofOp::Reduce => result,
+            HofOp::ForEach => Ty::Void,
+            HofOp::ContainsWhere | HofOp::AllSatisfy => Ty::Bool,
+            HofOp::FirstWhere => sigs.optional_of(elem)?,
+            HofOp::FirstIndexWhere => sigs.optional_of(Ty::Int)?,
+            HofOp::Sorted => array,
+        };
+        let mut arguments = vec![receiver.clone()];
+        arguments.extend(extra);
+        arguments.push(function);
+        Ok(Some(TExpr::Call {
+            callee: op.callee().to_string(),
+            type_args: vec![array, function_ty],
+            args: arguments,
+            ret,
+        }))
     }
 
     fn array_taking(

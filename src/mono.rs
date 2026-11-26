@@ -4,9 +4,9 @@ use std::rc::Rc;
 
 use crate::ast::BinOp;
 use crate::check::{
-    SetOp, boxed_requirement, contains_function, equality_function, hash_function, joined_function,
-    repeating_function, set_from_array_function, set_function, split_function,
-    table_listing_function,
+    HofOp, SetOp, boxed_requirement, contains_function, equality_function, hash_function,
+    higher_order_function, joined_function, repeating_function, set_from_array_function,
+    set_function, split_function, table_listing_function,
 };
 use crate::sigs::{
     COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, KEYS, REPEATING, SPLIT,
@@ -271,7 +271,12 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if callee == TO_SET {
+        let generic = if let Some(op) = HofOp::from_callee(callee) {
+            Rc::new(
+                higher_order_function(sigs, op, args, mangled.clone())
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == TO_SET {
             Rc::new(
                 args.first()
                     .map(|ty| set_from_array_function(sigs, *ty, mangled.clone()))

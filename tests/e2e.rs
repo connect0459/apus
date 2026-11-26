@@ -5181,7 +5181,7 @@ fn the_new_array_members_reject_misuse() {
     assert!(build_error("func main() { var a = [1]\n a.removeLast(1) }").contains("removeLast"));
     assert!(build_error("func main() { var a = [1]\n a.insert(1) }").contains("insert"));
     assert!(build_error("func main() { var a = [1]\n a.insert(1, 0) }").contains("insert"));
-    assert!(build_error("func main() { let a = [1]\n print(a.sorted()) }").contains("no method"));
+    assert!(build_error("func main() { let a = [1]\n print(a.shuffled()) }").contains("no method"));
     assert!(build_error("func main() { let a = [1] + [\"x\"] }").contains("expected"));
     assert!(build_error("func main() { print([1] == [\"x\"]) }").contains("expected"));
     assert!(build_error("func main() { let a = [1]\n a.first = 2 }").contains("no member"));
@@ -6085,4 +6085,96 @@ fn a_local_function_checks_its_signature_and_labels() {
         build_error("func main() {\n  func f() -> (Int) -> Int { return { $0 } }\n}")
             .contains("function type")
     );
+}
+
+#[test]
+fn map_filter_and_reduce_build_arrays_and_values_from_closures() {
+    assert_eq!(
+        main_printing(
+            "let xs = [1, 2, 3, 4, 5]\nlet doubled = xs.map { $0 * 2 }\nlet evens = xs.filter { $0 % 2 == 0 }\nlet total = xs.reduce(0) { $0 + $1 }\nlet words = xs.map { String($0) }\nprint(doubled.count)\nprint(doubled[4])\nprint(evens.count)\nprint(evens[1])\nprint(total)\nprint(words.joined(separator: \"-\"))\nlet joined = xs.reduce(\"\") { acc, x in acc + String(x) }\nprint(joined)\nprint(xs.map { $0 > 2 }.filter { $0 }.count)\nlet nested = [[1, 2], [3]].map { $0.count }\nprint(nested[0] + nested[1])"
+        ),
+        "5\n10\n2\n4\n15\n1-2-3-4-5\n12345\n3\n3\n"
+    );
+}
+
+#[test]
+fn for_each_contains_where_and_first_where_search_with_closures() {
+    assert_eq!(
+        main_printing(
+            "let xs = [3, 8, 5, 12]\nvar total = 0\nxs.forEach { total += $0 }\nprint(total)\nprint(xs.contains { $0 > 10 })\nprint(xs.contains(where: { $0 > 20 }))\nprint(xs.first { $0 > 4 } ?? -1)\nprint(xs.first(where: { $0 > 99 }) == nil)\nprint(xs.firstIndex { $0 == 5 } ?? -1)\nprint(xs.allSatisfy { $0 > 2 })\nprint(xs.allSatisfy { $0 > 3 })\nlet e: [Int] = []\nprint(e.allSatisfy { $0 > 100 })\nvar seen: [String] = []\n[\"a\", \"b\"].forEach { seen.append($0 + \"!\") }\nprint(seen.joined())"
+        ),
+        "28\ntrue\nfalse\n8\ntrue\n2\ntrue\nfalse\ntrue\na!b!\n"
+    );
+}
+
+#[test]
+fn sorted_orders_comparable_elements_and_takes_a_comparison_closure() {
+    assert_eq!(
+        main_printing(
+            "let xs = [5, 2, 9, 1, 5, 6]\nlet up = xs.sorted()\nlet down = xs.sorted { $0 > $1 }\nvar a = 0\nfor x in up { a = a * 10 + x }\nvar b = 0\nfor x in down { b = b * 10 + x }\nprint(a)\nprint(b)\nprint(xs.count)\nlet names = [\"pear\", \"apple\", \"fig\"]\nprint(names.sorted().joined(separator: \",\"))\nprint(names.sorted(by: { $0.count < $1.count }).joined(separator: \",\"))\nlet e: [Int] = []\nprint(e.sorted().count)\nprint([7].sorted()[0])\nlet chars: [Character] = [\"c\", \"a\", \"b\"]\nprint(String(chars.sorted()[0]))"
+        ),
+        "125569\n965521\n6\napple,fig,pear\nfig,pear,apple\n0\n7\na\n"
+    );
+}
+
+#[test]
+fn sorting_is_stable_and_works_on_large_arrays_and_structs() {
+    assert_eq!(
+        run(
+            "struct P {\n  var key: Int\n  var tag: Int\n}\nfunc main() {\n  let ps = [P(key: 2, tag: 0), P(key: 1, tag: 1), P(key: 2, tag: 2), P(key: 1, tag: 3)]\n  let sorted = ps.sorted { $0.key < $1.key }\n  var order = 0\n  for p in sorted { order = order * 10 + p.tag }\n  print(order)\n  var big: [Int] = []\n  var i = 0\n  while i < 5000 {\n    big.append((i * 7919) % 5003)\n    i += 1\n  }\n  let s = big.sorted()\n  var ok = true\n  var j = 1\n  while j < s.count {\n    if s[j - 1] > s[j] { ok = false }\n    j += 1\n  }\n  print(ok)\n  print(s.count)\n}"
+        ),
+        "1302\ntrue\n5000\n"
+    );
+}
+
+#[test]
+fn closures_that_map_classes_and_strings_release_everything() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  let boxes = [Box(n: 1), Box(n: 2)]\n  let ids = boxes.map { $0.n * 10 }\n  print(ids[1])\n  let kept = boxes.filter { $0.n > 1 }\n  print(kept.count)\n  print(boxes.contains { $0.n == 2 })\n}"
+        ),
+        "20\n1\ntrue\n1\n2\n"
+    );
+}
+
+#[test]
+fn a_function_value_can_be_given_to_a_higher_order_member() {
+    assert_eq!(
+        run(
+            "func double(_ x: Int) -> Int { return x * 2 }\nfunc main() {\n  func triple(_ x: Int) -> Int { return x * 3 }\n  let f = { (x: Int) -> Int in x + 1 }\n  print([1, 2].map(triple)[1])\n  print([1, 2].map(f)[0])\n  print([4].reduce(0, { $0 + $1 }))\n}"
+        ),
+        "6\n2\n4\n"
+    );
+}
+
+#[test]
+fn higher_order_members_check_their_closures() {
+    let head = "func main() {\n  let xs = [1, 2]\n  ";
+    for (body, message) in [
+        (
+            "print(xs.map { }.count)",
+            "map needs a closure that returns a value",
+        ),
+        ("print(xs.filter { $0 }.count)", "expected Bool"),
+        ("print(xs.map { $0 + \"a\" }.count)", "expected Int"),
+        ("print(xs.reduce(0) { $0 + $1 + true })", "expected Int"),
+        ("print(xs.reduce(0, 5))", "expected"),
+        (
+            "print([[1]].sorted().count)",
+            "needs elements that can be ordered",
+        ),
+        (
+            "print(xs.map({ a, b in a }).count)",
+            "takes 2 parameter(s), but 1 are expected",
+        ),
+        ("print(xs.sorted(by: 5).count)", "expected"),
+        (
+            "print(xs.filter(where: { $0 > 1 }).count)",
+            "takes a closure",
+        ),
+    ] {
+        let source = format!("{head}{body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
 }
