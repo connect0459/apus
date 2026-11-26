@@ -824,11 +824,25 @@ pub enum CaptureKind {
 pub struct CaptureEntry {
     name: String,
     kind: CaptureKind,
+    value: Option<Expr>,
 }
 
 impl CaptureEntry {
     pub fn new(name: String, kind: CaptureKind) -> Self {
-        Self { name, kind }
+        Self {
+            name,
+            kind,
+            value: None,
+        }
+    }
+
+    pub fn with_value(mut self, value: Expr) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    pub fn value(&self) -> Option<&Expr> {
+        self.value.as_ref()
     }
 
     pub fn name(&self) -> &str {

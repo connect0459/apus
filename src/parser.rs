@@ -1550,7 +1550,11 @@ impl Parser<'_> {
                 _ => return None,
             };
             self.pos += 1;
-            entries.push(CaptureEntry::new(name, kind));
+            let mut entry = CaptureEntry::new(name, kind);
+            if self.eat_punct("=") {
+                entry = entry.with_value(self.expr().ok()?);
+            }
+            entries.push(entry);
             if !self.eat_punct(",") {
                 break;
             }

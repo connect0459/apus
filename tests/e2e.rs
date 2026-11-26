@@ -6696,11 +6696,6 @@ fn a_capture_list_is_checked() {
         ),
         (
             "",
-            "var n = 1\n  let f = { [n] in n }",
-            "must be 'weak' or 'unowned'",
-        ),
-        (
-            "",
             "let f = { [weak ghost] in 1 }",
             "cannot find 'ghost' in scope",
         ),
@@ -6719,4 +6714,56 @@ fn a_capture_list_is_checked() {
         let error = build_error(&source);
         assert!(error.contains(message), "{body}: {error}");
     }
+}
+
+#[test]
+fn a_capture_list_entry_copies_the_value_at_the_moment_the_closure_is_made() {
+    assert_eq!(
+        main_printing(
+            "var n = 1\nlet byReference = { n }\nlet byCopy = { [n] in n }\nn = 5\nprint(byReference())\nprint(byCopy())\nvar a = [1]\nlet size = { [a] in a.count }\na.append(2)\nprint(size())\nprint(a.count)\nvar s = \"x\"\nlet text = { [s] in s + \"!\" }\ns += \"y\"\nprint(text())"
+        ),
+        "5\n1\n1\n2\nx!\n"
+    );
+}
+
+#[test]
+fn a_capture_list_entry_may_compute_its_value_and_a_struct_is_copied() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nclass Box {\n  var n: Int\n}\nfunc main() {\n  var p = P(x: 1)\n  let snapshot = { [p] in p.x }\n  p.x = 9\n  print(snapshot())\n  let base = 10\n  let doubled = { [twice = base * 2] in twice + 1 }\n  print(doubled())\n  let box = Box(n: 1)\n  let same = { [box] in box.n }\n  box.n = 7\n  print(same())\n  var fs: [() -> Int] = []\n  for i in 0..<3 {\n    fs.append({ [i] in i * 10 })\n  }\n  var total = 0\n  for f in fs { total += f() }\n  print(total)\n}"
+        ),
+        "1\n21\n7\n30\n"
+    );
+}
+
+#[test]
+fn a_copied_capture_is_a_constant_and_may_be_given_to_a_nested_closure() {
+    assert_eq!(
+        run(
+            "func twice(_ f: () -> Int) -> Int { return f() + f() }\nfunc main() {\n  var n = 3\n  let r = twice { [n] in twice { n } }\n  n = 100\n  print(r)\n}"
+        ),
+        "12\n"
+    );
+    assert!(
+        build_error("func main() {\n  var n = 1\n  let f: () -> Void = { [n] in n += 1 }\n}")
+            .contains("constant")
+    );
+    assert!(
+        build_error("func main() {\n  let f = { [x = nope] in x }\n}")
+            .contains("cannot find 'nope'")
+    );
+    assert!(
+        build_error("func main() {\n  let f = { [weak x = 5] in x }\n}")
+            .contains("cannot be captured weakly or unowned")
+    );
+}
+
+#[test]
+fn a_weak_capture_may_name_the_value_it_holds() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n}\nfunc main() {\n  var box: Box? = Box(n: 6)\n  if let b = box {\n    let f = { [weak held = b] in held?.n ?? -1 }\n    print(f())\n    box = nil\n    print(f())\n  }\n}"
+        ),
+        "6\n6\n"
+    );
 }

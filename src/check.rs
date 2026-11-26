@@ -2247,6 +2247,13 @@ enum Update<'e> {
     },
 }
 
+struct ListedCapture {
+    name: String,
+    kind: EnvKind,
+    copy: bool,
+    init: Option<TExpr>,
+}
+
 enum ChainKind<'e> {
     Assign { op: Option<BinOp>, value: &'e Expr },
     Call { name: &'e str, args: &'e [Arg] },
@@ -5366,7 +5373,7 @@ impl<'a> FnCx<'a> {
         parameters: &[(String, Ty)],
         ret: Ty,
         self_name: Option<(&str, Ty)>,
-        listed: &[(String, EnvKind)],
+        listed: &[ListedCapture],
         body: impl FnOnce(&mut FnCx<'a>) -> CResult<Vec<TStmt>>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
@@ -5377,17 +5384,63 @@ impl<'a> FnCx<'a> {
             cx.declare(line, param, *ty, false)?;
         }
         let mut candidates: Vec<String> = names.to_vec();
-        for (entry, _) in listed {
-            if !candidates.contains(entry) {
-                candidates.push(entry.clone());
-            }
-        }
         if !candidates.iter().any(|n| n == "self") {
             candidates.push("self".to_string());
         }
         let mut captures = Vec::new();
+        let mut handled: Vec<&str> = Vec::new();
+        for entry in listed {
+            if entry.init.is_none() && !entry.copy && entry.kind == EnvKind::Strong {
+                continue;
+            }
+            handled.push(entry.name.as_str());
+            let (value, value_ty) = match &entry.init {
+                Some(init) => (init.clone(), init.ty()),
+                None => {
+                    let outer = self.lookup(&entry.name, line)?;
+                    (TExpr::Local(outer.local, outer.ty), outer.ty)
+                }
+            };
+            let weakly = entry.kind != EnvKind::Strong;
+            if weakly && !matches!(value_ty, Ty::Class(_)) {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "'{}' cannot be captured weakly or unowned: it is {}, not a class instance",
+                        entry.name,
+                        self.name_of(value_ty)
+                    ),
+                ));
+            }
+            let (inner_ty, cell) = match entry.kind {
+                EnvKind::Strong => (
+                    value_ty,
+                    sigs.construct(sigs.cell_of(value_ty), vec![value]),
+                ),
+                EnvKind::Weak => {
+                    let optional = sigs.optional_of(value_ty)?;
+                    let wrapped = TExpr::StructInit {
+                        ty: optional,
+                        args: vec![TExpr::Int(SOME_CASE as i64), value],
+                    };
+                    (
+                        optional,
+                        sigs.construct(sigs.weak_cell_of(value_ty), vec![wrapped]),
+                    )
+                }
+                EnvKind::Unowned => (
+                    value_ty,
+                    sigs.construct(sigs.unowned_cell_of(value_ty), vec![value]),
+                ),
+            };
+            let inner = cx.declare(line, &entry.name, inner_ty, false)?;
+            cx.environment.push((inner, captures.len(), entry.kind));
+            captures.push(cell);
+        }
         for candidate in &candidates {
-            if parameters.iter().any(|(p, _)| p == candidate) {
+            if parameters.iter().any(|(p, _)| p == candidate)
+                || handled.contains(&candidate.as_str())
+            {
                 continue;
             }
             if self_name.is_some_and(|(own, _)| own == candidate) {
@@ -5396,52 +5449,15 @@ impl<'a> FnCx<'a> {
             let Ok(outer) = self.lookup(candidate, line) else {
                 continue;
             };
-            let requested = listed
-                .iter()
-                .find(|(entry, _)| entry == candidate)
-                .map(|(_, kind)| *kind);
             let inherited = self
                 .environment
                 .iter()
                 .find(|(l, _, _)| *l == outer.local)
                 .map(|(_, _, kind)| *kind);
-            let kind = match (requested, inherited) {
-                (Some(kind @ (EnvKind::Weak | EnvKind::Unowned)), _) => kind,
-                (_, Some(kind)) => kind,
-                _ => EnvKind::Strong,
-            };
-            let weakened = requested.is_some_and(|k| k != EnvKind::Strong) && inherited.is_none();
-            if weakened && !matches!(outer.ty, Ty::Class(_)) {
-                return Err(CheckError::at(
-                    line,
-                    format!(
-                        "'{candidate}' cannot be captured weakly or unowned: it is {}, not a class instance",
-                        self.name_of(outer.ty)
-                    ),
-                ));
-            }
-            let inner_ty = if weakened && kind == EnvKind::Weak {
-                sigs.optional_of(outer.ty)?
-            } else {
-                outer.ty
-            };
+            let kind = inherited.unwrap_or(EnvKind::Strong);
             let mutable = outer.mutable && kind == EnvKind::Strong;
-            let inner = cx.declare(line, candidate, inner_ty, mutable)?;
+            let inner = cx.declare(line, candidate, outer.ty, mutable)?;
             cx.environment.push((inner, captures.len(), kind));
-            if weakened {
-                let read = TExpr::Local(outer.local, outer.ty);
-                let cell = if kind == EnvKind::Weak {
-                    let wrapped = TExpr::StructInit {
-                        ty: inner_ty,
-                        args: vec![TExpr::Int(SOME_CASE as i64), read],
-                    };
-                    sigs.construct(sigs.weak_cell_of(outer.ty), vec![wrapped])
-                } else {
-                    sigs.construct(sigs.unowned_cell_of(outer.ty), vec![read])
-                };
-                captures.push(cell);
-                continue;
-            }
             if inherited.is_none() && !self.captured.contains(&outer.local) {
                 self.captured.push(outer.local);
             }
@@ -5479,30 +5495,35 @@ impl<'a> FnCx<'a> {
         })
     }
 
-    fn capture_list(&self, line: u32, closure: &ClosureExpr) -> CResult<Vec<(String, EnvKind)>> {
+    fn capture_list(&mut self, line: u32, closure: &ClosureExpr) -> CResult<Vec<ListedCapture>> {
         let mut listed = Vec::new();
         for entry in closure.captures() {
             let kind = match entry.kind() {
                 CaptureKind::Weak => EnvKind::Weak,
                 CaptureKind::Unowned => EnvKind::Unowned,
-                CaptureKind::Strong if entry.name() == "self" => EnvKind::Strong,
-                CaptureKind::Strong => {
-                    return Err(CheckError::at(
-                        line,
-                        format!(
-                            "'{}' in a capture list must be 'weak' or 'unowned': a copy of a value is not supported",
-                            entry.name()
-                        ),
-                    ));
+                CaptureKind::Strong => EnvKind::Strong,
+            };
+            let init = match entry.value() {
+                Some(expr) => {
+                    self.expected = None;
+                    Some(self.value(expr)?)
+                }
+                None => {
+                    if self.lookup(entry.name(), line).is_err() {
+                        return Err(CheckError::at(
+                            line,
+                            format!("cannot find '{}' in scope", entry.name()),
+                        ));
+                    }
+                    None
                 }
             };
-            if self.lookup(entry.name(), line).is_err() {
-                return Err(CheckError::at(
-                    line,
-                    format!("cannot find '{}' in scope", entry.name()),
-                ));
-            }
-            listed.push((entry.name().to_string(), kind));
+            listed.push(ListedCapture {
+                name: entry.name().to_string(),
+                kind,
+                copy: entry.name() != "self",
+                init,
+            });
         }
         Ok(listed)
     }
