@@ -22,10 +22,14 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
-use crate::sigs::{ARRAY_BUFFER, ARRAY_CAPACITY, ARRAY_COUNT};
+use crate::sigs::{
+    ARRAY_BUFFER, ARRAY_CAPACITY, ARRAY_COUNT, DICT_CAPACITY, DICT_COUNT, DICT_ENTRIES, DICT_TABLE,
+    DICT_USED,
+};
+mod table;
 use crate::tir::{
-    ArrayOp, DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, RC_SLOT, StrOp, TExpr, TFunc, TStmt,
-    TStruct, UNOWNED_SLOT,
+    ArrayOp, DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, DictOp, RC_SLOT, StrOp, TExpr,
+    TFunc, TStmt, TStruct, UNOWNED_SLOT,
 };
 use crate::types::Ty;
 
@@ -713,6 +717,11 @@ impl Emitter<'_, '_> {
             TStmt::Free(expr) => {
                 let value = self.value(expr)?;
                 self.free_pointer(value);
+                Ok(false)
+            }
+            TStmt::DropTable { table, key, value } => {
+                let table = self.value(table)?;
+                self.drop_table(table, *key, *value)?;
                 Ok(false)
             }
             TStmt::DropArray { array, elem } => {
@@ -1410,6 +1419,7 @@ impl Emitter<'_, '_> {
             }
             (StrOp::ByteIndex, [text, needle]) => Ok(self.byte_index(*text, *needle)),
             (StrOp::ScalarCount, [text, bytes]) => Ok(self.scalar_count(*text, *bytes)),
+            (StrOp::Hash, [text]) => Ok(self.string_hash(*text)),
             (StrOp::ByteIndexFrom, [text, needle, from]) => {
                 let length = self
                     .builder
@@ -2601,6 +2611,20 @@ impl Emitter<'_, '_> {
         let value = match expr {
             TExpr::StrOp { op, args } => self.string_op(*op, args)?,
             TExpr::ArrayOp { op, elem, args, .. } => self.array_op(*op, *elem, args)?,
+            TExpr::DictOp {
+                op,
+                key,
+                value,
+                hash,
+                equal,
+                args,
+                ..
+            } => self.dict_op(*op, *key, *value, hash, equal, args)?,
+            TExpr::HashMix { acc, value } => {
+                let acc = self.value(acc)?;
+                let value = self.value(value)?;
+                self.hash_mix(acc, value)
+            }
             TExpr::Then { value, after } => {
                 let result = self.value(value)?;
                 let result = self.detach(result, value.ty())?;

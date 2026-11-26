@@ -6,10 +6,11 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, EQUAL, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig,
-    FuncSig, JOINED, NONE_CASE, PRINT, ParamSig, SOME_CASE, SPLIT, bound_includes, scope_of,
+    ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, EQUAL, EQUATABLE, EnumSig,
+    FATAL_ERROR, FieldSig, FuncSig, HASH, JOINED, KEYS, NONE_CASE, PRINT, ParamSig, SOME_CASE,
+    SPLIT, VALUES, bound_includes, scope_of,
 };
-use crate::tir::{ArrayOp, LocalId, StrOp, TExpr, TFunc, TStmt};
+use crate::tir::{ArrayOp, DictOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
 
 const SUPER: &str = "super";
@@ -348,6 +349,194 @@ fn text_op(op: StrOp, args: Vec<TExpr>) -> TExpr {
     TExpr::StrOp { op, args }
 }
 
+fn table_op(op: DictOp, key: Ty, value: Ty, args: Vec<TExpr>, ty: Ty) -> TExpr {
+    TExpr::DictOp {
+        op,
+        key,
+        value,
+        hash: String::new(),
+        equal: String::new(),
+        args,
+        ty,
+    }
+}
+
+fn empty_table(sigs: &Signatures, ty: Ty) -> TExpr {
+    sigs.construct(ty, vec![TExpr::Int(0); 5])
+}
+
+fn empty_array(sigs: &Signatures, ty: Ty, elem: Ty) -> TExpr {
+    sigs.construct(
+        ty,
+        vec![
+            TExpr::Int(0),
+            TExpr::Int(0),
+            TExpr::ArrayOp {
+                op: ArrayOp::Buffer,
+                elem,
+                args: Vec::new(),
+                ty: Ty::Int,
+            },
+        ],
+    )
+}
+
+fn hash_value(ty: Ty, expr: TExpr) -> TExpr {
+    match ty {
+        Ty::Int | Ty::Char | Ty::Enum(_) => expr,
+        Ty::Bool => TExpr::Select {
+            cond: Box::new(expr),
+            then: Box::new(TExpr::Int(1)),
+            otherwise: Box::new(TExpr::Int(0)),
+            ty: Ty::Int,
+        },
+        Ty::Str => text_op(StrOp::Hash, vec![expr]),
+        other => TExpr::Call {
+            callee: HASH.to_string(),
+            type_args: vec![other],
+            args: vec![expr],
+            ret: Ty::Int,
+        },
+    }
+}
+
+fn mix(acc: TExpr, value: TExpr) -> TExpr {
+    TExpr::HashMix {
+        acc: Box::new(acc),
+        value: Box::new(value),
+    }
+}
+
+pub fn hash_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> {
+    let mut cx = synthetic_cx(sigs, &name, Ty::Int);
+    let subject = cx.declare(0, "subject", ty, false)?;
+    let body = if let Some(elem) = sigs.array_element(ty) {
+        let position = cx.temp(Ty::Int);
+        let acc = cx.temp(Ty::Int);
+        let mut body = vec![TStmt::Let {
+            local: acc,
+            init: array_count(subject, ty),
+        }];
+        body.extend(each_position(
+            subject,
+            ty,
+            position,
+            vec![TStmt::Assign {
+                local: acc,
+                value: mix(
+                    local(acc, Ty::Int),
+                    hash_value(elem, array_get(subject, ty, position, elem)),
+                ),
+            }],
+        ));
+        body.push(TStmt::Return(Some(local(acc, Ty::Int))));
+        body
+    } else if let Some(inner) = sigs.unwrapped(ty) {
+        let tag = TExpr::Field {
+            base: Box::new(local(subject, ty)),
+            index: 0,
+            ty: Ty::Int,
+        };
+        let payload = TExpr::Field {
+            base: Box::new(local(subject, ty)),
+            index: 1,
+            ty: inner,
+        };
+        vec![TStmt::Return(Some(TExpr::Select {
+            cond: Box::new(compare(BinOp::Eq, tag, TExpr::Int(NONE_CASE as i64))),
+            then: Box::new(TExpr::Int(0)),
+            otherwise: Box::new(mix(TExpr::Int(1), hash_value(inner, payload))),
+            ty: Ty::Int,
+        }))]
+    } else {
+        let leaves = sigs.equality_leaves(0, ty)?;
+        let mut acc = TExpr::Int(17);
+        for path in &leaves {
+            let reach = path
+                .iter()
+                .fold(local(subject, ty), |base, (index, leaf)| TExpr::Field {
+                    base: Box::new(base),
+                    index: *index,
+                    ty: *leaf,
+                });
+            let leaf = path.last().map_or(ty, |(_, leaf)| *leaf);
+            acc = mix(acc, hash_value(leaf, reach));
+        }
+        vec![TStmt::Return(Some(acc))]
+    };
+    Ok(TFunc::new(name, 1, Ty::Int, cx.locals, body))
+}
+
+pub fn table_listing_function(
+    sigs: &Signatures,
+    ty: Ty,
+    name: String,
+    keys: bool,
+) -> CResult<TFunc> {
+    let (key, value) = sigs
+        .table_parts(ty)
+        .ok_or_else(|| CheckError::at(0, "internal error: a listing needs a dictionary"))?;
+    let element = if keys { key } else { value };
+    let listing = sigs.array_of(element, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, listing);
+    let table = cx.declare(0, "table", ty, false)?;
+    let result = cx.temp(listing);
+    let position = cx.temp(Ty::Int);
+    let item = table_op(
+        if keys { DictOp::Key } else { DictOp::Value },
+        key,
+        value,
+        vec![local(table, ty), local(position, Ty::Int)],
+        element,
+    );
+    let live = table_op(
+        DictOp::Live,
+        key,
+        value,
+        vec![local(table, ty), local(position, Ty::Int)],
+        Ty::Bool,
+    );
+    let body = vec![
+        TStmt::Let {
+            local: result,
+            init: empty_array(sigs, listing, element),
+        },
+        TStmt::Let {
+            local: position,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: compare(
+                BinOp::Lt,
+                local(position, Ty::Int),
+                TExpr::Field {
+                    base: Box::new(local(table, ty)),
+                    index: DICT_USED,
+                    ty: Ty::Int,
+                },
+            ),
+            body: vec![
+                TStmt::If {
+                    cond: live,
+                    then_body: vec![TStmt::Assign {
+                        local: result,
+                        value: TExpr::ArrayOp {
+                            op: ArrayOp::Append,
+                            elem: element,
+                            args: vec![local(result, listing), item],
+                            ty: listing,
+                        },
+                    }],
+                    else_body: Vec::new(),
+                },
+                step(position),
+            ],
+        },
+        TStmt::Return(Some(local(result, listing))),
+    ];
+    Ok(TFunc::new(name, 1, listing, cx.locals, body))
+}
+
 pub fn split_function(sigs: &Signatures, name: String) -> CResult<TFunc> {
     let parts_ty = sigs.array_of(Ty::Str, 0)?;
     let mut cx = synthetic_cx(sigs, &name, parts_ty);
@@ -608,6 +797,14 @@ enum Update<'e> {
     Remove(&'e [Arg]),
     Unique,
     RemoveAll(&'e [Arg]),
+    Entry {
+        key: &'e Expr,
+        default: Option<&'e Expr>,
+        op: Option<BinOp>,
+        value: &'e Expr,
+    },
+    SetInsert(&'e [Arg]),
+    SetRemove(&'e [Arg]),
     Within {
         index: &'e Expr,
         inner: &'e Update<'e>,
@@ -736,6 +933,33 @@ impl FnCx<'_> {
             && matches!(name, "first" | "last")
         {
             return self.array_end(base, elem, name == "first");
+        }
+        if let Some((key, value)) = self.sigs.table_parts(base.ty()) {
+            let ty = base.ty();
+            let set = self.sigs.is_set(ty);
+            match name {
+                "isEmpty" => {
+                    return Ok(compare(
+                        BinOp::Eq,
+                        TExpr::Field {
+                            base: Box::new(base),
+                            index: DICT_COUNT,
+                            ty: Ty::Int,
+                        },
+                        TExpr::Int(0),
+                    ));
+                }
+                "keys" | "values" if !set => {
+                    let element = if name == "keys" { key } else { value };
+                    return Ok(TExpr::Call {
+                        callee: if name == "keys" { KEYS } else { VALUES }.to_string(),
+                        type_args: vec![ty],
+                        args: vec![base],
+                        ret: self.sigs.array_of(element, line)?,
+                    });
+                }
+                _ => {}
+            }
         }
         if name == "isEmpty" && self.sigs.array_element(base.ty()).is_some() {
             return Ok(TExpr::Binary {
@@ -1950,9 +2174,12 @@ impl FnCx<'_> {
                 Ok(TStmt::While { cond, body })
             }
             StmtKind::For { var, iter, body } => self.for_stmt(line, var, iter, body),
-            StmtKind::ForPair { .. } => {
-                Err(CheckError::at(line, "dictionaries are not supported yet"))
-            }
+            StmtKind::ForPair {
+                key,
+                value,
+                iter,
+                body,
+            } => self.for_pair(line, key, value, iter, body),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
             StmtKind::Switch { .. }
             | StmtKind::Labeled { .. }
@@ -1976,7 +2203,32 @@ impl FnCx<'_> {
     ) -> CResult<TStmt> {
         match target.kind() {
             ExprKind::Index { base, index } => {
+                let dictionary = self.value(base).is_ok_and(|v| {
+                    self.sigs.table_parts(v.ty()).is_some() && !self.sigs.is_set(v.ty())
+                });
+                if dictionary {
+                    let entry = Update::Entry {
+                        key: index,
+                        default: None,
+                        op,
+                        value,
+                    };
+                    return self.update(line, base, &entry);
+                }
                 self.update(line, base, &Update::Element { index, op, value })
+            }
+            ExprKind::IndexDefault {
+                base,
+                index,
+                default,
+            } => {
+                let entry = Update::Entry {
+                    key: index,
+                    default: Some(default),
+                    op,
+                    value,
+                };
+                self.update(line, base, &entry)
             }
             ExprKind::Ident(_) | ExprKind::Member { .. } => {
                 self.update(line, target, &Update::Assign { op, value })
@@ -2090,6 +2342,133 @@ impl FnCx<'_> {
                     args: vec![current, position, value],
                     ty: target_ty,
                 })
+            }
+            Update::Entry {
+                key: key_expr,
+                default,
+                op,
+                value,
+            } => {
+                let Some((key, stored)) = self
+                    .sigs
+                    .table_parts(target_ty)
+                    .filter(|_| !self.sigs.is_set(target_ty))
+                else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("{} is not a dictionary", self.name_of(target_ty)),
+                    ));
+                };
+                self.expected = Some(key);
+                let wanted = self.value(key_expr)?;
+                let wanted = self.coerce(line, key, wanted)?;
+                if op.is_none() && matches!(value.kind(), ExprKind::Nil) {
+                    return Ok(table_op(
+                        DictOp::Remove,
+                        key,
+                        stored,
+                        vec![current, wanted],
+                        target_ty,
+                    ));
+                }
+                self.expected = Some(stored);
+                let rhs = self.value(value)?;
+                let held = self.temp(key);
+                let (key_arg, new_value) = match op {
+                    None => (wanted, self.coerce(line, stored, rhs)?),
+                    Some(op) => {
+                        let Some(default) = default else {
+                            return Err(CheckError::at(
+                                line,
+                                "changing a dictionary value in place needs 'd[key, default: x]'",
+                            ));
+                        };
+                        self.expected = Some(stored);
+                        let fallback = self.value(default)?;
+                        let fallback = self.coerce(line, stored, fallback)?;
+                        let at = self.temp(Ty::Int);
+                        let found = table_op(
+                            DictOp::Find,
+                            key,
+                            stored,
+                            vec![current.clone(), local(held, key)],
+                            Ty::Int,
+                        );
+                        let present = TExpr::Select {
+                            cond: Box::new(compare(
+                                BinOp::Lt,
+                                TExpr::Bind {
+                                    local: at,
+                                    init: Box::new(found),
+                                },
+                                TExpr::Int(0),
+                            )),
+                            then: Box::new(fallback),
+                            otherwise: Box::new(table_op(
+                                DictOp::Value,
+                                key,
+                                stored,
+                                vec![current.clone(), local(at, Ty::Int)],
+                                stored,
+                            )),
+                            ty: stored,
+                        };
+                        let changed = self.assigned_value(line, stored, present, Some(*op), rhs)?;
+                        (
+                            TExpr::Bind {
+                                local: held,
+                                init: Box::new(wanted),
+                            },
+                            changed,
+                        )
+                    }
+                };
+                Ok(table_op(
+                    DictOp::Set,
+                    key,
+                    stored,
+                    vec![current, key_arg, new_value],
+                    target_ty,
+                ))
+            }
+            Update::SetInsert(args) | Update::SetRemove(args) => {
+                let Some((element, _)) = self
+                    .sigs
+                    .table_parts(target_ty)
+                    .filter(|_| self.sigs.is_set(target_ty))
+                else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("{} is not a set", self.name_of(target_ty)),
+                    ));
+                };
+                let [arg] = args else {
+                    return Err(CheckError::at(line, "this takes one unlabeled value"));
+                };
+                if arg.label().is_some() {
+                    return Err(CheckError::at(line, "this takes one unlabeled value"));
+                }
+                self.expected = Some(element);
+                let member = self.value(arg.value())?;
+                let member = self.coerce(line, element, member)?;
+                let op = if matches!(update, Update::SetInsert(_)) {
+                    DictOp::Set
+                } else {
+                    DictOp::Remove
+                };
+                Ok(table_op(
+                    op,
+                    element,
+                    Ty::Void,
+                    vec![current, member],
+                    target_ty,
+                ))
+            }
+            Update::RemoveAll(args) if self.sigs.table_parts(target_ty).is_some() => {
+                if !args.is_empty() {
+                    return Err(CheckError::at(line, "removeAll takes no arguments"));
+                }
+                Ok(empty_table(self.sigs, target_ty))
             }
             Update::RemoveAll(args) => {
                 let elem = self.array_target(line, target_ty)?;
@@ -2537,6 +2916,15 @@ impl FnCx<'_> {
             if let Some(elem) = self.sigs.array_element(text.ty()) {
                 return self.for_elements(line, var, text, elem, body);
             }
+            if let Some((key, value)) = self.sigs.table_parts(text.ty()) {
+                if !self.sigs.is_set(text.ty()) {
+                    return Err(CheckError::at(
+                        line,
+                        "iterate a dictionary with 'for (key, value) in'",
+                    ));
+                }
+                return self.for_table(line, text, key, value, var, None, body);
+            }
             if text.ty() != Ty::Str {
                 return Err(CheckError::at(
                     line,
@@ -2754,6 +3142,11 @@ impl FnCx<'_> {
     }
 
     fn array_literal(&mut self, line: u32, items: &[Expr], expected: Option<Ty>) -> CResult<TExpr> {
+        if let Some(ty) = expected
+            && self.sigs.is_set(ty)
+        {
+            return self.set_literal(line, items, ty);
+        }
         let mut element = expected.and_then(|ty| self.sigs.array_element(ty));
         let mut values = Vec::with_capacity(items.len());
         for item in items {
@@ -2789,6 +3182,11 @@ impl FnCx<'_> {
         if array.ty() == Ty::Str {
             return self.string_subscript(array, index);
         }
+        if let Some((key, value)) = self.sigs.table_parts(array.ty())
+            && !self.sigs.is_set(array.ty())
+        {
+            return self.lookup_entry(line, array, key, value, index, None);
+        }
         let Some(elem) = self.sigs.array_element(array.ty()) else {
             return Err(CheckError::at(
                 line,
@@ -2802,6 +3200,326 @@ impl FnCx<'_> {
             args: vec![array, position],
             ty: elem,
         })
+    }
+
+    fn dict_literal(
+        &mut self,
+        line: u32,
+        pairs: &[(Expr, Expr)],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let hint = expected
+            .and_then(|ty| self.sigs.table_parts(ty))
+            .filter(|_| expected.is_some_and(|ty| !self.sigs.is_set(ty)));
+        let mut key = hint.map(|(key, _)| key);
+        let mut value = hint.map(|(_, value)| value);
+        let mut entries = Vec::with_capacity(pairs.len());
+        for (key_expr, value_expr) in pairs {
+            self.expected = key;
+            let mut k = self.value(key_expr)?;
+            match key {
+                Some(ty) => k = self.coerce(key_expr.line(), ty, k)?,
+                None => key = Some(k.ty()),
+            }
+            self.expected = value;
+            let mut v = self.value(value_expr)?;
+            match value {
+                Some(ty) => v = self.coerce(value_expr.line(), ty, v)?,
+                None => value = Some(v.ty()),
+            }
+            entries.push((k, v));
+        }
+        let (Some(key), Some(value)) = (key, value) else {
+            return Err(CheckError::at(
+                line,
+                "an empty dictionary needs a type from its context, such as 'let x: [String: Int] = [:]'",
+            ));
+        };
+        let ty = self.sigs.dictionary_of(key, value, line)?;
+        let mut table = empty_table(self.sigs, ty);
+        for (k, v) in entries {
+            table = table_op(DictOp::Set, key, value, vec![table, k, v], ty);
+        }
+        Ok(table)
+    }
+
+    fn set_literal(&mut self, line: u32, items: &[Expr], ty: Ty) -> CResult<TExpr> {
+        let (element, _) = self
+            .sigs
+            .table_parts(ty)
+            .ok_or_else(|| CheckError::at(line, "internal error: not a set"))?;
+        let mut table = empty_table(self.sigs, ty);
+        for item in items {
+            self.expected = Some(element);
+            let value = self.value(item)?;
+            let value = self.coerce(item.line(), element, value)?;
+            table = table_op(DictOp::Set, element, Ty::Void, vec![table, value], ty);
+        }
+        Ok(table)
+    }
+
+    fn lookup_entry(
+        &mut self,
+        line: u32,
+        table: TExpr,
+        key: Ty,
+        value: Ty,
+        key_expr: &Expr,
+        default: Option<&Expr>,
+    ) -> CResult<TExpr> {
+        self.expected = Some(key);
+        let wanted = self.value(key_expr)?;
+        let wanted = self.coerce(line, key, wanted)?;
+        let ty = table.ty();
+        let held = self.temp(ty);
+        let at = self.temp(Ty::Int);
+        let found = table_op(
+            DictOp::Find,
+            key,
+            value,
+            vec![
+                TExpr::Bind {
+                    local: held,
+                    init: Box::new(table),
+                },
+                wanted,
+            ],
+            Ty::Int,
+        );
+        let missing = compare(
+            BinOp::Lt,
+            TExpr::Bind {
+                local: at,
+                init: Box::new(found),
+            },
+            TExpr::Int(0),
+        );
+        let stored = table_op(
+            DictOp::Value,
+            key,
+            value,
+            vec![local(held, ty), local(at, Ty::Int)],
+            value,
+        );
+        match default {
+            None => {
+                let optional = self.sigs.optional_of(value)?;
+                Ok(TExpr::Select {
+                    cond: Box::new(missing),
+                    then: Box::new(self.none_of(optional)),
+                    otherwise: Box::new(TExpr::StructInit {
+                        ty: optional,
+                        args: vec![TExpr::Int(SOME_CASE as i64), stored],
+                    }),
+                    ty: optional,
+                })
+            }
+            Some(default) => {
+                self.expected = Some(value);
+                let fallback = self.value(default)?;
+                let fallback = self.coerce(line, value, fallback)?;
+                Ok(TExpr::Select {
+                    cond: Box::new(missing),
+                    then: Box::new(fallback),
+                    otherwise: Box::new(stored),
+                    ty: value,
+                })
+            }
+        }
+    }
+
+    fn for_pair(
+        &mut self,
+        line: u32,
+        key_name: &str,
+        value_name: &str,
+        iter: &Expr,
+        body: &[Stmt],
+    ) -> CResult<TStmt> {
+        let table = self.value(iter)?;
+        match self.sigs.table_parts(table.ty()) {
+            Some((key, value)) if !self.sigs.is_set(table.ty()) => {
+                self.for_table(line, table, key, value, key_name, Some(value_name), body)
+            }
+            _ => Err(CheckError::at(
+                line,
+                "a loop over (key, value) needs a dictionary",
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn for_table(
+        &mut self,
+        line: u32,
+        table: TExpr,
+        key: Ty,
+        value: Ty,
+        key_name: &str,
+        value_name: Option<&str>,
+        body: &[Stmt],
+    ) -> CResult<TStmt> {
+        let ty = table.ty();
+        let held = self.temp(ty);
+        let position = self.temp(Ty::Int);
+        let index = self.temp(Ty::Int);
+        self.scopes.push(HashMap::new());
+        let result = self
+            .declare(line, key_name, key, false)
+            .and_then(|key_local| {
+                let value_local = match value_name {
+                    Some(name) => Some(self.declare(line, name, value, false)?),
+                    None => None,
+                };
+                let entry = |op: DictOp, ty_of: Ty| {
+                    table_op(
+                        op,
+                        key,
+                        value,
+                        vec![local(held, ty), local(index, Ty::Int)],
+                        ty_of,
+                    )
+                };
+                let mut inner = vec![TStmt::Let {
+                    local: key_local,
+                    init: entry(DictOp::Key, key),
+                }];
+                if let Some(value_local) = value_local {
+                    inner.push(TStmt::Let {
+                        local: value_local,
+                        init: entry(DictOp::Value, value),
+                    });
+                }
+                inner.extend(self.in_target(TargetKind::Loop, |cx| cx.block(body))?);
+                Ok(TStmt::While {
+                    cond: compare(
+                        BinOp::Lt,
+                        local(position, Ty::Int),
+                        TExpr::Field {
+                            base: Box::new(local(held, ty)),
+                            index: DICT_USED,
+                            ty: Ty::Int,
+                        },
+                    ),
+                    body: vec![
+                        TStmt::Let {
+                            local: index,
+                            init: local(position, Ty::Int),
+                        },
+                        step(position),
+                        TStmt::If {
+                            cond: entry(DictOp::Live, Ty::Bool),
+                            then_body: inner,
+                            else_body: Vec::new(),
+                        },
+                    ],
+                })
+            });
+        self.scopes.pop();
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: vec![
+                TStmt::Let {
+                    local: held,
+                    init: table,
+                },
+                TStmt::Let {
+                    local: position,
+                    init: TExpr::Int(0),
+                },
+                result?,
+            ],
+            else_body: Vec::new(),
+        })
+    }
+
+    fn table_method(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        receiver: TExpr,
+        names: (Ty, Ty),
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let (key, value) = names;
+        let ty = receiver.ty();
+        let set = self.sigs.is_set(ty);
+        match (set, name) {
+            (true, "contains") => {
+                let [arg] = args else {
+                    return Err(CheckError::at(line, "contains takes one unlabeled value"));
+                };
+                if arg.label().is_some() {
+                    return Err(CheckError::at(line, "contains takes one unlabeled value"));
+                }
+                self.expected = Some(key);
+                let wanted = self.value(arg.value())?;
+                let wanted = self.coerce(line, key, wanted)?;
+                Ok(compare(
+                    BinOp::Ge,
+                    table_op(DictOp::Find, key, value, vec![receiver, wanted], Ty::Int),
+                    TExpr::Int(0),
+                ))
+            }
+            (false, "removeValue") => {
+                let usage = "removeValue takes the label 'forKey:'";
+                let [arg] = args else {
+                    return Err(CheckError::at(line, usage));
+                };
+                if arg.label() != Some("forKey") {
+                    return Err(CheckError::at(line, usage));
+                }
+                let found = self.lookup_entry(line, receiver, key, value, arg.value(), None)?;
+                let nil = Expr::new(line, ExprKind::Nil);
+                let after = self.update_stmts(
+                    line,
+                    base,
+                    &Update::Entry {
+                        key: arg.value(),
+                        default: None,
+                        op: None,
+                        value: &nil,
+                    },
+                )?;
+                Ok(TExpr::Then {
+                    value: Box::new(found),
+                    after,
+                })
+            }
+            (false, "updateValue") => {
+                let usage = "updateValue takes a value and the label 'forKey:'";
+                let [new, at] = args else {
+                    return Err(CheckError::at(line, usage));
+                };
+                if new.label().is_some() || at.label() != Some("forKey") {
+                    return Err(CheckError::at(line, usage));
+                }
+                let found = self.lookup_entry(line, receiver, key, value, at.value(), None)?;
+                let after = self.update_stmts(
+                    line,
+                    base,
+                    &Update::Entry {
+                        key: at.value(),
+                        default: None,
+                        op: None,
+                        value: new.value(),
+                    },
+                )?;
+                Ok(TExpr::Then {
+                    value: Box::new(found),
+                    after,
+                })
+            }
+            (_, "insert" | "remove" | "removeAll") => Err(CheckError::at(
+                line,
+                format!("'{name}' changes the collection: write it as a statement of its own"),
+            )),
+            _ => Err(CheckError::at(
+                line,
+                format!("{} has no method '{name}'", self.name_of(ty)),
+            )),
+        }
     }
 
     fn for_elements(
@@ -3048,18 +3766,24 @@ impl FnCx<'_> {
                 name.as_str(),
                 "append" | "insert" | "remove" | "removeLast" | "removeAll"
             )
-            && self
-                .value(base)
-                .is_ok_and(|v| self.sigs.array_element(v.ty()).is_some())
+            && let Ok(subject) = self.value(base)
+            && (self.sigs.array_element(subject.ty()).is_some()
+                || self.sigs.table_parts(subject.ty()).is_some())
         {
+            let set = self.sigs.is_set(subject.ty());
+            let table = self.sigs.table_parts(subject.ty()).is_some();
             let update = match name.as_str() {
                 "append" => Update::Append(args),
+                "insert" if set => Update::SetInsert(args),
                 "insert" => Update::Insert(args),
+                "remove" if set => Update::SetRemove(args),
                 "remove" => Update::Remove(args),
                 "removeAll" => Update::RemoveAll(args),
                 _ => Update::RemoveLast(args),
             };
-            return self.update(expr.line(), base, &update);
+            if !(table && !set && !matches!(update, Update::RemoveAll(_))) {
+                return self.update(expr.line(), base, &update);
+            }
         }
         if let Some((base, name, args, explicit)) = member_call
             && self.enum_target(base).is_none()
@@ -3785,8 +4509,25 @@ impl FnCx<'_> {
                 "a range can only be used in a for loop",
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
-            ExprKind::DictLiteral(_) => {
-                Err(CheckError::at(line, "dictionaries are not supported yet"))
+            ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
+            ExprKind::IndexDefault {
+                base,
+                index,
+                default,
+            } => {
+                let table = self.value(base)?;
+                match self.sigs.table_parts(table.ty()) {
+                    Some((key, value)) if !self.sigs.is_set(table.ty()) => {
+                        self.lookup_entry(line, table, key, value, index, Some(default))
+                    }
+                    _ => Err(CheckError::at(
+                        line,
+                        format!(
+                            "{} has no subscript with 'default:'",
+                            self.name_of(table.ty())
+                        ),
+                    )),
+                }
             }
             ExprKind::Index { base, index } => self.subscript(line, base, index),
         }
@@ -3822,6 +4563,9 @@ impl FnCx<'_> {
             }
             if let Some(elem) = sigs.array_element(ty) {
                 return self.array_method(line, base, receiver, elem, name, args);
+            }
+            if let Some(parts) = sigs.table_parts(ty) {
+                return self.table_method(line, base, receiver, parts, name, args);
             }
             let requirement_call =
                 matches!(ty, Ty::Param(_)) || sigs.existential_protocol(ty).is_some();

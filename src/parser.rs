@@ -973,7 +973,10 @@ impl Parser<'_> {
         };
         if !matches!(
             target.kind(),
-            ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. }
+            ExprKind::Ident(_)
+                | ExprKind::Member { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::IndexDefault { .. }
         ) {
             return self
                 .fail("the left side of an assignment must be a variable, a member or an element");
@@ -1219,6 +1222,27 @@ impl Parser<'_> {
                 let index = self.expr();
                 self.leave();
                 let index = index?;
+                if self.eat_punct(",") {
+                    if !self.eat_keyword("default") {
+                        return self.fail("a subscript takes only the label 'default:'");
+                    }
+                    self.expect_punct(":")?;
+                    self.enter()?;
+                    let default = self.expr();
+                    self.leave();
+                    let default = default?;
+                    self.expect_punct("]")?;
+                    expr = Expr::new(
+                        line,
+                        ExprKind::IndexDefault {
+                            base: Box::new(expr),
+                            index: Box::new(index),
+                            default: Box::new(default),
+                        },
+                    );
+                    self.check_depth(expr.depth())?;
+                    continue;
+                }
                 self.expect_punct("]")?;
                 expr = Expr::new(
                     line,

@@ -42,6 +42,16 @@ const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
 
 pub const BOX: &str = "$Box";
 pub const ARRAY: &str = "Array";
+pub const DICTIONARY: &str = "Dictionary";
+pub const SET: &str = "Set";
+pub const DICT_COUNT: usize = 4;
+pub const DICT_USED: usize = 5;
+pub const DICT_CAPACITY: usize = 6;
+pub const DICT_ENTRIES: usize = 7;
+pub const DICT_TABLE: usize = 8;
+pub const HASH: &str = "$hash";
+pub const KEYS: &str = "$keys";
+pub const VALUES: &str = "$values";
 pub const EQUAL: &str = "$equal";
 pub const CONTAINS: &str = "$contains";
 pub const SPLIT: &str = "$split";
@@ -75,6 +85,28 @@ fn array_decl() -> StructDecl {
     )
     .with_generics(vec!["Element".to_string()])
     .as_class()
+}
+
+fn table_fields() -> Vec<Field> {
+    vec![
+        Field::new("count".to_string(), false, TypeRef::from("Int")),
+        Field::new("$used".to_string(), true, TypeRef::from("Int")),
+        Field::new("$capacity".to_string(), true, TypeRef::from("Int")),
+        Field::new("$entries".to_string(), true, TypeRef::from("Int")),
+        Field::new("$table".to_string(), true, TypeRef::from("Int")),
+    ]
+}
+
+fn dictionary_decl() -> StructDecl {
+    StructDecl::new(0, DICTIONARY.to_string(), table_fields())
+        .with_generics(vec!["Key".to_string(), "Value".to_string()])
+        .as_class()
+}
+
+fn set_decl() -> StructDecl {
+    StructDecl::new(0, SET.to_string(), table_fields())
+        .with_generics(vec!["Element".to_string()])
+        .as_class()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -458,6 +490,8 @@ impl Signatures {
         sigs.register_enum_def(&optional_decl())?;
         sigs.register_struct_def(&box_decl())?;
         sigs.register_struct_def(&array_decl())?;
+        sigs.register_struct_def(&dictionary_decl())?;
+        sigs.register_struct_def(&set_decl())?;
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -1694,6 +1728,21 @@ impl Signatures {
         if decl.name() == ARRAY && key.1.first() == Some(&Ty::Void) {
             return Err(CheckError::at(line, "an array cannot hold Void"));
         }
+        if (decl.name() == DICTIONARY || decl.name() == SET)
+            && let Some(element) = key.1.first()
+            && !self.hashable(*element)
+        {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "{} cannot be a key: only values that can be compared and hashed can",
+                    self.display(*element, scope)
+                ),
+            ));
+        }
+        if decl.name() == DICTIONARY && key.1.get(1) == Some(&Ty::Void) {
+            return Err(CheckError::at(line, "a dictionary cannot hold Void"));
+        }
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
             .map(|i| decl.bound(i).to_vec())
             .collect();
@@ -2211,6 +2260,42 @@ impl Signatures {
         }
     }
 
+    pub fn hashable(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_) | Ty::Param(_) => true,
+            Ty::Class(_) => self
+                .array_element(ty)
+                .is_some_and(|element| self.hashable(element)),
+            Ty::Struct(_) => match self.unwrapped(ty) {
+                Some(inner) => self.hashable(inner),
+                None => self.enum_of(ty).is_none() && self.equality_leaves(0, ty).is_ok(),
+            },
+            _ => false,
+        }
+    }
+
+    pub fn table_parts(&self, ty: Ty) -> Option<(Ty, Ty)> {
+        match self.origin_of(ty)? {
+            (Kind::Struct, 2, args) => Some((*args.first()?, *args.get(1)?)),
+            (Kind::Struct, 3, args) => Some((*args.first()?, Ty::Void)),
+            _ => None,
+        }
+    }
+
+    pub fn is_set(&self, ty: Ty) -> bool {
+        matches!(self.origin_of(ty), Some((Kind::Struct, 3, _)))
+    }
+
+    pub fn dictionary_of(&self, key: Ty, value: Ty, line: u32) -> CResult<Ty> {
+        let id = self.instantiate_struct(2, vec![key, value], &[], line)?;
+        Ok(self.struct_ty(2, id))
+    }
+
+    pub fn set_of(&self, element: Ty, line: u32) -> CResult<Ty> {
+        let id = self.instantiate_struct(3, vec![element], &[], line)?;
+        Ok(self.struct_ty(3, id))
+    }
+
     pub fn array_of(&self, element: Ty, line: u32) -> CResult<Ty> {
         let id = self.instantiate_struct(1, vec![element], &[], line)?;
         Ok(self.struct_ty(1, id))
@@ -2229,6 +2314,17 @@ impl Signatures {
         }
         if let Some(element) = self.array_element(ty) {
             return format!("[{}]", self.display(element, scope));
+        }
+        if let Some((key, value)) = self.table_parts(ty) {
+            return if self.is_set(ty) {
+                format!("Set<{}>", self.display(key, scope))
+            } else {
+                format!(
+                    "[{}: {}]",
+                    self.display(key, scope),
+                    self.display(value, scope)
+                )
+            };
         }
         match ty {
             Ty::Int => "Int".to_string(),

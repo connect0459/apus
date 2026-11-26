@@ -482,6 +482,15 @@ impl Scan<'_> {
             ExprKind::Index { base, index } => {
                 self.expr_uses_self(base) || self.expr_uses_self(index)
             }
+            ExprKind::IndexDefault {
+                base,
+                index,
+                default,
+            } => {
+                self.expr_uses_self(base)
+                    || self.expr_uses_self(index)
+                    || self.expr_uses_self(default)
+            }
             ExprKind::ChainValue => false,
             ExprKind::Nil
             | ExprKind::Int(_)

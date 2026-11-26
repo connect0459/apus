@@ -194,6 +194,12 @@ impl Encoder<'_> {
                 self.tag(22);
                 self.expr(expr);
             }
+            TStmt::DropTable { table, key, value } => {
+                self.tag(24);
+                self.expr(table);
+                self.ty(*key);
+                self.ty(*value);
+            }
             TStmt::DropArray { array, elem } => {
                 self.tag(23);
                 self.expr(array);
@@ -297,6 +303,29 @@ impl Encoder<'_> {
                 self.tag(59);
                 self.expr(object);
                 self.expr(class);
+            }
+            TExpr::HashMix { acc, value } => {
+                self.tag(63);
+                self.expr(acc);
+                self.expr(value);
+            }
+            TExpr::DictOp {
+                op,
+                key,
+                value,
+                args,
+                ty,
+                ..
+            } => {
+                self.tag(62);
+                self.tag(op.code());
+                self.ty(*key);
+                self.ty(*value);
+                self.ty(*ty);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
             }
             TExpr::Then { value, after } => {
                 self.tag(61);

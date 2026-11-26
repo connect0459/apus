@@ -1,6 +1,6 @@
 use crate::ast::BinOp;
 use crate::sigs::Signatures;
-use crate::tir::{ArrayOp, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
+use crate::tir::{ArrayOp, DictOp, LocalId, RC_SLOT, TAG_SLOT, TExpr, TFunc, TStmt, UNOWNED_SLOT};
 use crate::types::{StructId, Ty};
 
 const DESTROYING: i64 = 1 << 40;
@@ -86,6 +86,13 @@ pub fn drop_function(sigs: &Signatures, id: StructId) -> TFunc {
                 TStmt::Release(member)
             });
         }
+    }
+    if let Some((key, value)) = sigs.table_parts(class) {
+        body.push(TStmt::DropTable {
+            table: receiver(),
+            key,
+            value,
+        });
     }
     if let Some(elem) = sigs.array_element(class) {
         body.push(TStmt::DropArray {
@@ -385,6 +392,15 @@ impl Pass<'_> {
                 out.extend(self.release_temps(&temps));
             }
             TStmt::Clear(local) => out.push(TStmt::Clear(*local)),
+            TStmt::DropTable { table, key, value } => {
+                let (table, temps) = self.scoped(|p| p.expr(table));
+                out.push(TStmt::DropTable {
+                    table,
+                    key: *key,
+                    value: *value,
+                });
+                out.extend(self.release_temps(&temps));
+            }
             TStmt::DropArray { array, elem } => {
                 let (array, temps) = self.scoped(|p| p.expr(array));
                 out.push(TStmt::DropArray { array, elem: *elem });
@@ -609,6 +625,7 @@ impl Pass<'_> {
                 | TExpr::Then { .. }
         ) || matches!(expr, TExpr::StrOp { op, .. } if op.allocates())
             || matches!(expr, TExpr::ArrayOp { op, .. } if op.allocates())
+            || matches!(expr, TExpr::DictOp { op, .. } if op.allocates())
     }
 
     fn owned_value(&mut self, expr: &TExpr) -> TExpr {
@@ -661,6 +678,37 @@ impl Pass<'_> {
                 op: *op,
                 args: self.borrowed_all(args),
             },
+            TExpr::HashMix { acc, value } => TExpr::HashMix {
+                acc: Box::new(self.borrowed(acc)),
+                value: Box::new(self.borrowed(value)),
+            },
+            TExpr::DictOp {
+                op,
+                key,
+                value,
+                hash,
+                equal,
+                args,
+                ty,
+            } => {
+                let args = match op {
+                    DictOp::Set => {
+                        let mut rewritten = vec![self.borrowed(&args[0])];
+                        rewritten.extend(args[1..].iter().map(|a| self.owned_value(a)));
+                        rewritten
+                    }
+                    _ => self.borrowed_all(args),
+                };
+                TExpr::DictOp {
+                    op: *op,
+                    key: *key,
+                    value: *value,
+                    hash: hash.clone(),
+                    equal: equal.clone(),
+                    args,
+                    ty: *ty,
+                }
+            }
             TExpr::Then { value, after } => {
                 let value = self.owned_value(value);
                 TExpr::Then {

@@ -732,6 +732,11 @@ fn depth_of(kind: &ExprKind) -> u32 {
             .max()
             .unwrap_or(0),
         ExprKind::Index { base, index } => base.depth.max(index.depth),
+        ExprKind::IndexDefault {
+            base,
+            index,
+            default,
+        } => base.depth.max(index.depth).max(default.depth),
         ExprKind::Unwrap(expr)
         | ExprKind::Unary { expr, .. }
         | ExprKind::Cast { expr, .. }
@@ -784,6 +789,11 @@ pub enum ExprKind {
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
+    },
+    IndexDefault {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        default: Box<Expr>,
     },
     Unwrap(Box<Expr>),
     Coalesce {

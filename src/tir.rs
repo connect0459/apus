@@ -92,6 +92,33 @@ impl ArrayOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictOp {
+    Find,
+    Set,
+    Remove,
+    Key,
+    Value,
+    Live,
+}
+
+impl DictOp {
+    pub fn code(self) -> u8 {
+        match self {
+            DictOp::Find => 1,
+            DictOp::Set => 2,
+            DictOp::Remove => 3,
+            DictOp::Key => 4,
+            DictOp::Value => 5,
+            DictOp::Live => 6,
+        }
+    }
+
+    pub fn allocates(self) -> bool {
+        matches!(self, DictOp::Set | DictOp::Remove)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrOp {
     Concat,
     Count,
@@ -122,6 +149,7 @@ pub enum StrOp {
     ByteSlice,
     ScalarAt,
     ScalarSlice,
+    Hash,
 }
 
 impl StrOp {
@@ -146,6 +174,7 @@ impl StrOp {
             | StrOp::CharValue
             | StrOp::ByteIndex
             | StrOp::ByteIndexFrom
+            | StrOp::Hash
             | StrOp::ScalarCount => Ty::Int,
             StrOp::CharAt
             | StrOp::ScalarAt
@@ -207,6 +236,7 @@ impl StrOp {
             StrOp::ByteSlice => 27,
             StrOp::ScalarAt => 28,
             StrOp::ScalarSlice => 29,
+            StrOp::Hash => 30,
         }
     }
 }
@@ -359,6 +389,11 @@ pub enum TStmt {
         array: TExpr,
         elem: Ty,
     },
+    DropTable {
+        table: TExpr,
+        key: Ty,
+        value: Ty,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -439,6 +474,19 @@ pub enum TExpr {
         value: Box<TExpr>,
         after: Vec<TStmt>,
     },
+    DictOp {
+        op: DictOp,
+        key: Ty,
+        value: Ty,
+        hash: String,
+        equal: String,
+        args: Vec<TExpr>,
+        ty: Ty,
+    },
+    HashMix {
+        acc: Box<TExpr>,
+        value: Box<TExpr>,
+    },
     Witness {
         protocol: String,
         method: String,
@@ -494,6 +542,8 @@ impl TExpr {
             | TExpr::LoadWeak(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::Then { value, .. } => value.ty(),
+            TExpr::HashMix { .. } => Ty::Int,
+            TExpr::DictOp { ty, .. } => *ty,
             TExpr::FuncAddr(_) | TExpr::ClassDesc(_) | TExpr::Descriptor(_) => Ty::Int,
             TExpr::InstanceOf { .. } => Ty::Bool,
             TExpr::StrOp { op, .. } => op.result(),
@@ -629,6 +679,11 @@ impl<E> Rewriter<'_, E> {
             TStmt::DropArray { array, elem } => TStmt::DropArray {
                 array: self.expr(array)?,
                 elem: (self.ty)(*elem)?,
+            },
+            TStmt::DropTable { table, key, value } => TStmt::DropTable {
+                table: self.expr(table)?,
+                key: (self.ty)(*key)?,
+                value: (self.ty)(*value)?,
             },
         })
     }
@@ -846,6 +901,42 @@ impl<E> Rewriter<'_, E> {
                 base: Box::new(self.expr(base)?),
                 ty: (self.ty)(*ty)?,
             },
+            TExpr::HashMix { acc, value } => TExpr::HashMix {
+                acc: Box::new(self.expr(acc)?),
+                value: Box::new(self.expr(value)?),
+            },
+            TExpr::DictOp {
+                op,
+                key,
+                value,
+                args,
+                ty,
+                ..
+            } => {
+                let key = (self.ty)(*key)?;
+                let value = (self.ty)(*value)?;
+                let inline = matches!(key, Ty::Int | Ty::Bool | Ty::Char | Ty::Str | Ty::Enum(_));
+                let (hash, equal) = if inline || key.is_param_like() {
+                    (String::new(), String::new())
+                } else {
+                    (
+                        (self.call)("$hash".to_string(), vec![key])?.0,
+                        (self.call)("$equal".to_string(), vec![key])?.0,
+                    )
+                };
+                TExpr::DictOp {
+                    op: *op,
+                    key,
+                    value,
+                    hash,
+                    equal,
+                    args: args
+                        .iter()
+                        .map(|a| self.expr(a))
+                        .collect::<Result<Vec<_>, E>>()?,
+                    ty: (self.ty)(*ty)?,
+                }
+            }
             TExpr::Then { value, after } => TExpr::Then {
                 value: Box::new(self.expr(value)?),
                 after: self.stmts(after)?,

@@ -5482,3 +5482,187 @@ fn splitting_joining_and_slicing_in_a_loop_keep_their_results() {
     let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 50000 {\n    let line = \"k\" + String(i) + \",v,\" + String(i + 1)\n    let parts = line.split(separator: \",\")\n    let back = parts.joined(separator: \";\")\n    total += back.count + parts[1].count + back[0..<2].count\n    i += 1\n  }\n  print(total)\n}";
     assert_eq!(run(source), "827784\n");
 }
+
+#[test]
+fn a_dictionary_literal_is_read_by_key_and_counted() {
+    assert_eq!(
+        main_printing(
+            "let d = [\"a\": 1, \"b\": 2, \"c\": 3]\nprint(d.count)\nprint(d[\"b\"] ?? -1)\nprint(d[\"z\"] ?? -1)\nprint(d[\"z\"] == nil)\nprint(d[\"z\", default: 9])\nprint(d[\"a\", default: 9])\nprint(d.isEmpty)\nlet e: [Int: String] = [:]\nprint(e.isEmpty)\nprint(e.count)"
+        ),
+        "3\n2\n-1\ntrue\n9\n1\nfalse\ntrue\n0\n"
+    );
+}
+
+#[test]
+fn assigning_to_a_key_inserts_replaces_and_nil_removes() {
+    assert_eq!(
+        main_printing(
+            "var d: [String: Int] = [:]\nd[\"x\"] = 1\nd[\"y\"] = 2\nd[\"x\"] = 10\nprint(d.count)\nprint(d[\"x\"] ?? 0)\nd[\"y\"] = nil\nprint(d.count)\nprint(d[\"y\"] == nil)\nd[\"missing\"] = nil\nprint(d.count)\nd[\"n\", default: 0] += 5\nd[\"n\", default: 0] += 5\nprint(d[\"n\"] ?? 0)"
+        ),
+        "2\n10\n1\ntrue\n1\n10\n"
+    );
+}
+
+#[test]
+fn a_dictionary_iterates_in_insertion_order() {
+    assert_eq!(
+        main_printing(
+            "var d: [Int: String] = [:]\nd[30] = \"c\"\nd[10] = \"a\"\nd[20] = \"b\"\nd[10] = \"A\"\nd[30] = nil\nd[40] = \"d\"\nfor (k, v) in d {\n  print(\"\\(k)=\\(v)\")\n}\nprint(d.keys.count)\nprint(d.values[0] + d.values[2])"
+        ),
+        "10=A\n20=b\n40=d\n3\nAd\n"
+    );
+}
+
+#[test]
+fn a_dictionary_copy_is_independent_of_the_original() {
+    assert_eq!(
+        main_printing(
+            "var a = [1: 1, 2: 2]\nlet b = a\na[3] = 3\na[1] = 100\na[2] = nil\nprint(a.count)\nprint(b.count)\nprint(a[1] ?? 0)\nprint(b[1] ?? 0)\nprint(b[2] ?? 0)\nvar c = b\nc.removeAll()\nprint(c.count)\nprint(b.count)"
+        ),
+        "2\n2\n100\n1\n2\n0\n2\n"
+    );
+}
+
+#[test]
+fn a_dictionary_grows_and_survives_many_removals() {
+    assert_eq!(
+        main_printing(
+            "var d: [Int: Int] = [:]\nvar i = 0\nwhile i < 2000 {\n  d[i] = i * 2\n  i += 1\n}\ni = 0\nwhile i < 2000 {\n  if i % 3 != 0 { d[i] = nil }\n  i += 1\n}\nvar total = 0\nfor (k, v) in d { total += k + v }\nprint(d.count)\nprint(total)\nprint(d[3] ?? -1)\nprint(d[4] ?? -1)\nd[4] = 8\nprint(d[4] ?? -1)"
+        ),
+        "667\n1998999\n6\n-1\n8\n"
+    );
+}
+
+#[test]
+fn removing_and_updating_values_return_the_old_one() {
+    assert_eq!(
+        main_printing(
+            "var d = [\"a\": 1, \"b\": 2]\nprint(d.removeValue(forKey: \"a\") ?? -1)\nprint(d.removeValue(forKey: \"a\") ?? -1)\nprint(d.updateValue(5, forKey: \"b\") ?? -1)\nprint(d.updateValue(6, forKey: \"c\") ?? -1)\nprint(d.count)\nprint(d[\"b\"] ?? 0)\nd.removeValue(forKey: \"b\")\nprint(d.count)"
+        ),
+        "1\n-1\n2\n-1\n2\n5\n1\n"
+    );
+}
+
+#[test]
+fn dictionaries_hold_class_instances_and_release_them() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  var d = [\"a\": Box(n: 1), \"b\": Box(n: 2)]\n  d[\"a\"] = Box(n: 3)\n  print(0)\n  d[\"b\"] = nil\n  print(9)\n}"
+        ),
+        "1\n0\n2\n9\n3\n"
+    );
+}
+
+#[test]
+fn a_dictionary_key_can_be_a_character_a_bool_an_enum_a_struct_an_array_or_an_optional() {
+    assert_eq!(
+        run(
+            "enum Color {\n  case red\n  case green\n}\nstruct P {\n  var x: Int\n  var name: String\n}\nfunc main() {\n  var c: [Character: Int] = [\"a\": 1]\n  c[\"b\"] = 2\n  print(c[\"b\"] ?? 0)\n  var b = [true: \"yes\", false: \"no\"]\n  print(b[false] ?? \"\")\n  var e = [Color.red: 1, Color.green: 2]\n  e[.red] = 10\n  print(e[.red] ?? 0)\n  var s: [P: Int] = [P(x: 1, name: \"a\"): 5]\n  s[P(x: 1, name: \"a\")] = 6\n  s[P(x: 2, name: \"a\")] = 7\n  print(s.count)\n  print(s[P(x: 1, name: \"a\")] ?? 0)\n  var a: [[Int]: String] = [[1, 2]: \"p\"]\n  a[[1, 2]] = \"q\"\n  a[[2, 1]] = \"r\"\n  print(a.count)\n  print(a[[1, 2]] ?? \"\")\n  var o: [Int?: Int] = [nil: 1, 5: 2]\n  o[nil] = 3\n  print(o[nil] ?? 0)\n  print(o[5] ?? 0)\n  print(o.count)\n}"
+        ),
+        "2\nno\n10\n2\n6\n2\nq\n3\n2\n2\n"
+    );
+}
+
+#[test]
+fn dictionary_values_can_be_structs_arrays_and_dictionaries() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var y: Int\n}\nfunc main() {\n  var ps: [String: P] = [\"a\": P(x: 1, y: 2)]\n  ps[\"b\"] = P(x: 3, y: 4)\n  print((ps[\"b\"] ?? P(x: 0, y: 0)).y)\n  var arrays = [\"k\": [1, 2]]\n  arrays[\"k\"] = (arrays[\"k\"] ?? []) + [3]\n  print(arrays[\"k\"]?.count ?? 0)\n  var nested: [Int: [String: Int]] = [1: [\"a\": 1]]\n  nested[1] = [\"b\": 2]\n  print((nested[1] ?? [:])[\"b\"] ?? 0)\n  var total = 0\n  for (_k, p) in ps { total += p.x + p.y }\n  print(total)\n}"
+        ),
+        "4\n3\n2\n10\n"
+    );
+}
+
+#[test]
+fn struct_and_class_members_hold_dictionaries_that_can_change() {
+    assert_eq!(
+        run(
+            "struct Index {\n  var counts: [String: Int]\n}\nclass Cache {\n  var store: [Int: String]\n  init() { self.store = [:] }\n  func put(_ k: Int, _ v: String) { store[k] = v }\n  func size() -> Int { return store.count }\n}\nfunc main() {\n  var i = Index(counts: [:])\n  i.counts[\"a\", default: 0] += 1\n  i.counts[\"a\", default: 0] += 1\n  let copy = i\n  i.counts[\"b\"] = 1\n  print(i.counts[\"a\"] ?? 0)\n  print(i.counts.count)\n  print(copy.counts.count)\n  let c = Cache()\n  c.put(1, \"x\")\n  c.put(2, \"y\")\n  c.put(1, \"z\")\n  print(c.size())\n  print(c.store[1] ?? \"\")\n}"
+        ),
+        "2\n2\n1\n2\nz\n"
+    );
+}
+
+#[test]
+fn a_generic_function_can_use_a_dictionary_of_its_type_parameters() {
+    assert_eq!(
+        run(
+            "func get<K, V>(_ d: [K: V], _ k: K) -> V? { return d[k] }\nfunc names<K, V>(_ d: [K: V]) -> [K] { return d.keys }\nfunc put<K, V>(_ d: [K: V], _ k: K, _ v: V) -> [K: V] {\n  var copy = d\n  copy[k] = v\n  return copy\n}\nstruct P {\n  var x: Int\n}\nfunc main() {\n  print(get([\"a\": 4], \"a\") ?? -1)\n  print(get([1: \"x\"], 2) ?? \"none\")\n  print(get([P(x: 1): 7], P(x: 1)) ?? -1)\n  print(names([3: 1, 4: 2]).count)\n  let d = put([\"a\": 1], \"b\", 2)\n  print(d.count)\n  print(d[\"b\"] ?? 0)\n}"
+        ),
+        "4\nnone\n7\n2\n2\n2\n"
+    );
+}
+
+#[test]
+fn dictionaries_built_and_dropped_in_a_loop_keep_their_contents() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 20000 {\n    var d: [String: [Int]] = [:]\n    d[String(i)] = [i]\n    d[\"k\"] = [1, 2]\n    let e = d\n    d[String(i)] = nil\n    total += e.count + d.count + (e[String(i)] ?? [0])[0] % 2\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "70000\n");
+}
+
+#[test]
+fn a_set_keeps_each_member_once_in_insertion_order() {
+    assert_eq!(
+        main_printing(
+            "var s: Set<Int> = [3, 1, 3, 2]\nprint(s.count)\nprint(s.contains(1))\nprint(s.contains(9))\ns.insert(9)\ns.insert(1)\ns.remove(3)\nprint(s.count)\nvar order = 0\nfor x in s { order = order * 10 + x }\nprint(order)\nlet e: Set<String> = []\nprint(e.isEmpty)\nvar t: Set<String> = [\"a\"]\nlet u = t\nt.insert(\"b\")\nprint(t.count)\nprint(u.count)\nt.removeAll()\nprint(t.isEmpty)\nprint(u.contains(\"a\"))"
+        ),
+        "3\ntrue\nfalse\n3\n129\ntrue\n2\n1\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn a_set_holds_structs_arrays_and_characters() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nfunc main() {\n  var ps: Set<P> = [P(x: 1)]\n  ps.insert(P(x: 1))\n  ps.insert(P(x: 2))\n  print(ps.count)\n  print(ps.contains(P(x: 2)))\n  var arrays: Set<[Int]> = [[1], [1], [2, 3]]\n  print(arrays.count)\n  var cs: Set<Character> = []\n  for c in \"hello\" { cs.insert(c) }\n  print(cs.count)\n  print(cs.contains(\"l\"))\n}"
+        ),
+        "2\ntrue\n2\n4\ntrue\n"
+    );
+}
+
+#[test]
+fn the_dictionary_and_set_forms_reject_misuse() {
+    assert!(
+        build_error("func main() { let d = [:]\n print(d.count) }").contains("empty dictionary")
+    );
+    assert!(
+        build_error("class C {}\nfunc main() { let d: [C: Int] = [:] }")
+            .contains("cannot be a key")
+    );
+    assert!(
+        build_error("func main() { let d = [\"a\": 1]\n print(d[1]) }").contains("expected String")
+    );
+    assert!(build_error("func main() { let d = [\"a\": 1]\n d[\"b\"] = 2 }").contains("constant"));
+    assert!(build_error("func main() { var d = [\"a\": 1]\n d[\"a\"] += 1 }").contains("default"));
+    assert!(
+        build_error("func main() { var d = [\"a\": 1]\n d[\"a\"] = \"x\" }")
+            .contains("expected Int")
+    );
+    assert!(
+        build_error("func main() { let d = [\"a\": 1]\n for x in d { } }").contains("(key, value)")
+    );
+    assert!(
+        build_error("func main() { let a = [1]\n for (k, v) in a { } }").contains("dictionary")
+    );
+    assert!(
+        build_error("func main() { var s: Set<Int> = [1]\n let x = s.insert(2) }")
+            .contains("statement")
+    );
+    assert!(
+        build_error("func main() { let d = [\"a\": 1]\n print(d.sorted()) }").contains("no method")
+    );
+    assert!(
+        build_error("func main() { let s: Set<Int> = [1]\n print(s.keys) }").contains("member")
+    );
+    assert!(
+        build_error("func main() { var d = [\"a\": 1]\n d.removeValue(\"a\") }")
+            .contains("removeValue")
+    );
+    assert!(
+        build_error("func main() { var d = [\"a\": 1]\n d.updateValue(1) }")
+            .contains("updateValue")
+    );
+    assert!(build_error("func main() { let d = [\"a\": 1]\n print(d == d) }").contains("equality"));
+    assert!(
+        build_error("func main() { let a = [1]\n print(a[0, default: 1]) }").contains("default")
+    );
+}

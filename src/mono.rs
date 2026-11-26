@@ -4,9 +4,13 @@ use std::rc::Rc;
 
 use crate::ast::BinOp;
 use crate::check::{
-    boxed_requirement, contains_function, equality_function, joined_function, split_function,
+    boxed_requirement, contains_function, equality_function, hash_function, joined_function,
+    split_function, table_listing_function,
 };
-use crate::sigs::{COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, JOINED, SPLIT, Signatures};
+use crate::sigs::{
+    COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, KEYS, SPLIT, Signatures,
+    VALUES,
+};
 use crate::tir::{Descriptor, TFunc, Witnessed};
 use crate::types::Ty;
 
@@ -266,7 +270,21 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if callee == SPLIT {
+        let generic = if callee == HASH {
+            Rc::new(
+                args.first()
+                    .map(|ty| hash_function(sigs, *ty, mangled.clone()))
+                    .ok_or_else(|| "internal error: no type for hash".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == KEYS || callee == VALUES {
+            Rc::new(
+                args.first()
+                    .map(|ty| table_listing_function(sigs, *ty, mangled.clone(), callee == KEYS))
+                    .ok_or_else(|| "internal error: no type for a listing".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == SPLIT {
             Rc::new(split_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?)
         } else if callee == JOINED {
             Rc::new(joined_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?)

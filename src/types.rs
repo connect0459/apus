@@ -57,6 +57,10 @@ impl Ty {
         }
     }
 
+    pub fn is_param_like(self) -> bool {
+        matches!(self, Ty::Param(_) | Ty::Assoc(_))
+    }
+
     pub fn is_struct(self) -> bool {
         matches!(self, Ty::Struct(_))
     }
