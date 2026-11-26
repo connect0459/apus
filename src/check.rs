@@ -7372,6 +7372,7 @@ impl<'a> FnCx<'a> {
                 ty: Ty::Str,
             }),
             Ty::Enum(_) => Ok(self.enum_name(value)),
+            other if self.sigs.tuple_elements(other).is_some() => self.tuple_text(line, value),
             other => Err(CheckError::at(
                 line,
                 format!(
@@ -7380,6 +7381,68 @@ impl<'a> FnCx<'a> {
                 ),
             )),
         }
+    }
+
+    fn tuple_text(&mut self, line: u32, value: TExpr) -> CResult<TExpr> {
+        let ty = value.ty();
+        let Some(elements) = self.sigs.tuple_elements(ty) else {
+            return Err(CheckError::at(line, "internal error: not a tuple"));
+        };
+        let labels = self.sigs.tuple_labels(ty).unwrap_or_default();
+        let held = self.temp(ty);
+        let mut source = Some(value);
+        let concat = |left: TExpr, right: TExpr| text_op(StrOp::Concat, vec![left, right]);
+        let literal = |text: &str| TExpr::Str(text.to_string());
+        let mut text = literal("(");
+        for (index, element) in elements.iter().enumerate() {
+            if index > 0 {
+                text = concat(text, literal(", "));
+            }
+            if let Some(Some(label)) = labels.get(index) {
+                text = concat(text, literal(&format!("{label}: ")));
+            }
+            let base = match source.take() {
+                Some(value) => TExpr::Bind {
+                    local: held,
+                    init: Box::new(value),
+                },
+                None => TExpr::Local(held, ty),
+            };
+            let field = TExpr::Field {
+                base: Box::new(base),
+                index,
+                ty: *element,
+            };
+            let shown = match *element {
+                Ty::Int => text_op(StrOp::FromInt, vec![field]),
+                Ty::Bool => TExpr::Select {
+                    cond: Box::new(field),
+                    then: Box::new(literal("true")),
+                    otherwise: Box::new(literal("false")),
+                    ty: Ty::Str,
+                },
+                Ty::Str => concat(concat(literal("\""), field), literal("\"")),
+                Ty::Char => concat(
+                    concat(literal("\""), text_op(StrOp::FromChar, vec![field])),
+                    literal("\""),
+                ),
+                Ty::Enum(_) => self.enum_name(field),
+                other if self.sigs.tuple_elements(other).is_some() => {
+                    self.tuple_text(line, field)?
+                }
+                other => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "cannot print a tuple that holds a value of type {}",
+                            self.name_of(other)
+                        ),
+                    ));
+                }
+            };
+            text = concat(text, shown);
+        }
+        Ok(concat(text, literal(")")))
     }
 
     fn enum_name(&mut self, value: TExpr) -> TExpr {
@@ -7767,6 +7830,9 @@ impl<'a> FnCx<'a> {
                 op: StrOp::FromChar,
                 args: vec![value],
             }));
+        }
+        if self.sigs.tuple_elements(value.ty()).is_some() {
+            return Ok(TStmt::Print(self.tuple_text(line, value)?));
         }
         if !matches!(value.ty(), Ty::Int | Ty::Bool | Ty::Str) {
             return Err(CheckError::at(

@@ -6895,3 +6895,21 @@ fn a_tuple_switch_is_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_tuple_is_printed_and_converted_to_a_string_like_swift_does() {
+    assert_eq!(
+        run(
+            "enum Color {\n  case red\n}\nfunc main() {\n  print((1, 2))\n  print((1, \"a\"))\n  print((x: 3, y: true))\n  let c: Character = \"c\"\n  print((c, Color.red))\n  let t = (1, (2, 3))\n  print(t)\n  let s = String((4, \"z\"))\n  print(s + \"!\")\n  print(\"pair \\((5, 6))\")\n  print([(1, \"a\"), (2, \"b\")][1])\n  print((offset: 0, element: \"q\"))\n}"
+        ),
+        "(1, 2)\n(1, \"a\")\n(x: 3, y: true)\n(\"c\", red)\n(1, (2, 3))\n(4, \"z\")!\npair (5, 6)\n(2, \"b\")\n(offset: 0, element: \"q\")\n"
+    );
+}
+
+#[test]
+fn a_tuple_that_holds_an_unprintable_value_is_rejected() {
+    assert!(
+        build_error("class C {}\nfunc main() {\n  print((1, C()))\n}")
+            .contains("cannot print a tuple that holds")
+    );
+}
