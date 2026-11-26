@@ -604,6 +604,12 @@ pub enum StmtKind {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    IfCase {
+        label: CaseLabel,
+        subject: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+    },
     WhileLet {
         name: String,
         mutable: bool,

@@ -1068,11 +1068,44 @@ impl Parser<'_> {
         Ok(Some((name, mutable, self.header_expr()?)))
     }
 
+    fn case_label(&mut self) -> PResult<CaseLabel> {
+        Ok(if self.is_punct("(") {
+            let mut alternatives = vec![self.tuple_pattern()?];
+            while self.eat_punct(",") {
+                alternatives.push(self.tuple_pattern()?);
+            }
+            CaseLabel::Tuples(alternatives)
+        } else if self.at_value_pattern() {
+            let mut values = vec![self.range()?];
+            while self.eat_punct(",") {
+                values.push(self.range()?);
+            }
+            CaseLabel::Values(values)
+        } else {
+            let mut patterns = vec![self.pattern()?];
+            while self.eat_punct(",") {
+                patterns.push(self.pattern()?);
+            }
+            CaseLabel::Patterns(patterns)
+        })
+    }
+
     fn if_kind(&mut self) -> PResult<StmtKind> {
-        let binding = self.optional_binding()?;
-        let cond = match &binding {
-            Some(_) => None,
-            None => Some(self.header_expr()?),
+        let matching = if self.eat_keyword("case") {
+            let label = self.case_label()?;
+            self.expect_punct("=")?;
+            Some((label, self.header_expr()?))
+        } else {
+            None
+        };
+        let binding = if matching.is_some() {
+            None
+        } else {
+            self.optional_binding()?
+        };
+        let cond = match (&binding, &matching) {
+            (None, None) => Some(self.header_expr()?),
+            _ => None,
         };
         let then_body = self.block()?;
         let else_body = if self.eat_keyword("else") {
@@ -1089,6 +1122,14 @@ impl Parser<'_> {
         } else {
             None
         };
+        if let Some((label, subject)) = matching {
+            return Ok(StmtKind::IfCase {
+                label,
+                subject,
+                then_body,
+                else_body,
+            });
+        }
         Ok(match (binding, cond) {
             (Some((name, mutable, value)), _) => StmtKind::IfLet {
                 name,
@@ -1908,6 +1949,36 @@ mod tests {
             ExprKind::Closure(closure) => closure,
             other => panic!("expected a closure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn if_case_takes_a_pattern_an_equals_sign_and_a_subject() {
+        let stmts = body("if case .circle(let r) = shape { use(r) } else { other() }");
+        match stmts[0].kind() {
+            StmtKind::IfCase {
+                label: CaseLabel::Patterns(patterns),
+                else_body,
+                ..
+            } => {
+                assert_eq!(patterns.len(), 1);
+                assert!(else_body.is_some());
+            }
+            other => panic!("expected an if case, got {other:?}"),
+        }
+        assert!(matches!(
+            body("if case (0, let y) = t { }")[0].kind(),
+            StmtKind::IfCase {
+                label: CaseLabel::Tuples(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            body("if case 1...5 = n { }")[0].kind(),
+            StmtKind::IfCase {
+                label: CaseLabel::Values(_),
+                ..
+            }
+        ));
     }
 
     #[test]

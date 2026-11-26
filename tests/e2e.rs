@@ -6913,3 +6913,59 @@ fn a_tuple_that_holds_an_unprintable_value_is_rejected() {
             .contains("cannot print a tuple that holds")
     );
 }
+
+#[test]
+fn if_case_tests_one_pattern_and_binds_its_names() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case square(Int)\n  case empty\n}\nfunc area(_ s: Shape) -> Int {\n  if case .circle(let r) = s {\n    return r * 3\n  } else if case .square(let w) = s {\n    return w * w\n  }\n  return 0\n}\nfunc main() {\n  print(area(.circle(4)))\n  print(area(Shape.square(5)))\n  print(area(.empty))\n  if case .circle(let r) = Shape.circle(7) {\n    print(r)\n  } else {\n    print(\"no\")\n  }\n  if case .square(_) = Shape.circle(1) {\n    print(\"square\")\n  } else {\n    print(\"not a square\")\n  }\n  let maybe: Int? = 9\n  if case .some(let v) = maybe { print(v) }\n  let none: Int? = nil\n  if case .none = none { print(\"nil\") }\n}"
+        ),
+        "12\n25\n0\n7\nnot a square\n9\nnil\n"
+    );
+}
+
+#[test]
+fn if_case_matches_tuples_values_and_ranges() {
+    assert_eq!(
+        main_printing(
+            "let t = (0, 5)\nif case (0, let y) = t { print(y) }\nif case (1, _) = t { print(\"one\") } else { print(\"not one\") }\nlet n = 3\nif case 1...5 = n { print(\"in\") }\nif case 10 = n { print(\"ten\") } else { print(\"not ten\") }\nlet s = \"go\"\nif case \"go\" = s { print(\"matched\") }\nvar total = 0\nfor i in 0..<6 {\n  if case 2 = i { continue }\n  if case 4 = i { break }\n  total += i\n}\nprint(total)"
+        ),
+        "5\nnot one\nin\nnot ten\nmatched\n4\n"
+    );
+}
+
+#[test]
+fn if_case_bindings_do_not_outlive_the_statement_and_nested_ones_work() {
+    assert_eq!(
+        run(
+            "enum Pair {\n  case two(Int, Int)\n  case one(Int)\n}\nfunc main() {\n  let p = Pair.two(3, 4)\n  let r = 100\n  if case .two(let a, let b) = p {\n    if case .one(let c) = Pair.one(a + b) {\n      print(c + r)\n    }\n  }\n  print(r)\n}"
+        ),
+        "107\n100\n"
+    );
+    assert!(
+        build_error("enum E {\n  case a(Int)\n}\nfunc main() {\n  if case .a(let x) = E.a(1) { }\n  print(x)\n}")
+            .contains("cannot find 'x'")
+    );
+}
+
+#[test]
+fn if_case_is_checked() {
+    for (prelude, body, message) in [
+        ("", "if case 1 = \"a\" { }", "expected"),
+        ("", "if case .nope = Optional<Int>.none { }", "nope"),
+        (
+            "enum E {\n  case a\n}\n",
+            "if case 5 = E.a { }",
+            "cannot be a value",
+        ),
+        (
+            "",
+            "if case (1, 2, 3) = (1, 2) { }",
+            "has 3 element(s), but the tuple has 2",
+        ),
+    ] {
+        let source = format!("{prelude}func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

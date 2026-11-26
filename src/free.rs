@@ -51,6 +51,27 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
             statements(then_body, found);
             optional_body(else_body.as_deref(), found);
         }
+        StmtKind::IfCase {
+            label,
+            subject,
+            then_body,
+            else_body,
+        } => {
+            expression(subject, found);
+            match label {
+                CaseLabel::Values(values) => values.iter().for_each(|v| expression(v, found)),
+                CaseLabel::Tuples(alternatives) => {
+                    for part in alternatives.iter().flatten() {
+                        if let TuplePart::Value(value) = part {
+                            expression(value, found);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            statements(then_body, found);
+            optional_body(else_body.as_deref(), found);
+        }
         StmtKind::IfLet {
             value,
             then_body,

@@ -205,6 +205,11 @@ fn always_returns(stmts: &[Stmt]) -> bool {
             then_body,
             else_body: Some(else_body),
             ..
+        })
+        | Some(StmtKind::IfCase {
+            then_body,
+            else_body: Some(else_body),
+            ..
         }) => always_returns(then_body) && always_returns(else_body),
         Some(StmtKind::Switch { cases, .. }) => {
             !cases.is_empty() && cases.iter().all(|case| always_returns(case.body()))
@@ -2188,6 +2193,11 @@ fn exits(stmts: &[Stmt], in_switch: bool, inner_labels: &[String]) -> bool {
             then_body,
             else_body: Some(else_body),
             ..
+        })
+        | Some(StmtKind::IfCase {
+            then_body,
+            else_body: Some(else_body),
+            ..
         }) => {
             exits(then_body, in_switch, inner_labels) && exits(else_body, in_switch, inner_labels)
         }
@@ -2876,6 +2886,29 @@ impl<'a> FnCx<'a> {
 
     fn lower_stmt(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
         match stmt.kind() {
+            StmtKind::IfCase {
+                label,
+                subject,
+                then_body,
+                else_body,
+            } => {
+                let cases = vec![
+                    SwitchCase::new(stmt.line(), label.clone(), then_body.clone()),
+                    SwitchCase::new(
+                        stmt.line(),
+                        CaseLabel::Default,
+                        else_body.clone().unwrap_or_default(),
+                    ),
+                ];
+                let mut lowered = Vec::new();
+                self.switch_stmt(stmt.line(), subject, &cases, &mut lowered)?;
+                out.push(TStmt::If {
+                    cond: TExpr::Bool(true),
+                    then_body: lowered,
+                    else_body: Vec::new(),
+                });
+                Ok(())
+            }
             StmtKind::LetTuple {
                 names,
                 mutable,
@@ -3864,7 +3897,7 @@ impl<'a> FnCx<'a> {
                 body,
             } => self.for_pair(line, key, value, iter, body),
             StmtKind::LocalFunc(func) => self.local_function(line, func),
-            StmtKind::LetTuple { .. } => Err(CheckError::at(
+            StmtKind::IfCase { .. } | StmtKind::LetTuple { .. } => Err(CheckError::at(
                 line,
                 "internal error: a tuple binding is lowered with its block",
             )),

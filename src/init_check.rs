@@ -176,6 +176,11 @@ impl Scan<'_> {
                 then_body,
                 else_body,
                 ..
+            }
+            | StmtKind::IfCase {
+                then_body,
+                else_body,
+                ..
             } => any(then_body) || else_body.as_deref().is_some_and(any),
             StmtKind::While { body, .. }
             | StmtKind::WhileLet { body, .. }
@@ -408,6 +413,41 @@ impl Scan<'_> {
                 self.locals.pop();
                 used
             }
+            StmtKind::IfCase {
+                label,
+                subject,
+                then_body,
+                else_body,
+            } => {
+                let mut used = self.expr_uses_self(subject);
+                self.locals.push(HashSet::new());
+                match label {
+                    CaseLabel::Patterns(patterns) => {
+                        for name in patterns
+                            .iter()
+                            .filter_map(|p| p.bindings())
+                            .flatten()
+                            .flatten()
+                        {
+                            self.declare(name);
+                        }
+                    }
+                    CaseLabel::Tuples(alternatives) => {
+                        for part in alternatives.iter().flatten() {
+                            if let TuplePart::Bind(name) = part {
+                                self.declare(name);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                used |= self.stmts_use_self(then_body);
+                self.locals.pop();
+                if let Some(body) = else_body {
+                    used |= self.block_uses_self(body);
+                }
+                used
+            }
             StmtKind::IfLet {
                 name,
                 value,
@@ -553,6 +593,11 @@ fn returns(stmt: &Stmt) -> bool {
             ..
         } => any_returns(then_body) || else_body.as_deref().is_some_and(any_returns),
         StmtKind::IfLet {
+            then_body,
+            else_body,
+            ..
+        }
+        | StmtKind::IfCase {
             then_body,
             else_body,
             ..
