@@ -663,7 +663,9 @@ impl Pass<'_> {
             TExpr::ArrayOp { op, elem, args, ty } => {
                 let args = match op {
                     ArrayOp::Buffer => self.owned_all(args),
-                    ArrayOp::Get | ArrayOp::RemoveLast | ArrayOp::Concat => self.borrowed_all(args),
+                    ArrayOp::Get | ArrayOp::RemoveLast | ArrayOp::Concat | ArrayOp::Remove => {
+                        self.borrowed_all(args)
+                    }
                     ArrayOp::Append | ArrayOp::Set | ArrayOp::Insert => {
                         let last = args.len() - 1;
                         let mut rewritten = self.borrowed_all(&args[..last]);

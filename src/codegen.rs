@@ -848,6 +848,42 @@ impl Emitter<'_, '_> {
                 }
                 Ok(array)
             }
+            ArrayOp::Remove => {
+                self.element_address(values[0], values[1], stride);
+                let array = self.unique_array(values[0], elem, 0)?;
+                let count =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+                let buffer =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+                let at = self.builder.ins().imul_imm_s(values[1], stride);
+                let address = self.builder.ins().iadd(buffer, at);
+                if inline {
+                    self.release(address, elem)?;
+                } else {
+                    let clif = self.element_type(elem)?;
+                    let old = self.builder.ins().load(clif, flags, address, 0);
+                    self.release(old, elem)?;
+                }
+                let tail = self.builder.ins().iadd_imm_s(address, stride);
+                let after = self.builder.ins().isub(count, values[1]);
+                let remaining = self.builder.ins().iadd_imm_s(after, -1);
+                let bytes = self.builder.ins().imul_imm_s(remaining, stride);
+                let mut sig = Signature::new(self.call_conv);
+                for _ in 0..3 {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                let memmove = self.import_func("memmove", sig, false);
+                self.builder.ins().call(memmove, &[address, tail, bytes]);
+                let last = self.builder.ins().iadd_imm_s(count, -1);
+                self.builder
+                    .ins()
+                    .store(flags, last, array, field_offset(ARRAY_COUNT));
+                Ok(array)
+            }
             ArrayOp::Concat => self.concat_arrays(values[0], values[1], elem, stride),
             ArrayOp::Set => {
                 self.element_address(values[0], values[1], stride);

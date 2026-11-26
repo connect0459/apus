@@ -442,6 +442,7 @@ enum Update<'e> {
     Append(&'e [Arg]),
     Insert(&'e [Arg]),
     RemoveLast(&'e [Arg]),
+    Remove(&'e [Arg]),
     Element {
         index: &'e Expr,
         op: Option<BinOp>,
@@ -1877,6 +1878,23 @@ impl FnCx<'_> {
                     ty: target_ty,
                 })
             }
+            Update::Remove(args) => {
+                let elem = self.array_target(line, target_ty)?;
+                let usage = "remove takes 'at:' with a position";
+                let [at] = args else {
+                    return Err(CheckError::at(line, usage));
+                };
+                if at.label() != Some("at") {
+                    return Err(CheckError::at(line, usage));
+                }
+                let position = self.int_value(at.value())?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Remove,
+                    elem,
+                    args: vec![current, position],
+                    ty: target_ty,
+                })
+            }
             Update::RemoveLast(args) => {
                 let elem = self.array_target(line, target_ty)?;
                 if !args.is_empty() {
@@ -2294,7 +2312,7 @@ impl FnCx<'_> {
                     ret: Ty::Bool,
                 })
             }
-            "append" | "insert" | "removeLast" => Err(CheckError::at(
+            "append" | "insert" | "remove" | "removeLast" => Err(CheckError::at(
                 line,
                 format!("'{name}' changes the array: write it as a statement of its own"),
             )),
@@ -2636,7 +2654,7 @@ impl FnCx<'_> {
             _ => None,
         };
         if let ExprKind::MemberCall { base, name, args } = expr.kind()
-            && matches!(name.as_str(), "append" | "insert" | "removeLast")
+            && matches!(name.as_str(), "append" | "insert" | "remove" | "removeLast")
             && self
                 .value(base)
                 .is_ok_and(|v| self.sigs.array_element(v.ty()).is_some())
@@ -2644,6 +2662,7 @@ impl FnCx<'_> {
             let update = match name.as_str() {
                 "append" => Update::Append(args),
                 "insert" => Update::Insert(args),
+                "remove" => Update::Remove(args),
                 _ => Update::RemoveLast(args),
             };
             return self.update(expr.line(), base, &update);

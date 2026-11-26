@@ -67,6 +67,7 @@ pub enum ArrayOp {
     Insert,
     RemoveLast,
     Concat,
+    Remove,
 }
 
 impl ArrayOp {
@@ -79,6 +80,7 @@ impl ArrayOp {
             ArrayOp::Insert => 5,
             ArrayOp::RemoveLast => 6,
             ArrayOp::Concat => 7,
+            ArrayOp::Remove => 8,
         }
     }
 

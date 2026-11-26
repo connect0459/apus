@@ -5186,3 +5186,35 @@ fn the_new_array_members_reject_misuse() {
     assert!(build_error("func main() { print([1] == [\"x\"]) }").contains("expected"));
     assert!(build_error("func main() { let a = [1]\n a.first = 2 }").contains("no member"));
 }
+
+#[test]
+fn remove_at_deletes_an_element_and_closes_the_gap() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 2, 3, 4]\nlet b = a\na.remove(at: 1)\na.remove(at: 2)\na.remove(at: 0)\nprint(a.count)\nprint(a[0])\nprint(b.count)\nvar t = 0\nfor x in b { t = t * 10 + x }\nprint(t)"
+        ),
+        "1\n3\n4\n1234\n"
+    );
+    run_expecting_a_crash("func main() {\n  var a = [1]\n  a.remove(at: 1)\n}");
+    run_expecting_a_crash("func main() {\n  var a = [1]\n  a.remove(at: -1)\n}");
+}
+
+#[test]
+fn remove_at_releases_the_removed_element_and_handles_structs() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nstruct H {\n  var box: Box\n  var tag: Int\n}\nfunc main() {\n  var bs = [Box(n: 1), Box(n: 2), Box(n: 3)]\n  bs.remove(at: 1)\n  print(0)\n  var hs = [H(box: Box(n: 4), tag: 4), H(box: Box(n: 5), tag: 5)]\n  hs.remove(at: 0)\n  print(hs[0].tag)\n  var s = [\"a\", \"b\", \"c\"]\n  s.remove(at: 0)\n  print(s[0] + s[1])\n}"
+        ),
+        "2\n0\n4\n5\nbc\n5\n1\n3\n"
+    );
+}
+
+#[test]
+fn remove_at_checks_its_arguments_and_is_a_statement() {
+    assert!(build_error("func main() { var a = [1]\n a.remove(0) }").contains("remove"));
+    assert!(build_error("func main() { var a = [1]\n a.remove(at: 0, 1) }").contains("remove"));
+    assert!(
+        build_error("func main() { var a = [1]\n let x = a.remove(at: 0) }").contains("statement")
+    );
+    assert!(build_error("func main() { let a = [1]\n a.remove(at: 0) }").contains("constant"));
+}
