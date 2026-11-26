@@ -6602,3 +6602,39 @@ fn an_assignment_through_a_chain_is_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_member_of_a_struct_is_assigned_through_a_default_entry() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var name: String\n}\nstruct Outer {\n  var inner: P\n  var tags: [String]\n}\nclass Counter {\n  var n: Int\n}\nfunc main() {\n  var d: [String: P] = [:]\n  d[\"a\", default: P(x: 0, name: \"\")].x = 5\n  d[\"a\", default: P(x: 0, name: \"\")].x += 1\n  d[\"b\", default: P(x: 10, name: \"n\")].name = \"m\"\n  print(d.count)\n  print(d[\"a\"]?.x ?? -1)\n  print(d[\"b\"]?.x ?? -1)\n  print(d[\"b\"]?.name ?? \"\")\n  let copy = d\n  d[\"a\", default: P(x: 0, name: \"\")].x = 0\n  print(copy[\"a\"]?.x ?? -1)\n  var os: [Int: Outer] = [:]\n  os[1, default: Outer(inner: P(x: 0, name: \"i\"), tags: [])].inner.x = 3\n  os[1, default: Outer(inner: P(x: 0, name: \"i\"), tags: [])].tags.append(\"t\")\n  print(os[1]?.inner.x ?? 0)\n  print(os[1]?.tags.count ?? 0)\n  var cs: [Int: Counter] = [:]\n  cs[1, default: Counter(n: 0)].n += 4\n  cs[1, default: Counter(n: 100)].n += 4\n  print(cs[1]?.n ?? 0)\n}"
+        ),
+        "2\n6\n10\nm\n6\n3\n1\n8\n"
+    );
+}
+
+#[test]
+fn a_default_entry_member_assignment_checks_its_use() {
+    for (body, message) in [
+        (
+            "let d: [Int: (Int, Int)] = [:]\n  d[1, default: (0, 0)].0 = 1",
+            "constant",
+        ),
+        (
+            "var d: [Int: (Int, Int)] = [:]\n  d[1, default: (0, 0)].2 = 1",
+            "has no member '2'",
+        ),
+        (
+            "var d: [Int: (Int, Int)] = [:]\n  d[1, default: (0, 0)].0 = \"s\"",
+            "expected Int",
+        ),
+        (
+            "var d: [Int: (Int, Int)] = [:]\n  d[1, default: (0, 0, 0)].0 = 1",
+            "expected",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

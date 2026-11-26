@@ -2234,7 +2234,7 @@ enum Update<'e> {
         default: Option<&'e Expr>,
         inner: &'e Update<'e>,
     },
-    EnsureKey(&'e Expr),
+    EnsureKey(&'e Expr, Option<&'e Expr>),
     Within {
         index: &'e Expr,
         inner: &'e Update<'e>,
@@ -3779,6 +3779,9 @@ impl<'a> FnCx<'a> {
         match target.kind() {
             ExprKind::Ident(name) => Ok(vec![self.assign_variable(line, name, update)?]),
             ExprKind::Member { base, name } => {
+                if let Some(stmts) = self.default_member_update(line, base, name, update)? {
+                    return Ok(stmts);
+                }
                 let mut stmts = self.element_prefix(line, base)?;
                 stmts.push(self.assign_member(line, base, name, update)?);
                 Ok(stmts)
@@ -4096,7 +4099,7 @@ impl<'a> FnCx<'a> {
                     .sigs
                     .construct(target_ty, vec![TExpr::Int(0), TExpr::Int(0), buffer]))
             }
-            Update::EnsureKey(key_expr) => {
+            Update::EnsureKey(key_expr, default) => {
                 let Some((key, stored)) = self
                     .sigs
                     .table_parts(target_ty)
@@ -4110,11 +4113,19 @@ impl<'a> FnCx<'a> {
                 self.expected = Some(key);
                 let wanted = self.value(key_expr)?;
                 let wanted = self.coerce(line, key, wanted)?;
+                let fallback = match default {
+                    Some(default) => {
+                        self.expected = Some(stored);
+                        let value = self.value(default)?;
+                        self.coerce(line, stored, value)?
+                    }
+                    None => TExpr::Zero(stored),
+                };
                 Ok(table_op(
                     DictOp::Ensure,
                     key,
                     stored,
-                    vec![current, wanted, TExpr::Zero(stored)],
+                    vec![current, wanted, fallback],
                     target_ty,
                 ))
             }
@@ -4333,6 +4344,77 @@ impl<'a> FnCx<'a> {
         })
     }
 
+    fn default_member_update(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        name: &str,
+        update: &Update,
+    ) -> CResult<Option<Vec<TStmt>>> {
+        let mut names = vec![name];
+        let mut cursor = base;
+        let (dict, index, default) = loop {
+            match cursor.kind() {
+                ExprKind::Member { base: inner, name } => {
+                    names.push(name);
+                    cursor = inner;
+                }
+                ExprKind::IndexDefault {
+                    base,
+                    index,
+                    default,
+                } => break (base, index, default),
+                _ => return Ok(None),
+            }
+        };
+        let Ok(table) = self.value(dict) else {
+            return Ok(None);
+        };
+        let Some((key, stored)) = self
+            .sigs
+            .table_parts(table.ty())
+            .filter(|_| !self.sigs.is_set(table.ty()))
+        else {
+            return Ok(None);
+        };
+        let mut stmts = self.update_stmts(line, dict, &Update::EnsureKey(index, Some(default)))?;
+        self.expected = Some(key);
+        let wanted = self.value(index)?;
+        let wanted = self.coerce(line, key, wanted)?;
+        let table = self.value(dict)?;
+        let at = self.temp(Ty::Int);
+        stmts.push(TStmt::Let {
+            local: at,
+            init: table_op(
+                DictOp::Find,
+                key,
+                stored,
+                vec![table.clone(), wanted],
+                Ty::Int,
+            ),
+        });
+        let mut path = AssignPath {
+            value: table_op(
+                DictOp::Value,
+                key,
+                stored,
+                vec![table, local(at, Ty::Int)],
+                stored,
+            ),
+            root: "a dictionary entry".to_string(),
+            root_mutable: true,
+            crossed_class: stored.is_class(),
+        };
+        let Some((last, rest)) = names.split_first() else {
+            return Ok(None);
+        };
+        for hop_name in rest.iter().rev() {
+            path = self.hop(line, path, hop_name)?;
+        }
+        stmts.push(self.assign_at(line, path, last, update)?);
+        Ok(Some(stmts))
+    }
+
     fn chain_root(
         &mut self,
         line: u32,
@@ -4364,7 +4446,7 @@ impl<'a> FnCx<'a> {
                     ),
                     TExpr::Int(0),
                 );
-                let mut prelude = self.update_stmts(line, base, &Update::EnsureKey(index))?;
+                let mut prelude = self.update_stmts(line, base, &Update::EnsureKey(index, None))?;
                 let table = self.value(base)?;
                 let at = self.temp(Ty::Int);
                 prelude.push(TStmt::Let {
