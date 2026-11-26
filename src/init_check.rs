@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{CaseLabel, Expr, ExprKind, Stmt, StmtKind};
+use crate::ast::{CaseLabel, Expr, ExprKind, Stmt, StmtKind, TuplePart};
 
 const SELF: &str = "self";
 
@@ -463,6 +463,13 @@ impl Scan<'_> {
                             .flatten()
                         {
                             self.declare(name);
+                        }
+                    }
+                    if let CaseLabel::Tuples(alternatives) = case.label() {
+                        for part in alternatives.iter().flatten() {
+                            if let TuplePart::Bind(name) = part {
+                                self.declare(name);
+                            }
                         }
                     }
                     used |= self.stmts_use_self(case.body());

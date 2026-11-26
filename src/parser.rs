@@ -762,12 +762,41 @@ impl Parser<'_> {
         }
     }
 
+    fn tuple_pattern(&mut self) -> PResult<Vec<TuplePart>> {
+        self.expect_punct("(")?;
+        let mut parts = Vec::new();
+        while !self.is_punct(")") {
+            if !parts.is_empty() {
+                self.expect_punct(",")?;
+            }
+            if self.is_keyword("_") {
+                self.pos += 1;
+                parts.push(TuplePart::Wild);
+            } else if self.eat_keyword("let") {
+                parts.push(TuplePart::Bind(self.name()?));
+            } else {
+                parts.push(TuplePart::Value(self.range()?));
+            }
+        }
+        self.expect_punct(")")?;
+        if !(2..=4).contains(&parts.len()) {
+            return self.fail("a tuple pattern has two to four elements");
+        }
+        Ok(parts)
+    }
+
     fn switch_case(&mut self) -> PResult<SwitchCase> {
         let line = self.line();
         let label = if self.eat_keyword("default") {
             CaseLabel::Default
         } else if self.eat_keyword("case") {
-            if self.at_value_pattern() {
+            if self.is_punct("(") {
+                let mut alternatives = vec![self.tuple_pattern()?];
+                while self.eat_punct(",") {
+                    alternatives.push(self.tuple_pattern()?);
+                }
+                CaseLabel::Tuples(alternatives)
+            } else if self.at_value_pattern() {
                 let mut values = vec![self.range()?];
                 while self.eat_punct(",") {
                     values.push(self.range()?);

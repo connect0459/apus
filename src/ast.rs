@@ -670,9 +670,17 @@ impl SwitchCase {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TuplePart {
+    Wild,
+    Bind(String),
+    Value(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaseLabel {
     Patterns(Vec<Pattern>),
     Values(Vec<Expr>),
+    Tuples(Vec<Vec<TuplePart>>),
     Default,
 }
 

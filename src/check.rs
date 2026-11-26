@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::ast::{
     Arg, BinOp, CaptureKind, CaseLabel, ClosureExpr, Expr, ExprKind, FuncDecl, Pattern, Stmt,
-    StmtKind, SwitchCase, TypeRef, UnaryOp,
+    StmtKind, SwitchCase, TuplePart, TypeRef, UnaryOp,
 };
 use crate::capture::EnvKind;
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
@@ -3250,6 +3250,9 @@ impl<'a> FnCx<'a> {
         if matches!(subject_ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Char) {
             return self.value_switch(line, subject_value, cases, out);
         }
+        if self.sigs.tuple_elements(subject_ty).is_some() {
+            return self.tuple_switch(line, subject_value, cases, out);
+        }
         let sigs = self.sigs;
         let Some(sig) = sigs.enum_of(subject_ty) else {
             return Err(CheckError::at(
@@ -3284,7 +3287,7 @@ impl<'a> FnCx<'a> {
                     }
                     default_body = Some(self.block(case.body())?);
                 }
-                CaseLabel::Values(_) => {
+                CaseLabel::Values(_) | CaseLabel::Tuples(_) => {
                     return Err(CheckError::at(
                         case.line(),
                         format!("a case of '{}' cannot be a value", sig.base_name()),
@@ -3374,7 +3377,7 @@ impl<'a> FnCx<'a> {
                     }
                     default_body = Some(self.block(case.body())?);
                 }
-                CaseLabel::Patterns(_) => {
+                CaseLabel::Patterns(_) | CaseLabel::Tuples(_) => {
                     return Err(CheckError::at(
                         case.line(),
                         format!("an enum case cannot match a {}", self.name_of(ty)),
@@ -3440,6 +3443,146 @@ impl<'a> FnCx<'a> {
         } else {
             Err(CheckError::at(line, "a case value must be a literal"))
         }
+    }
+
+    fn tuple_switch(
+        &mut self,
+        line: u32,
+        subject: TExpr,
+        cases: &[SwitchCase],
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let ty = subject.ty();
+        let Some(elements) = self.sigs.tuple_elements(ty) else {
+            return Ok(());
+        };
+        if cases.is_empty() {
+            return Err(CheckError::at(line, "a switch needs at least one case"));
+        }
+        let held = self.temp(ty);
+        out.push(TStmt::Let {
+            local: held,
+            init: subject,
+        });
+        let mut parts = Vec::with_capacity(elements.len());
+        for (index, element) in elements.iter().enumerate() {
+            let local = self.temp(*element);
+            out.push(TStmt::Let {
+                local,
+                init: TExpr::Field {
+                    base: Box::new(TExpr::Local(held, ty)),
+                    index,
+                    ty: *element,
+                },
+            });
+            parts.push(local);
+        }
+        let mut default_body: Option<Vec<TStmt>> = None;
+        let mut branches: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
+        for (position, case) in cases.iter().enumerate() {
+            match case.label() {
+                CaseLabel::Default => {
+                    if position + 1 != cases.len() {
+                        return Err(CheckError::at(
+                            case.line(),
+                            "'default' must be the last case of a switch",
+                        ));
+                    }
+                    default_body = Some(self.block(case.body())?);
+                }
+                CaseLabel::Tuples(alternatives) => {
+                    self.scopes.push(HashMap::new());
+                    let checked = self.tuple_case(case, alternatives, &elements, &parts);
+                    self.scopes.pop();
+                    branches.push(checked?);
+                }
+                _ => {
+                    return Err(CheckError::at(
+                        case.line(),
+                        "a case of a tuple needs a tuple pattern such as '(1, _)' or '(let a, b)'",
+                    ));
+                }
+            }
+        }
+        if default_body.is_none() {
+            match branches.pop() {
+                Some((TExpr::Bool(true), body)) => default_body = Some(body),
+                _ => {
+                    return Err(CheckError::at(
+                        line,
+                        "a switch on a tuple needs a 'default' or a last case that matches every tuple",
+                    ));
+                }
+            }
+        }
+        out.extend(chain_branches(branches, default_body));
+        Ok(())
+    }
+
+    fn tuple_case(
+        &mut self,
+        case: &SwitchCase,
+        alternatives: &[Vec<TuplePart>],
+        elements: &[Ty],
+        parts: &[LocalId],
+    ) -> CResult<(TExpr, Vec<TStmt>)> {
+        let line = case.line();
+        let mut tests: Vec<TExpr> = Vec::new();
+        let mut bindings: Vec<(&str, usize)> = Vec::new();
+        for alternative in alternatives {
+            if alternative.len() != elements.len() {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "this pattern has {} element(s), but the tuple has {}",
+                        alternative.len(),
+                        elements.len()
+                    ),
+                ));
+            }
+            let mut condition: Option<TExpr> = None;
+            for (index, part) in alternative.iter().enumerate() {
+                match part {
+                    TuplePart::Wild => {}
+                    TuplePart::Bind(name) => {
+                        if alternatives.len() > 1 {
+                            return Err(CheckError::at(
+                                line,
+                                "a case with several tuple patterns cannot bind names",
+                            ));
+                        }
+                        bindings.push((name, index));
+                    }
+                    TuplePart::Value(expr) => {
+                        let mut bools = [false, false];
+                        let test =
+                            self.value_test(line, parts[index], elements[index], expr, &mut bools)?;
+                        condition = Some(match condition {
+                            None => test,
+                            Some(before) => compare(BinOp::And, before, test),
+                        });
+                    }
+                }
+            }
+            tests.push(condition.unwrap_or(TExpr::Bool(true)));
+        }
+        let mut combined: Option<TExpr> = None;
+        for test in tests {
+            combined = Some(match combined {
+                None => test,
+                Some(before) => compare(BinOp::Or, before, test),
+            });
+        }
+        let mut body = Vec::new();
+        for (name, index) in bindings {
+            let local = self.declare(line, name, elements[index], false)?;
+            body.push(TStmt::Let {
+                local,
+                init: TExpr::Local(parts[index], elements[index]),
+            });
+        }
+        body.extend(self.block(case.body())?);
+        Ok((combined.unwrap_or(TExpr::Bool(true)), body))
     }
 
     fn value_test(

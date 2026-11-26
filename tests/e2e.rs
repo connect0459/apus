@@ -6841,3 +6841,57 @@ fn a_tuple_assignment_is_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_switch_matches_the_elements_of_a_tuple() {
+    assert_eq!(
+        run(
+            "func describe(_ p: (Int, Int)) -> String {\n  switch p {\n  case (0, 0):\n    return \"origin\"\n  case (0, _):\n    return \"on y\"\n  case (_, 0):\n    return \"on x\"\n  case (let a, let b):\n    return \"at \" + String(a) + \",\" + String(b)\n  }\n}\nfunc main() {\n  print(describe((0, 0)))\n  print(describe((0, 5)))\n  print(describe((3, 0)))\n  print(describe((2, 7)))\n}"
+        ),
+        "origin\non y\non x\nat 2,7\n"
+    );
+}
+
+#[test]
+fn a_tuple_switch_takes_values_ranges_alternatives_strings_and_a_default() {
+    assert_eq!(
+        run(
+            "func grade(_ score: Int, _ pass: Bool) -> String {\n  switch (score, pass) {\n  case (90...100, true):\n    return \"A\"\n  case (60..<90, true), (95, false):\n    return \"B\"\n  default:\n    return \"F\"\n  }\n}\nfunc kind(_ name: String, _ n: Int) -> String {\n  switch (name, n) {\n  case (\"x\", _):\n    return \"x\"\n  case (_, -1):\n    return \"minus\"\n  case (\"y\", let m):\n    return \"y\" + String(m)\n  default:\n    return \"none\"\n  }\n}\nfunc main() {\n  print(grade(95, true))\n  print(grade(70, true))\n  print(grade(95, false))\n  print(grade(30, true))\n  print(kind(\"x\", 5))\n  print(kind(\"z\", -1))\n  print(kind(\"y\", 4))\n  print(kind(\"q\", 4))\n  var found = 0\n  for (i, v) in [3, 0, 5].enumerated() {\n    switch (i, v) {\n    case (_, 0):\n      found = i\n    default:\n      break\n    }\n  }\n  print(found)\n}"
+        ),
+        "A\nB\nB\nF\nx\nminus\ny4\nnone\n1\n"
+    );
+}
+
+#[test]
+fn a_tuple_switch_is_checked() {
+    for (body, message) in [
+        (
+            "switch (1, 2) {\n  case (1, _):\n    break\n  }",
+            "needs a 'default' or a last case that matches every tuple",
+        ),
+        (
+            "switch (1, 2) {\n  case (1, _, _):\n    break\n  default:\n    break\n  }",
+            "has 3 element(s), but the tuple has 2",
+        ),
+        (
+            "switch (1, 2) {\n  case 1:\n    break\n  default:\n    break\n  }",
+            "needs a tuple pattern",
+        ),
+        (
+            "switch (1, 2) {\n  case (1, \"a\"):\n    break\n  default:\n    break\n  }",
+            "expected Int",
+        ),
+        (
+            "switch (1, 2) {\n  case (let a, 1), (2, 2):\n    print(a)\n  default:\n    break\n  }",
+            "cannot bind names",
+        ),
+        (
+            "switch 5 {\n  case (1, 2):\n    break\n  default:\n    break\n  }",
+            "cannot match",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

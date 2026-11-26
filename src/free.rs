@@ -1,4 +1,4 @@
-use crate::ast::{CaseLabel, Expr, ExprKind, Stmt, StmtKind};
+use crate::ast::{CaseLabel, Expr, ExprKind, Stmt, StmtKind, TuplePart};
 
 pub fn names_in(stmts: &[Stmt]) -> Vec<String> {
     let mut found = Vec::new();
@@ -88,10 +88,20 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
         StmtKind::Switch { subject, cases } => {
             expression(subject, found);
             for case in cases {
-                if let CaseLabel::Values(values) = case.label() {
-                    for value in values {
-                        expression(value, found);
+                match case.label() {
+                    CaseLabel::Values(values) => {
+                        for value in values {
+                            expression(value, found);
+                        }
                     }
+                    CaseLabel::Tuples(alternatives) => {
+                        for part in alternatives.iter().flatten() {
+                            if let TuplePart::Value(value) = part {
+                                expression(value, found);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
                 statements(case.body(), found);
             }
