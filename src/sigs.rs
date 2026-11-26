@@ -42,6 +42,8 @@ const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
 
 pub const BOX: &str = "$Box";
 pub const ARRAY: &str = "Array";
+pub const CELL: &str = "$Cell";
+pub const CELL_DEF: usize = 4;
 pub const DICTIONARY: &str = "Dictionary";
 pub const SET: &str = "Set";
 pub const DICT_COUNT: usize = 4;
@@ -97,6 +99,16 @@ fn table_fields() -> Vec<Field> {
         Field::new("$entries".to_string(), true, TypeRef::from("Int")),
         Field::new("$table".to_string(), true, TypeRef::from("Int")),
     ]
+}
+
+fn cell_decl() -> StructDecl {
+    StructDecl::new(
+        0,
+        CELL.to_string(),
+        vec![Field::new("value".to_string(), true, TypeRef::from("T"))],
+    )
+    .with_generics(vec!["T".to_string()])
+    .as_class()
 }
 
 fn dictionary_decl() -> StructDecl {
@@ -412,7 +424,6 @@ enum Origin {
     EnumLayout(EnumId),
     EnumCell(EnumId),
     Existential(String),
-    VariableCell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -438,7 +449,6 @@ struct Instances {
     existentials: HashMap<String, StructId>,
     funcs: Vec<(Vec<Ty>, Ty)>,
     func_index: HashMap<(Vec<Ty>, Ty), usize>,
-    cells: HashMap<Ty, StructId>,
     closures: HashMap<String, Rc<TFunc>>,
 }
 
@@ -499,6 +509,7 @@ impl Signatures {
         sigs.register_struct_def(&array_decl())?;
         sigs.register_struct_def(&dictionary_decl())?;
         sigs.register_struct_def(&set_decl())?;
+        sigs.register_struct_def(&cell_decl())?;
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -1354,12 +1365,6 @@ impl Signatures {
             (Some(ty), _) => self.resolve_type(ty, &scope, func.line())?,
             (None, _) => Ty::Void,
         };
-        if self.contains_func(ret) {
-            return Err(CheckError::at(
-                func.line(),
-                "a function type can only be the type of a parameter",
-            ));
-        }
         let sig = FuncSig {
             generics,
             bounds,
@@ -1733,18 +1738,10 @@ impl Signatures {
                 ),
             ));
         }
-        let resolved = tr
-            .args()
+        tr.args()
             .iter()
             .map(|arg| self.resolve_type(arg, scope, line))
-            .collect::<CResult<Vec<_>>>()?;
-        if resolved.iter().any(|ty| self.contains_func(*ty)) {
-            return Err(CheckError::at(
-                line,
-                "a function type can only be the type of a parameter",
-            ));
-        }
-        Ok(resolved)
+            .collect()
     }
 
     pub fn instance_name(&self, base: &str, args: &[Ty], scope: &Scope) -> String {
@@ -1765,12 +1762,6 @@ impl Signatures {
         let key = (def, args);
         if let Some(id) = self.instances.borrow().struct_index.get(&key) {
             return Ok(*id);
-        }
-        if key.1.iter().any(|ty| self.contains_func(*ty)) {
-            return Err(CheckError::at(
-                line,
-                "a function type can only be the type of a parameter",
-            ));
         }
         let decl = &self.struct_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
@@ -1881,12 +1872,6 @@ impl Signatures {
         }
         for field in decl.fields() {
             let ty = self.resolve_type(field.ty(), &own_scope, at)?;
-            if self.contains_func(ty) {
-                return Err(CheckError::at(
-                    at,
-                    "a function type can only be the type of a parameter",
-                ));
-            }
             if fields.iter().any(|f| f.name == field.name()) {
                 return Err(CheckError::at(
                     at,
@@ -2164,7 +2149,7 @@ impl Signatures {
             Some((head, mixed))
         } else if others
             .iter()
-            .any(|t| matches!(t, Ty::Class(_) | Ty::Struct(_)))
+            .any(|t| matches!(t, Ty::Class(_) | Ty::Struct(_) | Ty::Func(_)))
         {
             None
         } else {
@@ -2424,7 +2409,7 @@ impl Signatures {
                     let (def, args) = instances.enum_origin.get(owner.index())?;
                     Some((Kind::Enum, *def, args.clone()))
                 }
-                Origin::Existential(_) | Origin::VariableCell => None,
+                Origin::Existential(_) => None,
             },
             Ty::Enum(id) => {
                 let (def, args) = instances.enum_origin.get(id.index())?;
@@ -2435,42 +2420,10 @@ impl Signatures {
     }
 
     pub fn cell_of(&self, ty: Ty) -> Ty {
-        let mut instances = self.instances.borrow_mut();
-        if let Some(cell) = instances.cells.get(&ty) {
-            return Ty::Struct(*cell);
-        }
-        let cell = StructId::new(instances.structs.len());
-        let name = format!("$Cell<{}>", cell.index());
-        instances.structs.push(Rc::new(StructSig {
-            name,
-            fields: vec![FieldSig {
-                name: "value".to_string(),
-                ty,
-                mutable: true,
-                unowned: false,
-                weak: false,
-            }],
-        }));
-        instances.struct_origin.push(Origin::VariableCell);
-        instances.cells.insert(ty, cell);
-        Ty::Struct(cell)
-    }
-
-    pub fn cell_value(&self, cell: Ty) -> Option<Ty> {
-        let Ty::Struct(id) = cell else { return None };
-        let instances = self.instances.borrow();
-        if !matches!(
-            instances.struct_origin.get(id.index()),
-            Some(Origin::VariableCell)
-        ) {
-            return None;
-        }
-        instances
-            .structs
-            .get(id.index())?
-            .fields
-            .first()
-            .map(|f| f.ty)
+        let id = self
+            .instantiate_struct(CELL_DEF, vec![ty], &[], 0)
+            .unwrap_or(StructId::new(0));
+        self.struct_ty(CELL_DEF, id)
     }
 
     pub fn register_closure(&self, name: String, body: Rc<TFunc>) {

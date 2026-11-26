@@ -305,6 +305,10 @@ impl Encoder<'_> {
                 self.expr(object);
                 self.expr(class);
             }
+            TExpr::EnvCount(env) => {
+                self.tag(68);
+                self.expr(env);
+            }
             TExpr::Closure {
                 func,
                 captures,

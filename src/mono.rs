@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use crate::ast::BinOp;
 use crate::check::{
-    EntryOp, HofOp, SetOp, boxed_requirement, contains_function, entry_function, equality_function,
-    hash_function, higher_order_function, joined_function, repeating_function,
+    EntryOp, HofOp, SetOp, boxed_requirement, contains_function, entry_function, env_drop_function,
+    equality_function, hash_function, higher_order_function, joined_function, repeating_function,
     set_from_array_function, set_function, split_function, table_listing_function,
 };
 use crate::sigs::{
@@ -271,7 +271,12 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if let Some(op) = EntryOp::from_callee(callee) {
+        let generic = if callee == "$envdrop" {
+            Rc::new(
+                env_drop_function(sigs, args.len().saturating_sub(1), mangled.clone())
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if let Some(op) = EntryOp::from_callee(callee) {
             Rc::new(
                 entry_function(sigs, op, args, mangled.clone())
                     .map_err(|e| e.message().to_string())?,

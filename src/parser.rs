@@ -305,16 +305,18 @@ impl Parser<'_> {
         }
         self.leave();
         self.expect_punct(")")?;
+        if !self.is_punct("->") && parts.len() == 1 {
+            return Ok(parts.remove(0));
+        }
         self.expect_punct("->")?;
         parts.push(self.type_ref()?);
         Ok(TypeRef::new("->".to_string(), parts))
     }
 
     fn type_ref(&mut self) -> PResult<TypeRef> {
-        if self.is_punct("(") {
-            return self.function_type();
-        }
-        let mut ty = if self.eat_punct("[") {
+        let mut ty = if self.is_punct("(") {
+            self.function_type()?
+        } else if self.eat_punct("[") {
             self.enter()?;
             let element = self.type_ref();
             let value = match &element {
@@ -1389,6 +1391,17 @@ impl Parser<'_> {
                         },
                     ),
                     ExprKind::Ident(callee) => Expr::new(line, ExprKind::Call { callee, args }),
+                    other @ (ExprKind::Index { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::MemberCall { .. }
+                    | ExprKind::Apply { .. }
+                    | ExprKind::Unwrap(_)) => Expr::new(
+                        line,
+                        ExprKind::Apply {
+                            func: Box::new(Expr::new(line, other)),
+                            args,
+                        },
+                    ),
                     _ => return self.fail("only a named function can be called"),
                 };
             } else {

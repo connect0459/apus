@@ -6008,24 +6008,6 @@ fn a_method_closure_uses_self_and_its_members() {
 }
 
 #[test]
-fn a_function_type_cannot_escape_the_call_that_receives_it() {
-    let message = "a function type can only be the type of a parameter";
-    assert!(
-        build_error("func make() -> (Int) -> Int { return { $0 } }\nfunc main() { }")
-            .contains(message)
-    );
-    assert!(build_error("struct S {\n  var f: (Int) -> Int\n}\nfunc main() { }").contains(message));
-    assert!(
-        build_error("func main() {\n  let a = [{ (x: Int) -> Int in x }]\n  print(a.count)\n}")
-            .contains(message)
-    );
-    assert!(
-        build_error("func main() {\n  var o: ((Int) -> Int)? = nil\n}").contains(message) || true
-    );
-    assert!(build_error("class C<T> {\n  var v: T\n}\nfunc main() {\n  let c = C(v: { (x: Int) -> Int in x })\n}").contains("function"));
-}
-
-#[test]
 fn closure_misuse_is_rejected_with_a_message() {
     let head = "func apply(_ f: (Int) -> Int, _ x: Int) -> Int { return f(x) }\n";
     for (body, message) in [
@@ -6080,10 +6062,6 @@ fn a_local_function_checks_its_signature_and_labels() {
             "func main() {\n  func f(_ a: Int) -> Int {\n    if a > 0 { return 1 }\n  }\n}"
         )
         .contains("must return a value on every path")
-    );
-    assert!(
-        build_error("func main() {\n  func f() -> (Int) -> Int { return { $0 } }\n}")
-            .contains("function type")
     );
 }
 
@@ -6365,4 +6343,80 @@ fn an_operator_function_checks_the_types_it_is_given() {
         let error = build_error(&source);
         assert!(error.contains(message), "{body}: {error}");
     }
+}
+
+#[test]
+fn a_function_can_return_a_closure_that_keeps_its_variables() {
+    assert_eq!(
+        run(
+            "func makeCounter() -> () -> Int {\n  var n = 0\n  return {\n    n += 1\n    return n\n  }\n}\nfunc adder(_ k: Int) -> (Int) -> Int {\n  return { $0 + k }\n}\nfunc main() {\n  let a = makeCounter()\n  let b = makeCounter()\n  print(a())\n  print(a())\n  print(b())\n  let add5 = adder(5)\n  print(add5(1))\n  print(add5(10))\n}"
+        ),
+        "1\n2\n1\n6\n15\n"
+    );
+}
+
+#[test]
+fn closures_compose_and_a_generic_closure_keeps_its_value() {
+    assert_eq!(
+        run(
+            "func compose(_ f: (Int) -> Int, _ g: (Int) -> Int) -> (Int) -> Int {\n  return { g(f($0)) }\n}\nfunc constant<T>(_ x: T) -> () -> T {\n  return { x }\n}\nfunc main() {\n  let plus = { (x: Int) -> Int in x + 1 }\n  let times = { (x: Int) -> Int in x * 10 }\n  let both = compose(plus, times)\n  print(both(4))\n  let five = constant(5)\n  let word = constant(\"hi\")\n  print(five() + 1)\n  print(word())\n}"
+        ),
+        "50\n6\nhi\n"
+    );
+}
+
+#[test]
+fn closures_are_stored_in_fields_arrays_optionals_and_dictionaries() {
+    assert_eq!(
+        run(
+            "struct Button {\n  var title: String\n  var action: (Int) -> Int\n}\nclass Holder {\n  var callback: (() -> Void)?\n  init() { self.callback = nil }\n}\nfunc main() {\n  let b = Button(title: \"go\", action: { $0 * 3 })\n  print(b.action(4))\n  var steps: [(Int) -> Int] = []\n  steps.append({ $0 + 1 })\n  steps.append({ $0 * 2 })\n  var value = 5\n  for step in steps { value = step(value) }\n  print(value)\n  var handlers: [String: (Int) -> Int] = [:]\n  handlers[\"double\"] = { $0 * 2 }\n  if let h = handlers[\"double\"] { print(h(21)) }\n  let holder = Holder()\n  var ran = 0\n  holder.callback = { ran += 1 }\n  if let c = holder.callback { c() }\n  if let c = holder.callback { c() }\n  print(ran)\n  var maybe: ((Int) -> Int)? = nil\n  print(maybe == nil)\n}"
+        ),
+        "12\n12\n42\n2\ntrue\n"
+    );
+}
+
+#[test]
+fn closures_that_share_a_variable_see_each_others_changes_after_escaping() {
+    assert_eq!(
+        run(
+            "struct Counter {\n  var next: () -> Int\n  var reset: () -> Void\n}\nfunc makeCounter() -> Counter {\n  var n = 0\n  return Counter(next: { n += 1\n return n }, reset: { n = 0 })\n}\nfunc main() {\n  let c = makeCounter()\n  print(c.next())\n  print(c.next())\n  c.reset()\n  print(c.next())\n  let d = makeCounter()\n  print(d.next())\n}"
+        ),
+        "1\n2\n1\n1\n"
+    );
+}
+
+#[test]
+fn a_function_value_can_be_called_where_it_is_produced() {
+    assert_eq!(
+        run(
+            "func adder(_ k: Int) -> (Int) -> Int { return { $0 + k } }\nfunc main() {\n  print(adder(1)(2))\n  let steps: [(Int) -> Int] = [adder(10), adder(20)]\n  print(steps[1](1))\n  var total = 0\n  for s in steps { total += s(0) }\n  print(total)\n}"
+        ),
+        "3\n21\n30\n"
+    );
+}
+
+#[test]
+fn an_escaped_closure_keeps_what_it_captured_alive_until_it_is_dropped() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(\"free\") }\n}\nfunc make() -> () -> Int {\n  let b = Box(n: 7)\n  return { b.n }\n}\nfunc main() {\n  var f: (() -> Int)? = make()\n  print(\"made\")\n  if let g = f { print(g()) }\n  f = nil\n  print(\"dropped\")\n}"
+        ),
+        "made\n7\nfree\ndropped\n"
+    );
+}
+
+#[test]
+fn creating_and_dropping_many_closures_keeps_their_results() {
+    let source = "func adder(_ k: Int) -> (Int) -> Int {\n  var step = k\n  step += 1\n  return { $0 + step }\n}\nfunc main() {\n  var total = 0\n  var i = 0\n  while i < 100000 {\n    let f = adder(i)\n    total += f(1)\n    let g = [\"a\", \"bb\"].map { $0 + String(i) }\n    total += g.count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "5000350000\n");
+}
+
+#[test]
+fn a_closure_that_returns_a_closure_works_and_a_local_function_can_escape() {
+    assert_eq!(
+        run(
+            "func curry(_ a: Int) -> (Int) -> (Int) -> Int {\n  return { b in { c in a * 100 + b * 10 + c } }\n}\nfunc maker() -> (Int) -> Int {\n  var calls = 0\n  func twice(_ x: Int) -> Int {\n    calls += 1\n    return x * 2 + calls\n  }\n  return twice\n}\nfunc main() {\n  let f = curry(1)\n  let g = f(2)\n  print(g(3))\n  let t = maker()\n  print(t(5))\n  print(t(5))\n}"
+        ),
+        "123\n11\n12\n"
+    );
 }

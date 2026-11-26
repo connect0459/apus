@@ -27,7 +27,7 @@ pub fn insert(func: &TFunc, sigs: &Signatures) -> (TFunc, Vec<StructId>) {
 
 fn needs_rc(sigs: &Signatures, ty: Ty) -> bool {
     match ty {
-        Ty::Class(_) | Ty::Str => true,
+        Ty::Class(_) | Ty::Str | Ty::Func(_) => true,
         Ty::Struct(id) => sigs
             .struct_sig(id)
             .is_some_and(|sig| sig.fields().iter().any(|f| needs_rc(sigs, f.ty()))),
@@ -624,6 +624,7 @@ impl Pass<'_> {
                 | TExpr::Select { .. }
                 | TExpr::Then { .. }
                 | TExpr::CallValue { .. }
+                | TExpr::Closure { .. }
         ) || matches!(expr, TExpr::StrOp { op, .. } if op.allocates())
             || matches!(expr, TExpr::ArrayOp { op, .. } if op.allocates())
             || matches!(expr, TExpr::DictOp { op, .. } if op.allocates())
@@ -679,6 +680,7 @@ impl Pass<'_> {
                 op: *op,
                 args: self.borrowed_all(args),
             },
+            TExpr::EnvCount(env) => TExpr::EnvCount(Box::new(self.borrowed(env))),
             TExpr::Closure {
                 func,
                 type_args,
@@ -686,13 +688,15 @@ impl Pass<'_> {
                 params,
                 ret,
                 ty,
+                drop,
             } => TExpr::Closure {
                 func: func.clone(),
                 type_args: type_args.clone(),
-                captures: self.borrowed_all(captures),
+                captures: self.owned_all(captures),
                 params: params.clone(),
                 ret: *ret,
                 ty: *ty,
+                drop: drop.clone(),
             },
             TExpr::CallValue {
                 func,

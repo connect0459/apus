@@ -1611,6 +1611,23 @@ fn grouping_function(
     Ok(TFunc::new(name, 2, ret, cx.locals, body))
 }
 
+pub fn env_drop_function(sigs: &Signatures, count: usize, name: String) -> CResult<TFunc> {
+    let _ = sigs;
+    let env = LocalId::new(0);
+    let class = Ty::Class(StructId::new(0));
+    let mut body: Vec<TStmt> = (0..count)
+        .map(|index| {
+            TStmt::Release(TExpr::EnvCell {
+                env: Box::new(TExpr::Local(env, Ty::Int)),
+                index,
+                ty: class,
+            })
+        })
+        .collect();
+    body.push(TStmt::Free(TExpr::Local(env, Ty::Int)));
+    Ok(TFunc::new(name, 1, Ty::Void, vec![Ty::Int], body))
+}
+
 pub fn set_from_array_function(sigs: &Signatures, array: Ty, name: String) -> CResult<TFunc> {
     let element = sigs
         .array_element(array)
@@ -4792,6 +4809,7 @@ impl<'a> FnCx<'a> {
             params: param_types,
             ret: cx.ret,
             ty,
+            drop: String::new(),
         })
     }
 
@@ -4978,12 +4996,6 @@ impl<'a> FnCx<'a> {
             Some(tr) => sigs.resolve_type(tr, &self.scope, line)?,
             None => Ty::Void,
         };
-        if sigs.contains_func(ret) {
-            return Err(CheckError::at(
-                line,
-                "a function type can only be the type of a parameter",
-            ));
-        }
         let own_ty = sigs.func_ty(parameters.iter().map(|(_, ty)| *ty).collect(), ret);
         let names = crate::free::names_in(func.body());
         let body = func.body();
@@ -5022,11 +5034,24 @@ impl<'a> FnCx<'a> {
         binding: Binding,
         args: &[Arg],
     ) -> CResult<TExpr> {
+        let labels = self.labels.get(&binding.local).cloned();
+        let target = TExpr::Local(binding.local, binding.ty);
+        self.apply_value(line, callee, target, labels, args)
+    }
+
+    fn apply_value(
+        &mut self,
+        line: u32,
+        callee: &str,
+        target: TExpr,
+        labels: Option<Vec<Option<String>>>,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
         let sigs = self.sigs;
-        let Some((params, ret)) = sigs.func_parts(binding.ty) else {
+        let Some((params, ret)) = sigs.func_parts(target.ty()) else {
             return Err(CheckError::at(
                 line,
-                format!("'{callee}' is not a function"),
+                format!("{} is not a function", self.name_of(target.ty())),
             ));
         };
         if args.len() != params.len() {
@@ -5039,7 +5064,6 @@ impl<'a> FnCx<'a> {
                 ),
             ));
         }
-        let labels = self.labels.get(&binding.local).cloned();
         let mut checked = Vec::with_capacity(args.len());
         for (index, (arg, param)) in args.iter().zip(&params).enumerate() {
             let wanted = labels
@@ -5052,7 +5076,7 @@ impl<'a> FnCx<'a> {
             checked.push(self.coerce(line, *param, value)?);
         }
         Ok(TExpr::CallValue {
-            func: Box::new(TExpr::Local(binding.local, binding.ty)),
+            func: Box::new(target),
             args: checked,
             params,
             ret,
@@ -6780,8 +6804,13 @@ impl<'a> FnCx<'a> {
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
             ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
+            ExprKind::Apply { func, args } => {
+                let target = self.value(func)?;
+                self.apply_value(line, "function", target, None, args)
+            }
             ExprKind::Closure(closure) => {
-                let parts = expected.and_then(|ty| self.sigs.func_parts(ty));
+                let target = expected.map(|ty| self.sigs.unwrapped(ty).unwrap_or(ty));
+                let parts = target.and_then(|ty| self.sigs.func_parts(ty));
                 let (params, ret) = match parts {
                     Some((params, ret)) => (Some(params), Some(ret)),
                     None => (None, None),
@@ -6830,6 +6859,12 @@ impl<'a> FnCx<'a> {
         } else {
             let receiver = self.value(base)?;
             let ty = receiver.ty();
+            if let Ok((_, field)) = self.member_of(line, ty, name)
+                && sigs.func_parts(field.ty()).is_some()
+            {
+                let function = self.field_of(line, receiver, name)?;
+                return self.apply_value(line, name, function, None, args);
+            }
             if ty == Ty::Char {
                 return self.character_method(line, receiver, name, args);
             }

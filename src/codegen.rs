@@ -28,10 +28,10 @@ use crate::sigs::{
 };
 mod table;
 use crate::tir::{
-    ArrayOp, DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, DictOp, RC_SLOT, StrOp, TExpr,
-    TFunc, TStmt, TStruct, UNOWNED_SLOT,
+    ArrayOp, DESC_METHODS, DESC_PARENT, DESC_SLOT, Descriptor, DictOp, HEADER_SLOTS, RC_SLOT,
+    StrOp, TAG_SLOT, TExpr, TFunc, TStmt, TStruct, UNOWNED_SLOT,
 };
-use crate::types::Ty;
+use crate::types::{StructId, Ty};
 
 const VARIADIC_PADDING: usize = 7;
 const FIELD_SIZE: u32 = 8;
@@ -389,7 +389,7 @@ fn emit_function(
         builder.def_var(*var, value);
     }
     for (var, ty) in vars.iter().zip(func.locals()).skip(param_count) {
-        if matches!(ty, Ty::Class(_) | Ty::Struct(_) | Ty::Str) {
+        if matches!(ty, Ty::Class(_) | Ty::Struct(_) | Ty::Str | Ty::Func(_)) {
             let zero = builder.ins().iconst(types::I64, 0);
             builder.def_var(*var, zero);
         }
@@ -1217,7 +1217,7 @@ impl Emitter<'_, '_> {
             .ins()
             .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
         let counted = match elem {
-            Ty::Str | Ty::Class(_) => true,
+            Ty::Str | Ty::Class(_) | Ty::Func(_) => true,
             Ty::Struct(_) => !self.counted_slots(elem)?.is_empty(),
             _ => false,
         };
@@ -1246,7 +1246,7 @@ impl Emitter<'_, '_> {
             .struct_fields(ty)?
             .iter()
             .enumerate()
-            .filter(|(_, f)| matches!(f, Ty::Class(_) | Ty::Str))
+            .filter(|(_, f)| matches!(f, Ty::Class(_) | Ty::Str | Ty::Func(_)))
             .map(|(index, f)| (index, *f))
             .collect())
     }
@@ -1325,7 +1325,7 @@ impl Emitter<'_, '_> {
 
     fn retain(&mut self, value: Value, ty: Ty) -> GResult<()> {
         match ty {
-            Ty::Class(_) => self.retain_reference(value),
+            Ty::Class(_) | Ty::Func(_) => self.retain_reference(value),
             Ty::Str => self.retain_string(value),
             Ty::Struct(_) => {
                 for (field, slot_ty) in self.load_counted_slots(value, ty)? {
@@ -1339,7 +1339,7 @@ impl Emitter<'_, '_> {
 
     fn release(&mut self, value: Value, ty: Ty) -> GResult<()> {
         match ty {
-            Ty::Class(_) => self.release_reference(value),
+            Ty::Class(_) | Ty::Func(_) => self.release_reference(value),
             Ty::Str => self.release_string(value),
             Ty::Struct(_) => {
                 if self.counted_slots(ty)?.is_empty() {
@@ -2625,30 +2625,61 @@ impl Emitter<'_, '_> {
                 captures,
                 params,
                 ret,
+                drop,
                 ..
             } => {
                 let values = captures
                     .iter()
                     .map(|c| self.value(c))
                     .collect::<GResult<Vec<_>>>()?;
-                let words = u32::try_from(values.len() + 1)?;
-                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    words * FIELD_SIZE,
-                    3,
-                ));
-                let env = self.builder.ins().stack_addr(types::I64, slot, 0);
+                let words = i64::try_from(HEADER_SLOTS + 2 + values.len())?;
+                let size = self.builder.ins().iconst(types::I64, words * 8);
+                let env = self.allocate(size)?;
                 let mut with_env = vec![Ty::Int];
                 with_env.extend(params.iter().copied());
                 let sig = signature(self.call_conv, &with_env, *ret);
                 let func_ref = self.import_func(&symbol(func), sig, true);
                 let code = self.builder.ins().func_addr(types::I64, func_ref);
+                let descriptor = Descriptor::new(
+                    format!("{drop}.env"),
+                    StructId::new(0),
+                    drop.clone(),
+                    None,
+                    Vec::new(),
+                );
+                let described = self.descriptor_address(&descriptor);
                 let flags = MemFlagsData::trusted();
-                self.builder.ins().store(flags, code, env, 0);
+                let zero = self.zero();
+                let one = self.builder.ins().iconst(types::I64, 1);
+                let count = self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, i64::try_from(values.len())?);
+                self.builder
+                    .ins()
+                    .store(flags, zero, env, field_offset(TAG_SLOT));
+                self.builder
+                    .ins()
+                    .store(flags, one, env, field_offset(RC_SLOT));
+                self.builder
+                    .ins()
+                    .store(flags, described, env, field_offset(DESC_SLOT));
+                self.builder
+                    .ins()
+                    .store(flags, zero, env, field_offset(UNOWNED_SLOT));
+                self.builder
+                    .ins()
+                    .store(flags, code, env, field_offset(HEADER_SLOTS));
+                self.builder
+                    .ins()
+                    .store(flags, count, env, field_offset(HEADER_SLOTS + 1));
                 for (index, value) in values.into_iter().enumerate() {
-                    self.builder
-                        .ins()
-                        .store(flags, value, env, field_offset(index + 1));
+                    self.builder.ins().store(
+                        flags,
+                        value,
+                        env,
+                        field_offset(HEADER_SLOTS + 2 + index),
+                    );
                 }
                 env
             }
@@ -2673,7 +2704,10 @@ impl Emitter<'_, '_> {
                     values.push(self.value(arg)?);
                 }
                 let flags = MemFlagsData::trusted();
-                let code = self.builder.ins().load(types::I64, flags, env, 0);
+                let code =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, env, field_offset(HEADER_SLOTS));
                 let signature = self.builder.import_signature(sig);
                 let call = self.builder.ins().call_indirect(signature, code, &values);
                 return Ok(result_slot.or_else(|| self.builder.inst_results(call).first().copied()));
@@ -2684,7 +2718,16 @@ impl Emitter<'_, '_> {
                     types::I64,
                     MemFlagsData::trusted(),
                     env,
-                    field_offset(index + 1),
+                    field_offset(HEADER_SLOTS + 2 + index),
+                )
+            }
+            TExpr::EnvCount(env) => {
+                let env = self.value(env)?;
+                self.builder.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    env,
+                    field_offset(HEADER_SLOTS + 1),
                 )
             }
             TExpr::Capture(..) => {

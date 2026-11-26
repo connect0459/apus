@@ -126,7 +126,7 @@ impl Emitter<'_, '_> {
 
     fn counted(&self, ty: Ty) -> GResult<bool> {
         Ok(match ty {
-            Ty::Str | Ty::Class(_) => true,
+            Ty::Str | Ty::Class(_) | Ty::Func(_) => true,
             Ty::Struct(_) => !self.counted_slots(ty)?.is_empty(),
             _ => false,
         })

@@ -508,6 +508,9 @@ impl Scan<'_> {
                     || args.iter().any(|a| self.expr_uses_self(a.value()))
             }
             ExprKind::Closure(_) => true,
+            ExprKind::Apply { func, args } => {
+                self.expr_uses_self(func) || args.iter().any(|a| self.expr_uses_self(a.value()))
+            }
             ExprKind::TypeCall { args, .. } => args.iter().any(|a| self.expr_uses_self(a.value())),
             ExprKind::GenericCall { args, .. } => {
                 args.iter().any(|a| self.expr_uses_self(a.value()))

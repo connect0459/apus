@@ -751,6 +751,7 @@ fn depth_of(kind: &ExprKind) -> u32 {
         ExprKind::Call { args, .. }
         | ExprKind::GenericCall { args, .. }
         | ExprKind::TypeCall { args, .. } => deepest(args),
+        ExprKind::Apply { func, args } => func.depth.max(deepest(args)),
         ExprKind::MemberCall { base, args, .. }
         | ExprKind::GenericMemberCall { base, args, .. } => base.depth.max(deepest(args)),
     }
@@ -912,6 +913,10 @@ pub enum ExprKind {
     },
     TypeCall {
         ty: TypeRef,
+        args: Vec<Arg>,
+    },
+    Apply {
+        func: Box<Expr>,
         args: Vec<Arg>,
     },
     Closure(Box<ClosureExpr>),

@@ -505,7 +505,9 @@ pub enum TExpr {
         params: Vec<Ty>,
         ret: Ty,
         ty: Ty,
+        drop: String,
     },
+    EnvCount(Box<TExpr>),
     CallValue {
         func: Box<TExpr>,
         args: Vec<TExpr>,
@@ -573,7 +575,7 @@ impl TExpr {
             | TExpr::LoadWeak(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::Then { value, .. } => value.ty(),
-            TExpr::HashMix { .. } => Ty::Int,
+            TExpr::HashMix { .. } | TExpr::EnvCount(_) => Ty::Int,
             TExpr::Closure { ty, .. } | TExpr::EnvCell { ty, .. } | TExpr::Capture(_, ty) => *ty,
             TExpr::CallValue { ret, .. } => *ret,
             TExpr::DictOp { ty, .. } => *ty,
@@ -978,6 +980,7 @@ impl<E> Rewriter<'_, E> {
                 base: Box::new(self.expr(base)?),
                 ty: (self.ty)(*ty)?,
             },
+            TExpr::EnvCount(env) => TExpr::EnvCount(Box::new(self.expr(env)?)),
             TExpr::Closure {
                 func,
                 type_args,
@@ -985,12 +988,15 @@ impl<E> Rewriter<'_, E> {
                 params,
                 ret,
                 ty,
+                ..
             } => {
                 let type_args = type_args
                     .iter()
                     .map(|t| (self.ty)(*t))
                     .collect::<Result<Vec<_>, E>>()?;
                 let (func, type_args) = (self.call)(func.clone(), type_args)?;
+                let (drop, _) =
+                    (self.call)("$envdrop".to_string(), vec![Ty::Int; captures.len() + 1])?;
                 TExpr::Closure {
                     func,
                     type_args,
@@ -1004,6 +1010,7 @@ impl<E> Rewriter<'_, E> {
                         .collect::<Result<Vec<_>, E>>()?,
                     ret: (self.ty)(*ret)?,
                     ty: (self.ty)(*ty)?,
+                    drop,
                 }
             }
             TExpr::CallValue {

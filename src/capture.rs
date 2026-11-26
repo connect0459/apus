@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::sigs::Signatures;
-use crate::tir::{LocalHook, LocalId, TExpr, TFunc, TStmt};
+use crate::tir::{HEADER_SLOTS, LocalHook, LocalId, TExpr, TFunc, TStmt};
 use crate::types::Ty;
 
 struct Cell {
@@ -16,13 +16,14 @@ struct Environment {
     cell: Ty,
 }
 
-struct Lowering {
+struct Lowering<'a> {
+    sigs: &'a Signatures,
     cells: HashMap<LocalId, Cell>,
     environment: HashMap<LocalId, Environment>,
     locals: Vec<Ty>,
 }
 
-impl Lowering {
+impl Lowering<'_> {
     fn cell_address(&self, local: LocalId) -> Option<(TExpr, Ty)> {
         if let Some(cell) = self.cells.get(&local) {
             return Some((TExpr::Local(cell.holder, cell.cell), cell.value));
@@ -39,14 +40,14 @@ impl Lowering {
     }
 }
 
-impl LocalHook for Lowering {
+impl LocalHook for Lowering<'_> {
     fn expr(&mut self, expr: &TExpr) -> Option<TExpr> {
         match expr {
             TExpr::Local(local, ty) => {
                 let (address, _) = self.cell_address(*local)?;
                 Some(TExpr::Field {
                     base: Box::new(address),
-                    index: 0,
+                    index: HEADER_SLOTS,
                     ty: *ty,
                 })
             }
@@ -64,17 +65,21 @@ impl LocalHook for Lowering {
                 }
                 Some(TStmt::Let {
                     local: *local,
-                    init: TExpr::StructInit {
-                        ty: cell.cell,
-                        args: vec![init.clone()],
-                    },
+                    init: self.sigs.construct(cell.cell, vec![init.clone()]),
                 })
             }
             TStmt::Assign { local, value } => {
+                if let Some(cell) = self.cells.get(local) {
+                    return Some(TStmt::AssignField {
+                        local: cell.holder,
+                        index: HEADER_SLOTS,
+                        value: value.clone(),
+                    });
+                }
                 let (address, _) = self.cell_address(*local)?;
                 Some(TStmt::AssignPath {
                     base: address,
-                    index: 0,
+                    index: HEADER_SLOTS,
                     value: value.clone(),
                 })
             }
@@ -87,7 +92,7 @@ impl LocalHook for Lowering {
                 Some(TStmt::AssignPath {
                     base: TExpr::Field {
                         base: Box::new(address),
-                        index: 0,
+                        index: HEADER_SLOTS,
                         ty,
                     },
                     index: *index,
@@ -107,10 +112,9 @@ impl LocalHook for Lowering {
                 self.locals.push(Ty::Int);
                 let mut inner = vec![TStmt::Let {
                     local: *local,
-                    init: TExpr::StructInit {
-                        ty: cell_ty,
-                        args: vec![TExpr::Local(fresh, value)],
-                    },
+                    init: self
+                        .sigs
+                        .construct(cell_ty, vec![TExpr::Local(fresh, value)]),
                 }];
                 inner.extend(body.iter().cloned());
                 Some(TStmt::ForRange {
@@ -146,10 +150,7 @@ pub fn lower(
             locals.push(cell);
             prologue.push(TStmt::Let {
                 local: holder,
-                init: TExpr::StructInit {
-                    ty: cell,
-                    args: vec![TExpr::Local(*local, value)],
-                },
+                init: sigs.construct(cell, vec![TExpr::Local(*local, value)]),
             });
             cells.insert(
                 *local,
@@ -183,20 +184,19 @@ pub fn lower(
             },
         );
     }
+    let snapshot = locals.clone();
     let mut lowering = Lowering {
+        sigs,
         cells,
         environment: captured,
-        locals: Vec::new(),
+        locals,
     };
-    lowering.locals = locals;
-    let snapshot = lowering.locals.clone();
-    let result = func.rewrite_locals(&mut lowering, snapshot, prologue.clone());
-    let final_locals = lowering.locals.clone();
+    let result = func.rewrite_locals(&mut lowering, snapshot, prologue);
     TFunc::new(
         result.name().to_string(),
         result.param_count(),
         result.ret(),
-        final_locals,
+        lowering.locals,
         result.body().to_vec(),
     )
 }

@@ -164,6 +164,10 @@ fn expression(expr: &Expr, found: &mut Vec<String>) {
             expression(base, found);
             args.iter().for_each(|a| expression(a.value(), found));
         }
+        ExprKind::Apply { func, args } => {
+            expression(func, found);
+            args.iter().for_each(|a| expression(a.value(), found));
+        }
         ExprKind::Closure(closure) => statements(closure.body(), found),
     }
 }
