@@ -6464,3 +6464,87 @@ fn the_mutating_set_operations_work_on_members_and_check_their_use() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_tuple_groups_values_and_is_read_by_position_and_by_pattern() {
+    assert_eq!(
+        run(
+            "func divide(_ a: Int, _ b: Int) -> (Int, Int) {\n  return (a / b, a % b)\n}\nfunc main() {\n  let t = (1, \"one\")\n  print(t.0)\n  print(t.1)\n  let (q, r) = divide(17, 5)\n  print(q * 10 + r)\n  var v = (1, 2, 3)\n  v.1 = 20\n  let (a, _, c) = v\n  print(a + v.1 + c)\n  let nested = ((1, 2), 3)\n  print(nested.0.1 + nested.1)\n  let copy = v\n  v.0 = 9\n  print(copy.0)\n  print((1, \"a\") == (1, \"a\"))\n  print((1, 2) != (1, 3))\n  var swapped = (\"x\", 5)\n  swapped.0 += \"y\"\n  print(swapped.0)\n}"
+        ),
+        "1\none\n32\n24\n5\n1\ntrue\ntrue\nxy\n"
+    );
+}
+
+#[test]
+fn tuples_are_array_elements_dictionary_keys_and_closure_results() {
+    assert_eq!(
+        run(
+            "func main() {\n  let pairs = [(1, \"a\"), (2, \"b\")]\n  print(pairs[1].1)\n  var total = 0\n  for (n, s) in pairs {\n    total += n + s.count\n  }\n  print(total)\n  var grid: [(Int, Int): String] = [:]\n  grid[(1, 2)] = \"x\"\n  print(grid[(1, 2)] ?? \"none\")\n  print(grid[(2, 1)] == nil)\n  let squares = [1, 2, 3].map { ($0, $0 * $0) }\n  print(squares[2].1)\n  let ordered = [(3, \"c\"), (1, \"a\")].sorted { $0.0 < $1.0 }\n  print(ordered[0].1)\n  let cases: [(Int, Int)] = [(1, 2)]\n  print(cases.count)\n}"
+        ),
+        "b\n5\nx\ntrue\n9\na\n1\n"
+    );
+}
+
+#[test]
+fn zip_and_enumerated_make_arrays_of_pairs() {
+    assert_eq!(
+        run(
+            "func main() {\n  let names = [\"a\", \"b\", \"c\"]\n  let ages = [10, 20]\n  let z = zip(names, ages)\n  print(z.count)\n  print(z[1].0 + String(z[1].1))\n  for (n, a) in zip(names, ages) { print(n + String(a)) }\n  for (i, n) in names.enumerated() { print(String(i) + n) }\n  let e = names.enumerated()\n  print(e[2].0)\n  var total = 0\n  for (i, v) in [5, 6, 7].enumerated() { total += i * v }\n  print(total)\n}"
+        ),
+        "2\nb20\na10\nb20\n0a\n1b\n2c\n2\n20\n"
+    );
+}
+
+#[test]
+fn a_dictionary_is_built_from_an_array_of_pairs() {
+    assert_eq!(
+        run(
+            "func main() {\n  let d = Dictionary(uniqueKeysWithValues: [(\"a\", 1), (\"b\", 2)])\n  print(d.count)\n  print(d[\"b\"] ?? 0)\n  let e = Dictionary(uniqueKeysWithValues: zip([1, 2, 3], [\"x\", \"y\", \"z\"]))\n  print(e[3] ?? \"\")\n  let f = Dictionary(uniqueKeysWithValues: [1, 2, 3].map { ($0, $0 * 10) })\n  print(f[2] ?? 0)\n  let g: [Int: Int] = Dictionary(uniqueKeysWithValues: [(1, 1)])\n  print(g.count)\n  let h = Dictionary(uniqueKeysWithValues: [(Int, Int)]())\n  print(h.count)\n}"
+        ),
+        "2\n2\nz\n20\n1\n0\n"
+    );
+}
+
+#[test]
+fn duplicate_keys_in_unique_keys_with_values_trap() {
+    run_expecting_a_crash(
+        "func main() {\n  let d = Dictionary(uniqueKeysWithValues: [(1, \"a\"), (1, \"b\")])\n  print(d.count)\n}",
+    );
+}
+
+#[test]
+fn tuple_misuse_is_rejected_with_a_message() {
+    for (body, message) in [
+        ("let t = (1, 2)\n  print(t.2)", "has no member '2'"),
+        ("let (a, b) = 5", "is not a tuple"),
+        (
+            "let (a, b, c) = (1, 2)",
+            "names 3 element(s), but the tuple has 2",
+        ),
+        ("let t = (1, 2)\n  t.0 = 3", "constant"),
+        ("let t = (1, 2)\n  print(t == (1, \"a\"))", "expected"),
+        (
+            "let d = Dictionary(uniqueKeysWithValues: [1, 2])",
+            "needs an array of pairs",
+        ),
+        (
+            "let d = Dictionary(uniqueKeysWithValues: 3)",
+            "needs an array of pairs",
+        ),
+        ("print(zip([1]))", "zip takes two arrays"),
+        ("print(zip(1, 2))", "zip takes two arrays"),
+        (
+            "let xs = [1]\n  print(xs.enumerated(1))",
+            "enumerated takes no arguments",
+        ),
+        (
+            "for (a, b) in [1, 2] { }",
+            "needs a dictionary or an array of pairs",
+        ),
+        ("let t = (1, 2, 3, 4, 5)", "at most four elements"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

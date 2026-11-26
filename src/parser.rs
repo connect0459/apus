@@ -115,6 +115,10 @@ fn expr_as_type(expr: &Expr) -> Option<TypeRef> {
         ExprKind::GenericName { name, type_args } => {
             Some(TypeRef::new(name.clone(), type_args.clone()))
         }
+        ExprKind::Tuple(items) => {
+            let parts: Option<Vec<TypeRef>> = items.iter().map(expr_as_type).collect();
+            Some(TypeRef::new(format!("$Tuple{}", items.len()), parts?))
+        }
         ExprKind::ArrayLiteral(items) => match items.as_slice() {
             [element] => Some(TypeRef::new(
                 "Array".to_string(),
@@ -307,6 +311,9 @@ impl Parser<'_> {
         self.expect_punct(")")?;
         if !self.is_punct("->") && parts.len() == 1 {
             return Ok(parts.remove(0));
+        }
+        if !self.is_punct("->") && (2..=4).contains(&parts.len()) {
+            return Ok(TypeRef::new(format!("$Tuple{}", parts.len()), parts));
         }
         self.expect_punct("->")?;
         parts.push(self.type_ref()?);
@@ -966,6 +973,31 @@ impl Parser<'_> {
     fn let_kind(&mut self) -> PResult<StmtKind> {
         let mutable = self.is_keyword("var");
         self.pos += 1;
+        if self.eat_punct("(") {
+            let mut names = Vec::new();
+            while !self.is_punct(")") {
+                if !names.is_empty() {
+                    self.expect_punct(",")?;
+                }
+                if self.is_keyword("_") {
+                    self.pos += 1;
+                    names.push(None);
+                } else {
+                    names.push(Some(self.name()?));
+                }
+            }
+            self.expect_punct(")")?;
+            if !(2..=4).contains(&names.len()) {
+                return self.fail("a tuple pattern names two to four elements");
+            }
+            self.expect_punct("=")?;
+            let init = self.expr()?;
+            return Ok(StmtKind::LetTuple {
+                names,
+                mutable,
+                init,
+            });
+        }
         let name = self.name()?;
         let ty = if self.eat_punct(":") {
             Some(self.type_ref()?)
@@ -1265,6 +1297,10 @@ impl Parser<'_> {
                     matches!(expr.kind(), ExprKind::Ident(n) if n == "super" || n == "self");
                 let name = if after_super && self.eat_keyword("init") {
                     "init".to_string()
+                } else if let Some(Token::Int(position)) = self.peek() {
+                    let text = position.to_string();
+                    self.pos += 1;
+                    text
                 } else {
                     self.name()?
                 };
@@ -1684,10 +1720,30 @@ impl Parser<'_> {
                 self.pos += 1;
                 self.enter()?;
                 let inner = self.expr();
+                let mut rest = Vec::new();
+                if inner.is_ok() {
+                    while self.eat_punct(",") {
+                        match self.expr() {
+                            Ok(next) => rest.push(next),
+                            Err(error) => {
+                                self.leave();
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
                 self.leave();
                 let inner = inner?;
                 self.expect_punct(")")?;
-                return Ok(inner);
+                if rest.is_empty() {
+                    return Ok(inner);
+                }
+                if rest.len() > 3 {
+                    return self.fail("a tuple has at most four elements");
+                }
+                let mut items = vec![inner];
+                items.extend(rest);
+                return Ok(Expr::new(line, ExprKind::Tuple(items)));
             }
             _ => return self.fail("expected an expression"),
         };

@@ -624,6 +624,11 @@ pub enum StmtKind {
         body: Vec<Stmt>,
     },
     LocalFunc(Box<FuncDecl>),
+    LetTuple {
+        names: Vec<Option<String>>,
+        mutable: bool,
+        init: Expr,
+    },
     Switch {
         subject: Expr,
         cases: Vec<SwitchCase>,
@@ -727,7 +732,9 @@ fn depth_of(kind: &ExprKind) -> u32 {
         | ExprKind::Ident(_)
         | ExprKind::GenericName { .. } => 0,
         ExprKind::ImplicitMember { args, .. } => args.as_deref().map_or(0, deepest),
-        ExprKind::ArrayLiteral(items) => items.iter().map(|e| e.depth).max().unwrap_or(0),
+        ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items) => {
+            items.iter().map(|e| e.depth).max().unwrap_or(0)
+        }
         ExprKind::DictLiteral(pairs) => pairs
             .iter()
             .map(|(k, v)| k.depth.max(v.depth))
@@ -919,6 +926,7 @@ pub enum ExprKind {
         func: Box<Expr>,
         args: Vec<Arg>,
     },
+    Tuple(Vec<Expr>),
     Closure(Box<ClosureExpr>),
 }
 

@@ -8,9 +8,10 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    ARRAY, ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, DICTIONARY, EQUAL,
-    EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig, HASH, JOINED, KEYS, NONE_CASE, PRINT,
-    ParamSig, REPEATING, SET, SOME_CASE, SPLIT, TO_SET, VALUES, bound_includes, scope_of,
+    ARRAY, ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, DICTIONARY,
+    ENUMERATED, EQUAL, EQUATABLE, EnumSig, FATAL_ERROR, FROM_PAIRS, FieldSig, FuncSig, HASH,
+    JOINED, KEYS, NONE_CASE, PRINT, ParamSig, REPEATING, SET, SOME_CASE, SPLIT, TO_SET, VALUES,
+    ZIP, bound_includes, scope_of,
 };
 use crate::tir::{ArrayOp, DictOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -1616,6 +1617,181 @@ fn grouping_function(
     Ok(TFunc::new(name, 2, ret, cx.locals, body))
 }
 
+pub fn pairs_function(
+    sigs: &Signatures,
+    callee: &str,
+    args: &[Ty],
+    name: String,
+) -> CResult<TFunc> {
+    let first = *args
+        .first()
+        .ok_or_else(|| CheckError::at(0, "internal error: no array for a pair function"))?;
+    if callee == FROM_PAIRS {
+        let tuple = sigs
+            .array_element(first)
+            .ok_or_else(|| CheckError::at(0, "internal error: not an array of pairs"))?;
+        let parts = sigs
+            .tuple_elements(tuple)
+            .ok_or_else(|| CheckError::at(0, "internal error: not a pair"))?;
+        let (key, value) = (parts[0], parts[1]);
+        let ret = sigs.dictionary_of(key, value, 0)?;
+        let mut cx = synthetic_cx(sigs, &name, ret);
+        let source = cx.declare(0, "pairs", first, false)?;
+        let result = cx.temp(ret);
+        let position = cx.temp(Ty::Int);
+        let pair = cx.temp(tuple);
+        let at = cx.temp(Ty::Int);
+        let field = |index: usize, ty: Ty| TExpr::Field {
+            base: Box::new(local(pair, tuple)),
+            index,
+            ty,
+        };
+        let mut body = vec![TStmt::Let {
+            local: result,
+            init: empty_table(sigs, ret),
+        }];
+        body.extend(each_position(
+            source,
+            first,
+            position,
+            vec![
+                TStmt::Let {
+                    local: pair,
+                    init: array_get(source, first, position, tuple),
+                },
+                TStmt::Let {
+                    local: at,
+                    init: table_op(
+                        DictOp::Find,
+                        key,
+                        value,
+                        vec![local(result, ret), field(0, key)],
+                        Ty::Int,
+                    ),
+                },
+                TStmt::If {
+                    cond: compare(BinOp::Ge, local(at, Ty::Int), TExpr::Int(0)),
+                    then_body: vec![TStmt::Fatal(
+                        "Fatal error: Duplicate values for key\n".to_string(),
+                    )],
+                    else_body: Vec::new(),
+                },
+                TStmt::Assign {
+                    local: result,
+                    value: table_op(
+                        DictOp::Set,
+                        key,
+                        value,
+                        vec![local(result, ret), field(0, key), field(1, value)],
+                        ret,
+                    ),
+                },
+            ],
+        ));
+        body.push(TStmt::Return(Some(local(result, ret))));
+        return Ok(TFunc::new(name, 1, ret, cx.locals, body));
+    }
+    let left_elem = sigs
+        .array_element(first)
+        .ok_or_else(|| CheckError::at(0, "internal error: not an array"))?;
+    let (second, right_elem, tuple, params) = if callee == ENUMERATED {
+        (
+            None,
+            left_elem,
+            sigs.tuple_of(vec![Ty::Int, left_elem], 0)?,
+            1,
+        )
+    } else {
+        let second = *args
+            .get(1)
+            .ok_or_else(|| CheckError::at(0, "internal error: zip needs two arrays"))?;
+        let right = sigs
+            .array_element(second)
+            .ok_or_else(|| CheckError::at(0, "internal error: not an array"))?;
+        (
+            Some(second),
+            right,
+            sigs.tuple_of(vec![left_elem, right], 0)?,
+            2,
+        )
+    };
+    let ret = sigs.array_of(tuple, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, ret);
+    let left = cx.declare(0, "left", first, false)?;
+    let right = match second {
+        Some(second) => Some(cx.declare(0, "right", second, false)?),
+        None => None,
+    };
+    let result = cx.temp(ret);
+    let position = cx.temp(Ty::Int);
+    let total = cx.temp(Ty::Int);
+    let paired = match (right, second) {
+        (Some(right), Some(second)) => array_get(right, second, position, right_elem),
+        _ => local(position, Ty::Int),
+    };
+    let mut body = vec![
+        TStmt::Let {
+            local: result,
+            init: empty_array(sigs, ret, tuple),
+        },
+        TStmt::Let {
+            local: total,
+            init: array_count(left, first),
+        },
+    ];
+    if let (Some(right), Some(second)) = (right, second) {
+        body.push(TStmt::If {
+            cond: compare(BinOp::Lt, array_count(right, second), local(total, Ty::Int)),
+            then_body: vec![TStmt::Assign {
+                local: total,
+                value: array_count(right, second),
+            }],
+            else_body: Vec::new(),
+        });
+    }
+    let (head, tail) = if callee == ENUMERATED {
+        (paired, array_get(left, first, position, left_elem))
+    } else {
+        (array_get(left, first, position, left_elem), paired)
+    };
+    let _ = params;
+    body.extend(vec![
+        TStmt::Let {
+            local: position,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Lt, local(position, Ty::Int), local(total, Ty::Int)),
+            body: vec![
+                TStmt::Assign {
+                    local: result,
+                    value: TExpr::ArrayOp {
+                        op: ArrayOp::Append,
+                        elem: tuple,
+                        args: vec![
+                            local(result, ret),
+                            TExpr::StructInit {
+                                ty: tuple,
+                                args: vec![head, tail],
+                            },
+                        ],
+                        ty: ret,
+                    },
+                },
+                step(position),
+            ],
+        },
+        TStmt::Return(Some(local(result, ret))),
+    ]);
+    Ok(TFunc::new(
+        name,
+        if right.is_some() { 2 } else { 1 },
+        ret,
+        cx.locals,
+        body,
+    ))
+}
+
 pub fn env_drop_function(sigs: &Signatures, count: usize, name: String) -> CResult<TFunc> {
     let _ = sigs;
     let env = LocalId::new(0);
@@ -2615,6 +2791,11 @@ impl<'a> FnCx<'a> {
 
     fn lower_stmt(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
         match stmt.kind() {
+            StmtKind::LetTuple {
+                names,
+                mutable,
+                init,
+            } => self.let_tuple(stmt.line(), names, *mutable, init, out),
             StmtKind::Switch { subject, cases } => {
                 let mut lowered = Vec::new();
                 self.in_target(TargetKind::Switch, |cx| {
@@ -3439,6 +3620,10 @@ impl<'a> FnCx<'a> {
                 body,
             } => self.for_pair(line, key, value, iter, body),
             StmtKind::LocalFunc(func) => self.local_function(line, func),
+            StmtKind::LetTuple { .. } => Err(CheckError::at(
+                line,
+                "internal error: a tuple binding is lowered with its block",
+            )),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
             StmtKind::Switch { .. }
             | StmtKind::Labeled { .. }
@@ -4330,6 +4515,19 @@ impl<'a> FnCx<'a> {
         if let Some(call) = self.array_closure_method(line, &receiver, elem, name, args)? {
             return Ok(call);
         }
+        if name == "enumerated" {
+            if !args.is_empty() {
+                return Err(CheckError::at(line, "enumerated takes no arguments"));
+            }
+            let tuple = self.sigs.tuple_of(vec![Ty::Int, elem], line)?;
+            let ret = self.sigs.array_of(tuple, line)?;
+            return Ok(TExpr::Call {
+                callee: ENUMERATED.to_string(),
+                type_args: vec![receiver.ty()],
+                args: vec![receiver],
+                ret,
+            });
+        }
         match name {
             "contains" => {
                 let [arg] = args else {
@@ -5104,6 +5302,71 @@ impl<'a> FnCx<'a> {
         })
     }
 
+    fn tuple_literal(&mut self, line: u32, items: &[Expr], expected: Option<Ty>) -> CResult<TExpr> {
+        let hint = expected
+            .and_then(|ty| self.sigs.tuple_elements(ty))
+            .filter(|elements| elements.len() == items.len());
+        let mut values = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            self.expected = hint.as_ref().map(|h| h[index]);
+            let mut value = self.value(item)?;
+            if let Some(h) = &hint {
+                value = self.coerce(item.line(), h[index], value)?;
+            }
+            values.push(value);
+        }
+        let ty = self
+            .sigs
+            .tuple_of(values.iter().map(TExpr::ty).collect(), line)?;
+        Ok(TExpr::StructInit { ty, args: values })
+    }
+
+    fn let_tuple(
+        &mut self,
+        line: u32,
+        names: &[Option<String>],
+        mutable: bool,
+        init: &Expr,
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        let value = self.value(init)?;
+        let Some(elements) = self.sigs.tuple_elements(value.ty()) else {
+            return Err(CheckError::at(
+                line,
+                format!("{} is not a tuple", self.name_of(value.ty())),
+            ));
+        };
+        if elements.len() != names.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "this pattern names {} element(s), but the tuple has {}",
+                    names.len(),
+                    elements.len()
+                ),
+            ));
+        }
+        let ty = value.ty();
+        let held = self.temp(ty);
+        out.push(TStmt::Let {
+            local: held,
+            init: value,
+        });
+        for (index, (name, element)) in names.iter().zip(&elements).enumerate() {
+            let Some(name) = name else { continue };
+            let local = self.declare(line, name, *element, mutable)?;
+            out.push(TStmt::Let {
+                local,
+                init: TExpr::Field {
+                    base: Box::new(TExpr::Local(held, ty)),
+                    index,
+                    ty: *element,
+                },
+            });
+        }
+        Ok(())
+    }
+
     fn array_literal(&mut self, line: u32, items: &[Expr], expected: Option<Ty>) -> CResult<TExpr> {
         if let Some(ty) = expected
             && self.sigs.is_set(ty)
@@ -5300,15 +5563,127 @@ impl<'a> FnCx<'a> {
         body: &[Stmt],
     ) -> CResult<TStmt> {
         let table = self.value(iter)?;
+        if let Some(element) = self.sigs.array_element(table.ty())
+            && let Some(parts) = self.sigs.tuple_elements(element)
+            && parts.len() == 2
+        {
+            return self.for_tuples(line, key_name, value_name, table, element, &parts, body);
+        }
         match self.sigs.table_parts(table.ty()) {
             Some((key, value)) if !self.sigs.is_set(table.ty()) => {
                 self.for_table(line, table, key, value, key_name, Some(value_name), body)
             }
             _ => Err(CheckError::at(
                 line,
-                "a loop over (key, value) needs a dictionary",
+                "a loop over (a, b) needs a dictionary or an array of pairs",
             )),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn zip_call(&mut self, line: u32, args: &[Arg]) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let [left, right] = args else {
+            return Err(CheckError::at(line, "zip takes two arrays"));
+        };
+        if left.label().is_some() || right.label().is_some() {
+            return Err(CheckError::at(line, "zip takes two unlabeled arrays"));
+        }
+        let first = self.value(left.value())?;
+        let second = self.value(right.value())?;
+        let (Some(a), Some(b)) = (
+            sigs.array_element(first.ty()),
+            sigs.array_element(second.ty()),
+        ) else {
+            return Err(CheckError::at(line, "zip takes two arrays"));
+        };
+        let tuple = sigs.tuple_of(vec![a, b], line)?;
+        let ret = sigs.array_of(tuple, line)?;
+        Ok(TExpr::Call {
+            callee: ZIP.to_string(),
+            type_args: vec![first.ty(), second.ty()],
+            args: vec![first, second],
+            ret,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn for_tuples(
+        &mut self,
+        line: u32,
+        first_name: &str,
+        second_name: &str,
+        array: TExpr,
+        element: Ty,
+        parts: &[Ty],
+        body: &[Stmt],
+    ) -> CResult<TStmt> {
+        let array_ty = array.ty();
+        let held = self.temp(array_ty);
+        let position = self.temp(Ty::Int);
+        let item = self.temp(element);
+        self.scopes.push(HashMap::new());
+        let result = self
+            .declare(line, first_name, parts[0], false)
+            .and_then(|first| {
+                let second = self.declare(line, second_name, parts[1], false)?;
+                let mut stmts = vec![
+                    TStmt::Let {
+                        local: item,
+                        init: TExpr::ArrayOp {
+                            op: ArrayOp::Get,
+                            elem: element,
+                            args: vec![
+                                TExpr::Local(held, array_ty),
+                                TExpr::Local(position, Ty::Int),
+                            ],
+                            ty: element,
+                        },
+                    },
+                    TStmt::Let {
+                        local: first,
+                        init: TExpr::Field {
+                            base: Box::new(TExpr::Local(item, element)),
+                            index: 0,
+                            ty: parts[0],
+                        },
+                    },
+                    TStmt::Let {
+                        local: second,
+                        init: TExpr::Field {
+                            base: Box::new(TExpr::Local(item, element)),
+                            index: 1,
+                            ty: parts[1],
+                        },
+                    },
+                    step(position),
+                ];
+                stmts.extend(self.in_target(TargetKind::Loop, |cx| cx.block(body))?);
+                Ok(TStmt::While {
+                    cond: compare(
+                        BinOp::Lt,
+                        local(position, Ty::Int),
+                        array_count(held, array_ty),
+                    ),
+                    body: stmts,
+                })
+            });
+        self.scopes.pop();
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: vec![
+                TStmt::Let {
+                    local: held,
+                    init: array,
+                },
+                TStmt::Let {
+                    local: position,
+                    init: TExpr::Int(0),
+                },
+                result?,
+            ],
+            else_body: Vec::new(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5429,6 +5804,36 @@ impl<'a> FnCx<'a> {
                     )
                 })?;
                 Ok(empty_table(sigs, ty))
+            }
+            (DICTIONARY, [pairs]) if pairs.label() == Some("uniqueKeysWithValues") => {
+                let hint = contextual
+                    .and_then(|ty| sigs.table_parts(ty))
+                    .map(|(key, value)| sigs.tuple_of(vec![key, value], line))
+                    .transpose()?
+                    .map(|tuple| sigs.array_of(tuple, line))
+                    .transpose()?;
+                self.expected = hint;
+                let source = self.value(pairs.value())?;
+                let parts = sigs
+                    .array_element(source.ty())
+                    .and_then(|element| sigs.tuple_elements(element))
+                    .filter(|parts| parts.len() == 2);
+                let Some(parts) = parts else {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "uniqueKeysWithValues needs an array of pairs, but found {}",
+                            self.name_of(source.ty())
+                        ),
+                    ));
+                };
+                let ret = sigs.dictionary_of(parts[0], parts[1], line)?;
+                Ok(TExpr::Call {
+                    callee: FROM_PAIRS.to_string(),
+                    type_args: vec![source.ty()],
+                    args: vec![source],
+                    ret,
+                })
             }
             (DICTIONARY, [grouping, by])
                 if grouping.label() == Some("grouping") && by.label() == Some("by") =>
@@ -6852,6 +7257,7 @@ impl<'a> FnCx<'a> {
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
             ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
+            ExprKind::Tuple(items) => self.tuple_literal(line, items, expected),
             ExprKind::Apply { func, args } => {
                 let target = self.value(func)?;
                 self.apply_value(line, "function", target, None, args)
@@ -7944,6 +8350,10 @@ impl<'a> FnCx<'a> {
     ) -> CResult<TExpr> {
         if matches!(callee, ARRAY | DICTIONARY | SET) {
             return self.collection_init(line, callee, explicit, args, expected);
+        }
+        if callee == "zip" && self.lookup(callee, line).is_err() && self.sigs.func(callee).is_none()
+        {
+            return self.zip_call(line, args);
         }
         if let Ok(binding) = self.lookup(callee, line)
             && self.sigs.func_parts(binding.ty).is_some()

@@ -84,6 +84,7 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
             statements(body, found);
         }
         StmtKind::LocalFunc(func) => statements(func.body(), found),
+        StmtKind::LetTuple { init, .. } => expression(init, found),
         StmtKind::Switch { subject, cases } => {
             expression(subject, found);
             for case in cases {
@@ -108,7 +109,9 @@ fn expression(expr: &Expr, found: &mut Vec<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Str(_)
         | ExprKind::GenericName { .. } => {}
-        ExprKind::ArrayLiteral(items) => items.iter().for_each(|e| expression(e, found)),
+        ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items) => {
+            items.iter().for_each(|e| expression(e, found))
+        }
         ExprKind::DictLiteral(pairs) => {
             for (key, value) in pairs {
                 expression(key, found);

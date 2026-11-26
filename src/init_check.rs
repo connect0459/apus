@@ -364,6 +364,13 @@ impl Scan<'_> {
             StmtKind::Return(value) => value.as_ref().is_some_and(|e| self.expr_uses_self(e)),
             StmtKind::Break(_) | StmtKind::Continue(_) => false,
             StmtKind::LocalFunc(_) => true,
+            StmtKind::LetTuple { names, init, .. } => {
+                let used = self.expr_uses_self(init);
+                for name in names.iter().flatten() {
+                    self.declare(name);
+                }
+                used
+            }
             StmtKind::Labeled { stmt, .. } => self.stmt_uses_self(stmt),
             StmtKind::If {
                 cond,
@@ -476,7 +483,9 @@ impl Scan<'_> {
                 self.expr_uses_self(subject) || self.expr_uses_self(link)
             }
             ExprKind::Cast { expr, .. } => self.expr_uses_self(expr),
-            ExprKind::ArrayLiteral(items) => items.iter().any(|e| self.expr_uses_self(e)),
+            ExprKind::ArrayLiteral(items) | ExprKind::Tuple(items) => {
+                items.iter().any(|e| self.expr_uses_self(e))
+            }
             ExprKind::DictLiteral(pairs) => pairs
                 .iter()
                 .any(|(k, v)| self.expr_uses_self(k) || self.expr_uses_self(v)),
@@ -550,7 +559,7 @@ fn returns(stmt: &Stmt) -> bool {
         | StmtKind::ForPair { body, .. } => any_returns(body),
         StmtKind::Switch { cases, .. } => cases.iter().any(|c| any_returns(c.body())),
         StmtKind::Labeled { stmt, .. } => returns(stmt),
-        StmtKind::LocalFunc(_) => false,
+        StmtKind::LocalFunc(_) | StmtKind::LetTuple { .. } => false,
         StmtKind::Let { .. }
         | StmtKind::Assign { .. }
         | StmtKind::Break(_)

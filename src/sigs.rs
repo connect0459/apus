@@ -44,6 +44,7 @@ pub const BOX: &str = "$Box";
 pub const ARRAY: &str = "Array";
 pub const CELL: &str = "$Cell";
 pub const CELL_DEF: usize = 4;
+pub const TUPLE_DEF: usize = 5;
 pub const DICTIONARY: &str = "Dictionary";
 pub const SET: &str = "Set";
 pub const DICT_COUNT: usize = 4;
@@ -53,6 +54,9 @@ pub const DICT_ENTRIES: usize = 7;
 pub const DICT_TABLE: usize = 8;
 pub const HASH: &str = "$hash";
 pub const KEYS: &str = "$keys";
+pub const ZIP: &str = "$zip";
+pub const ENUMERATED: &str = "$enumerated";
+pub const FROM_PAIRS: &str = "$fromPairs";
 pub const TO_SET: &str = "$toset";
 pub const REPEATING: &str = "$repeating";
 pub const VALUES: &str = "$values";
@@ -99,6 +103,18 @@ fn table_fields() -> Vec<Field> {
         Field::new("$entries".to_string(), true, TypeRef::from("Int")),
         Field::new("$table".to_string(), true, TypeRef::from("Int")),
     ]
+}
+
+fn tuple_decl(count: usize) -> StructDecl {
+    let generics: Vec<String> = (0..count).map(|i| format!("T{i}")).collect();
+    let fields = generics
+        .iter()
+        .enumerate()
+        .map(|(index, generic)| {
+            Field::new(index.to_string(), true, TypeRef::from(generic.as_str()))
+        })
+        .collect();
+    StructDecl::new(0, format!("$Tuple{count}"), fields).with_generics(generics)
 }
 
 fn cell_decl() -> StructDecl {
@@ -510,6 +526,9 @@ impl Signatures {
         sigs.register_struct_def(&dictionary_decl())?;
         sigs.register_struct_def(&set_decl())?;
         sigs.register_struct_def(&cell_decl())?;
+        for count in 2..=4 {
+            sigs.register_struct_def(&tuple_decl(count))?;
+        }
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -938,6 +957,9 @@ impl Signatures {
                     || self
                         .unwrapped(ty)
                         .is_some_and(|inner| self.conforms(inner, EQUATABLE))
+                    || self
+                        .tuple_elements(ty)
+                        .is_some_and(|all| all.iter().all(|e| self.conforms(*e, EQUATABLE)))
                     || self
                         .array_element(ty)
                         .is_some_and(|inner| self.conforms(inner, EQUATABLE))
@@ -2352,6 +2374,10 @@ impl Signatures {
         if let Some(inner) = self.unwrapped(ty) {
             return format!("{}?", self.display(inner, scope));
         }
+        if let Some(elements) = self.tuple_elements(ty) {
+            let shown: Vec<String> = elements.iter().map(|e| self.display(*e, scope)).collect();
+            return format!("({})", shown.join(", "));
+        }
         if let Some((params, ret)) = self.func_parts(ty) {
             let shown: Vec<String> = params.iter().map(|p| self.display(*p, scope)).collect();
             return format!("({}) -> {}", shown.join(", "), self.display(ret, scope));
@@ -2415,6 +2441,19 @@ impl Signatures {
                 let (def, args) = instances.enum_origin.get(id.index())?;
                 Some((Kind::Enum, *def, args.clone()))
             }
+            _ => None,
+        }
+    }
+
+    pub fn tuple_of(&self, elements: Vec<Ty>, line: u32) -> CResult<Ty> {
+        let def = TUPLE_DEF + elements.len().saturating_sub(2);
+        let id = self.instantiate_struct(def, elements, &[], line)?;
+        Ok(self.struct_ty(def, id))
+    }
+
+    pub fn tuple_elements(&self, ty: Ty) -> Option<Vec<Ty>> {
+        match self.origin_of(ty)? {
+            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => Some(args),
             _ => None,
         }
     }
