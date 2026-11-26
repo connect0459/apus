@@ -5826,3 +5826,73 @@ fn set_operations_check_their_arguments() {
         build_error("func main() { let d = [1: 2]\n print(d.union(d)) }").contains("no method")
     );
 }
+
+#[test]
+fn empty_collections_are_made_with_their_type_names() {
+    assert_eq!(
+        main_printing(
+            "var a = [Int]()\na.append(1)\nvar d = [String: Int]()\nd[\"k\"] = 2\nvar s = Set<Int>()\ns.insert(3)\nvar n = Array<String>()\nn.append(\"x\")\nvar m = Dictionary<Int, Int>()\nm[1] = 1\nvar g = [[Int]]()\ng.append([1])\nvar t: Set<String> = Set()\nt.insert(\"q\")\nvar e: [Int: [Int]] = Dictionary()\ne[1, default: []].append(4)\nprint(a.count + d.count + s.count + n.count + m.count + g.count + t.count + e.count)\nprint(d[\"k\"] ?? 0)\nprint(e[1]?.count ?? 0)"
+        ),
+        "8\n2\n1\n"
+    );
+}
+
+#[test]
+fn a_set_is_built_from_an_array_a_literal_or_another_set() {
+    assert_eq!(
+        main_printing(
+            "let xs = [3, 1, 3, 2, 1]\nlet s = Set(xs)\nprint(s.count)\nprint(s.contains(2))\nlet t = Set([\"a\", \"b\", \"a\"])\nprint(t.count)\nlet u = Set<Int>([1, 1, 2])\nprint(u.count)\nlet v: Set<Int> = Set(xs)\nprint(v == s)\nlet w = Set(s)\nprint(w == s)\nvar order = 0\nfor m in s { order = order * 10 + m }\nprint(order)\nprint(Set([[1], [1], [2]]).count)\nprint(Set(\"hello world\".split(separator: \" \")).count)"
+        ),
+        "3\ntrue\n2\n2\ntrue\ntrue\n312\n2\n2\n"
+    );
+}
+
+#[test]
+fn an_array_is_built_by_repeating_a_value_or_from_a_set_or_array() {
+    assert_eq!(
+        main_printing(
+            "var zeros = [Int](repeating: 0, count: 4)\nzeros[2] = 7\nprint(zeros.count)\nprint(zeros[2] + zeros[0])\nlet names = Array(repeating: \"x\", count: 3)\nprint(names.joined())\nlet none = [Int](repeating: 1, count: 0)\nprint(none.isEmpty)\nlet grid = [[Int]](repeating: [0, 0], count: 2)\nprint(grid.count)\nlet s: Set<Int> = [5, 6]\nlet fromSet = Array(s)\nprint(fromSet.count)\nprint(fromSet[0] + fromSet[1])\nlet copy = Array(fromSet)\nprint(copy == fromSet)\nlet sized: [Int?] = []\nprint(sized.count)"
+        ),
+        "4\n7\nxxx\ntrue\n2\n2\n11\ntrue\n0\n"
+    );
+}
+
+#[test]
+fn a_repeated_array_does_not_share_its_elements() {
+    assert_eq!(
+        main_printing(
+            "var grid = [[Int]](repeating: [0, 0], count: 2)\ngrid[0][1] = 5\nprint(grid[0][1])\nprint(grid[1][1])\nvar objects = [String](repeating: \"a\", count: 2)\nobjects[0] += \"b\"\nprint(objects[0])\nprint(objects[1])"
+        ),
+        "5\n0\nab\na\n"
+    );
+}
+
+#[test]
+fn a_negative_repeat_count_traps() {
+    run_expecting_a_crash(
+        "func main() {\n  var n = 0\n  n -= 1\n  let a = [Int](repeating: 0, count: n)\n  print(a.count)\n}",
+    );
+}
+
+#[test]
+fn collection_initializers_check_their_arguments() {
+    assert!(build_error("func main() { let a = [Int](1) }").contains("Array cannot be built"));
+    assert!(build_error("func main() { let a = Array() }").contains("element type"));
+    assert!(build_error("func main() { let d = Dictionary() }").contains("key and value"));
+    assert!(build_error("func main() { let s = Set() }").contains("element type"));
+    assert!(build_error("func main() { let d = [Int: Int](1) }").contains("no arguments"));
+    assert!(build_error("func main() { let s = Set(1) }").contains("Set cannot be built"));
+    assert!(build_error("func main() { let s = Set([1], [2]) }").contains("Set takes"));
+    assert!(build_error("func main() { let a = Array(5) }").contains("Array cannot be built"));
+    assert!(
+        build_error("func main() { let a = [Int](repeating: \"x\", count: 1) }")
+            .contains("expected Int")
+    );
+    assert!(
+        build_error("func main() { let a = [Int](repeating: 0, size: 1) }").contains("Array takes")
+    );
+    assert!(
+        build_error("class C {}\nfunc main() { let s = Set<C>() }").contains("cannot be a key")
+    );
+    assert!(build_error("func main() { let a = [1, 2]()\n }").contains("collection type"));
+}

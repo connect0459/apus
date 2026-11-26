@@ -746,7 +746,9 @@ fn depth_of(kind: &ExprKind) -> u32 {
         }
         ExprKind::OptionalChain { subject, link } => subject.depth.max(link.depth),
         ExprKind::Range { lo, hi, .. } => lo.depth.max(hi.depth),
-        ExprKind::Call { args, .. } | ExprKind::GenericCall { args, .. } => deepest(args),
+        ExprKind::Call { args, .. }
+        | ExprKind::GenericCall { args, .. }
+        | ExprKind::TypeCall { args, .. } => deepest(args),
         ExprKind::MemberCall { base, args, .. }
         | ExprKind::GenericMemberCall { base, args, .. } => base.depth.max(deepest(args)),
     }
@@ -859,6 +861,10 @@ pub enum ExprKind {
     GenericCall {
         callee: String,
         type_args: Vec<TypeRef>,
+        args: Vec<Arg>,
+    },
+    TypeCall {
+        ty: TypeRef,
         args: Vec<Arg>,
     },
 }

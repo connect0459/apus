@@ -6,9 +6,9 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, EQUAL, EQUATABLE, EnumSig,
-    FATAL_ERROR, FieldSig, FuncSig, HASH, JOINED, KEYS, NONE_CASE, PRINT, ParamSig, SOME_CASE,
-    SPLIT, VALUES, bound_includes, scope_of,
+    ARRAY, ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, DICTIONARY, EQUAL,
+    EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig, HASH, JOINED, KEYS, NONE_CASE, PRINT,
+    ParamSig, REPEATING, SET, SOME_CASE, SPLIT, TO_SET, VALUES, bound_includes, scope_of,
 };
 use crate::tir::{ArrayOp, DictOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -723,6 +723,86 @@ pub fn set_function(sigs: &Signatures, ty: Ty, name: String, op: SetOp) -> CResu
         body.push(TStmt::Return(Some(local(result, ty))));
     }
     Ok(TFunc::new(name, 2, ret, cx.locals, body))
+}
+
+pub fn set_from_array_function(sigs: &Signatures, array: Ty, name: String) -> CResult<TFunc> {
+    let element = sigs
+        .array_element(array)
+        .ok_or_else(|| CheckError::at(0, "internal error: a set is built from an array"))?;
+    let set = sigs.set_of(element, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, set);
+    let source = cx.declare(0, "source", array, false)?;
+    let result = cx.temp(set);
+    let position = cx.temp(Ty::Int);
+    let mut body = vec![TStmt::Let {
+        local: result,
+        init: empty_table(sigs, set),
+    }];
+    body.extend(each_position(
+        source,
+        array,
+        position,
+        vec![TStmt::Assign {
+            local: result,
+            value: table_op(
+                DictOp::Set,
+                element,
+                Ty::Void,
+                vec![
+                    local(result, set),
+                    array_get(source, array, position, element),
+                ],
+                set,
+            ),
+        }],
+    ));
+    body.push(TStmt::Return(Some(local(result, set))));
+    Ok(TFunc::new(name, 1, set, cx.locals, body))
+}
+
+pub fn repeating_function(sigs: &Signatures, array: Ty, name: String) -> CResult<TFunc> {
+    let element = sigs
+        .array_element(array)
+        .ok_or_else(|| CheckError::at(0, "internal error: repeating needs an array"))?;
+    let mut cx = synthetic_cx(sigs, &name, array);
+    let value = cx.declare(0, "value", element, false)?;
+    let count = cx.declare(0, "count", Ty::Int, false)?;
+    let result = cx.temp(array);
+    let position = cx.temp(Ty::Int);
+    let body = vec![
+        TStmt::If {
+            cond: compare(BinOp::Lt, local(count, Ty::Int), TExpr::Int(0)),
+            then_body: vec![TStmt::Fatal(
+                "Fatal error: Array count must not be negative\n".to_string(),
+            )],
+            else_body: Vec::new(),
+        },
+        TStmt::Let {
+            local: result,
+            init: empty_array(sigs, array, element),
+        },
+        TStmt::Let {
+            local: position,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Lt, local(position, Ty::Int), local(count, Ty::Int)),
+            body: vec![
+                TStmt::Assign {
+                    local: result,
+                    value: TExpr::ArrayOp {
+                        op: ArrayOp::Append,
+                        elem: element,
+                        args: vec![local(result, array), local(value, element)],
+                        ty: array,
+                    },
+                },
+                step(position),
+            ],
+        },
+        TStmt::Return(Some(local(result, array))),
+    ];
+    Ok(TFunc::new(name, 2, array, cx.locals, body))
 }
 
 pub fn table_listing_function(
@@ -3780,6 +3860,153 @@ impl FnCx<'_> {
         })
     }
 
+    fn collection_init(
+        &mut self,
+        line: u32,
+        name: &str,
+        explicit: Option<&[TypeRef]>,
+        args: &[Arg],
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let declared = match explicit {
+            Some(list) if !list.is_empty() => Some(sigs.resolve_type(
+                &TypeRef::new(name.to_string(), list.to_vec()),
+                &self.scope,
+                line,
+            )?),
+            _ => None,
+        };
+        let fits = |ty: Ty| match name {
+            SET => sigs.is_set(ty),
+            DICTIONARY => sigs.table_parts(ty).is_some() && !sigs.is_set(ty),
+            _ => sigs.array_element(ty).is_some(),
+        };
+        let contextual = declared.or_else(|| expected.filter(|ty| fits(*ty)));
+        let unlabeled = |arg: &Arg| arg.label().is_none();
+        match (name, args) {
+            (DICTIONARY, []) => {
+                let ty = contextual.ok_or_else(|| {
+                    CheckError::at(
+                        line,
+                        "Dictionary needs its key and value types, such as '[String: Int]()'",
+                    )
+                })?;
+                Ok(empty_table(sigs, ty))
+            }
+            (DICTIONARY, _) => Err(CheckError::at(line, "Dictionary takes no arguments")),
+            (SET, []) => {
+                let ty = contextual.ok_or_else(|| {
+                    CheckError::at(line, "Set needs its element type, such as 'Set<Int>()'")
+                })?;
+                Ok(empty_table(sigs, ty))
+            }
+            (ARRAY, []) => {
+                let ty = contextual.ok_or_else(|| {
+                    CheckError::at(line, "Array needs its element type, such as '[Int]()'")
+                })?;
+                let element = self.array_target(line, ty)?;
+                Ok(empty_array(sigs, ty, element))
+            }
+            (SET | ARRAY, [arg]) if unlabeled(arg) => {
+                let hint = contextual.and_then(|ty| match name {
+                    SET => sigs.table_parts(ty).map(|(element, _)| element),
+                    _ => sigs.array_element(ty),
+                });
+                self.expected = match hint {
+                    Some(element) => Some(sigs.array_of(element, line)?),
+                    None => None,
+                };
+                let source = self.value(arg.value())?;
+                self.collection_from(line, name, source, contextual)
+            }
+            (ARRAY, [value, count])
+                if unlabeled(value)
+                    || (value.label() == Some("repeating") && count.label() == Some("count")) =>
+            {
+                if value.label() != Some("repeating") || count.label() != Some("count") {
+                    return Err(CheckError::at(
+                        line,
+                        "Array takes 'repeating:' and 'count:'",
+                    ));
+                }
+                let hint = contextual.and_then(|ty| sigs.array_element(ty));
+                self.expected = hint;
+                let mut fill = self.value(value.value())?;
+                let element = match hint {
+                    Some(element) => {
+                        fill = self.coerce(line, element, fill)?;
+                        element
+                    }
+                    None => fill.ty(),
+                };
+                let ty = sigs.array_of(element, line)?;
+                let total = self.int_value(count.value())?;
+                Ok(TExpr::Call {
+                    callee: REPEATING.to_string(),
+                    type_args: vec![ty],
+                    args: vec![fill, total],
+                    ret: ty,
+                })
+            }
+            (SET, _) => Err(CheckError::at(
+                line,
+                "Set takes one sequence of its elements",
+            )),
+            _ => Err(CheckError::at(
+                line,
+                "Array takes a set or an array, or 'repeating:' and 'count:'",
+            )),
+        }
+    }
+
+    fn collection_from(
+        &mut self,
+        line: u32,
+        name: &str,
+        source: TExpr,
+        contextual: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let ty = source.ty();
+        if name == SET {
+            if sigs.is_set(ty) {
+                return self.coerce(line, contextual.unwrap_or(ty), source);
+            }
+            let Some(element) = sigs.array_element(ty) else {
+                return Err(CheckError::at(
+                    line,
+                    format!("Set cannot be built from {}", self.name_of(ty)),
+                ));
+            };
+            let set = sigs.set_of(element, line)?;
+            let built = TExpr::Call {
+                callee: TO_SET.to_string(),
+                type_args: vec![ty],
+                args: vec![source],
+                ret: set,
+            };
+            return self.coerce(line, contextual.unwrap_or(set), built);
+        }
+        if sigs.array_element(ty).is_some() {
+            return self.coerce(line, contextual.unwrap_or(ty), source);
+        }
+        if let Some((element, _)) = sigs.table_parts(ty).filter(|_| sigs.is_set(ty)) {
+            let array = sigs.array_of(element, line)?;
+            let listing = TExpr::Call {
+                callee: KEYS.to_string(),
+                type_args: vec![ty],
+                args: vec![source],
+                ret: array,
+            };
+            return self.coerce(line, contextual.unwrap_or(array), listing);
+        }
+        Err(CheckError::at(
+            line,
+            format!("Array cannot be built from {}", self.name_of(ty)),
+        ))
+    }
+
     fn set_operand(
         &mut self,
         line: u32,
@@ -4916,6 +5143,9 @@ impl FnCx<'_> {
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
             ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
+            ExprKind::TypeCall { ty, args } => {
+                self.collection_init(line, ty.name(), Some(ty.args()), args, expected)
+            }
             ExprKind::IndexDefault {
                 base,
                 index,
@@ -5991,6 +6221,9 @@ impl FnCx<'_> {
         expected: Option<Ty>,
         explicit: Option<&[TypeRef]>,
     ) -> CResult<TExpr> {
+        if matches!(callee, ARRAY | DICTIONARY | SET) {
+            return self.collection_init(line, callee, explicit, args, expected);
+        }
         if callee == "String" {
             return self.string_conversion(line, args);
         }
@@ -6255,6 +6488,9 @@ impl FnCx<'_> {
         args: &[Arg],
         expected: Option<Ty>,
     ) -> CResult<TExpr> {
+        if matches!(callee, ARRAY | DICTIONARY | SET) {
+            return self.collection_init(line, callee, Some(type_args), args, expected);
+        }
         let is_type =
             self.sigs.struct_def(callee).is_some() || self.sigs.enum_def(callee).is_some();
         if is_type && self.sigs.has_init(callee) {

@@ -5,11 +5,12 @@ use std::rc::Rc;
 use crate::ast::BinOp;
 use crate::check::{
     SetOp, boxed_requirement, contains_function, equality_function, hash_function, joined_function,
-    set_function, split_function, table_listing_function,
+    repeating_function, set_from_array_function, set_function, split_function,
+    table_listing_function,
 };
 use crate::sigs::{
-    COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, KEYS, SPLIT, Signatures,
-    VALUES,
+    COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, KEYS, REPEATING, SPLIT,
+    Signatures, TO_SET, VALUES,
 };
 use crate::tir::{Descriptor, TFunc, Witnessed};
 use crate::types::Ty;
@@ -270,7 +271,21 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if let Some(op) = SetOp::from_callee(callee) {
+        let generic = if callee == TO_SET {
+            Rc::new(
+                args.first()
+                    .map(|ty| set_from_array_function(sigs, *ty, mangled.clone()))
+                    .ok_or_else(|| "internal error: no type for a set".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == REPEATING {
+            Rc::new(
+                args.first()
+                    .map(|ty| repeating_function(sigs, *ty, mangled.clone()))
+                    .ok_or_else(|| "internal error: no type for repeating".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if let Some(op) = SetOp::from_callee(callee) {
             Rc::new(
                 args.first()
                     .map(|ty| set_function(sigs, *ty, mangled.clone(), op))

@@ -90,6 +90,30 @@ const ASSIGN_OPS: [(&str, Option<BinOp>); 6] = [
     ("%=", Some(BinOp::Rem)),
 ];
 
+fn expr_as_type(expr: &Expr) -> Option<TypeRef> {
+    match expr.kind() {
+        ExprKind::Ident(name) => Some(TypeRef::from(name.as_str())),
+        ExprKind::GenericName { name, type_args } => {
+            Some(TypeRef::new(name.clone(), type_args.clone()))
+        }
+        ExprKind::ArrayLiteral(items) => match items.as_slice() {
+            [element] => Some(TypeRef::new(
+                "Array".to_string(),
+                vec![expr_as_type(element)?],
+            )),
+            _ => None,
+        },
+        ExprKind::DictLiteral(pairs) => match pairs.as_slice() {
+            [(key, value)] => Some(TypeRef::new(
+                "Dictionary".to_string(),
+                vec![expr_as_type(key)?, expr_as_type(value)?],
+            )),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn parse_item(tokens: &[Spanned]) -> PResult<Decl> {
     parse_with(tokens, false)
 }
@@ -1254,6 +1278,18 @@ impl Parser<'_> {
                 self.check_depth(expr.depth())?;
             } else if self.is_punct("(") {
                 let args = self.args()?;
+                if matches!(
+                    expr.kind(),
+                    ExprKind::ArrayLiteral(_) | ExprKind::DictLiteral(_)
+                ) {
+                    let Some(ty) = expr_as_type(&expr) else {
+                        return self
+                            .fail("only a named function or a collection type can be called");
+                    };
+                    expr = Expr::new(line, ExprKind::TypeCall { ty, args });
+                    self.check_depth(expr.depth())?;
+                    continue;
+                }
                 expr = match expr.into_kind() {
                     ExprKind::Member { base, name } => {
                         Expr::new(line, ExprKind::MemberCall { base, name, args })

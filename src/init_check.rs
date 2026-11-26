@@ -506,6 +506,7 @@ impl Scan<'_> {
                 self.scope.methods.contains(&callee.as_str())
                     || args.iter().any(|a| self.expr_uses_self(a.value()))
             }
+            ExprKind::TypeCall { args, .. } => args.iter().any(|a| self.expr_uses_self(a.value())),
             ExprKind::GenericCall { args, .. } => {
                 args.iter().any(|a| self.expr_uses_self(a.value()))
             }
