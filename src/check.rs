@@ -750,10 +750,17 @@ pub enum HofOp {
     AllSatisfy,
     SortedBy,
     Sorted,
+    CompactMap,
+    FlatMap,
+    CountWhere,
+    MinBy,
+    MaxBy,
+    Min,
+    Max,
 }
 
 impl HofOp {
-    const ALL: [HofOp; 10] = [
+    const ALL: [HofOp; 17] = [
         HofOp::Map,
         HofOp::Filter,
         HofOp::Reduce,
@@ -764,6 +771,13 @@ impl HofOp {
         HofOp::AllSatisfy,
         HofOp::SortedBy,
         HofOp::Sorted,
+        HofOp::CompactMap,
+        HofOp::FlatMap,
+        HofOp::CountWhere,
+        HofOp::MinBy,
+        HofOp::MaxBy,
+        HofOp::Min,
+        HofOp::Max,
     ];
 
     pub fn callee(self) -> &'static str {
@@ -778,6 +792,13 @@ impl HofOp {
             HofOp::AllSatisfy => "$allSatisfy",
             HofOp::SortedBy => "$sortedBy",
             HofOp::Sorted => "$sorted",
+            HofOp::CompactMap => "$compactMap",
+            HofOp::FlatMap => "$flatMap",
+            HofOp::CountWhere => "$countWhere",
+            HofOp::MinBy => "$minBy",
+            HofOp::MaxBy => "$maxBy",
+            HofOp::Min => "$min",
+            HofOp::Max => "$max",
         }
     }
 
@@ -808,8 +829,18 @@ pub fn higher_order_function(
         HofOp::Reduce => result,
         HofOp::ForEach => Ty::Void,
         HofOp::ContainsWhere | HofOp::AllSatisfy => Ty::Bool,
-        HofOp::FirstWhere => sigs.optional_of(elem)?,
+        HofOp::FirstWhere | HofOp::MinBy | HofOp::MaxBy | HofOp::Min | HofOp::Max => {
+            sigs.optional_of(elem)?
+        }
         HofOp::FirstIndexWhere => sigs.optional_of(Ty::Int)?,
+        HofOp::CompactMap => {
+            let inner = sigs
+                .unwrapped(result)
+                .ok_or_else(|| CheckError::at(0, "compactMap needs an optional result"))?;
+            sigs.array_of(inner, 0)?
+        }
+        HofOp::FlatMap => result,
+        HofOp::CountWhere => Ty::Int,
     };
     let mut cx = synthetic_cx(sigs, &name, ret);
     let source = cx.declare(0, "source", array, false)?;
@@ -819,7 +850,7 @@ pub fn higher_order_function(
         None
     };
     let callable = match func_ty {
-        Some(ty) if op != HofOp::Sorted => Some(cx.declare(0, "body", ty, false)?),
+        Some(ty) if has_closure(op) => Some(cx.declare(0, "body", ty, false)?),
         _ => None,
     };
     let position = cx.temp(Ty::Int);
@@ -944,6 +975,158 @@ pub fn higher_order_function(
             ));
             body.push(TStmt::Return(Some(cx.none_of(ret))));
         }
+        HofOp::CompactMap => {
+            let inner = sigs
+                .unwrapped(result)
+                .ok_or_else(|| CheckError::at(0, "compactMap needs an optional result"))?;
+            let built = cx.temp(ret);
+            let produced = cx.temp(result);
+            body.push(TStmt::Let {
+                local: built,
+                init: empty_array(sigs, ret, inner),
+            });
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![
+                    TStmt::Let {
+                        local: produced,
+                        init: call(vec![item]),
+                    },
+                    TStmt::If {
+                        cond: compare(
+                            BinOp::Ne,
+                            TExpr::Field {
+                                base: Box::new(local(produced, result)),
+                                index: 0,
+                                ty: Ty::Int,
+                            },
+                            TExpr::Int(NONE_CASE as i64),
+                        ),
+                        then_body: vec![TStmt::Assign {
+                            local: built,
+                            value: TExpr::ArrayOp {
+                                op: ArrayOp::Append,
+                                elem: inner,
+                                args: vec![
+                                    local(built, ret),
+                                    TExpr::Field {
+                                        base: Box::new(local(produced, result)),
+                                        index: 1,
+                                        ty: inner,
+                                    },
+                                ],
+                                ty: ret,
+                            },
+                        }],
+                        else_body: Vec::new(),
+                    },
+                ],
+            ));
+            body.push(TStmt::Return(Some(local(built, ret))));
+        }
+        HofOp::FlatMap => {
+            let inner = sigs
+                .array_element(result)
+                .ok_or_else(|| CheckError::at(0, "flatMap needs an array result"))?;
+            let built = cx.temp(ret);
+            let chunk = cx.temp(result);
+            let inner_position = cx.temp(Ty::Int);
+            body.push(TStmt::Let {
+                local: built,
+                init: empty_array(sigs, ret, inner),
+            });
+            let mut each = vec![TStmt::Let {
+                local: chunk,
+                init: call(vec![item]),
+            }];
+            each.extend(each_position(
+                chunk,
+                result,
+                inner_position,
+                vec![TStmt::Assign {
+                    local: built,
+                    value: TExpr::ArrayOp {
+                        op: ArrayOp::Append,
+                        elem: inner,
+                        args: vec![
+                            local(built, ret),
+                            array_get(chunk, result, inner_position, inner),
+                        ],
+                        ty: ret,
+                    },
+                }],
+            ));
+            body.extend(each_position(source, array, position, each));
+            body.push(TStmt::Return(Some(local(built, ret))));
+        }
+        HofOp::CountWhere => {
+            let total = cx.temp(Ty::Int);
+            body.push(TStmt::Let {
+                local: total,
+                init: TExpr::Int(0),
+            });
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![TStmt::If {
+                    cond: call(vec![item]),
+                    then_body: vec![TStmt::Assign {
+                        local: total,
+                        value: compare(BinOp::Add, local(total, Ty::Int), TExpr::Int(1)),
+                    }],
+                    else_body: Vec::new(),
+                }],
+            ));
+            body.push(TStmt::Return(Some(local(total, Ty::Int))));
+        }
+        HofOp::MinBy | HofOp::MaxBy | HofOp::Min | HofOp::Max => {
+            let best = cx.temp(elem);
+            let less = |left: TExpr, right: TExpr| -> TExpr {
+                if matches!(op, HofOp::Min | HofOp::Max) {
+                    compare(BinOp::Lt, left, right)
+                } else {
+                    call(vec![left, right])
+                }
+            };
+            let better = if matches!(op, HofOp::MinBy | HofOp::Min) {
+                less(item.clone(), local(best, elem))
+            } else {
+                less(local(best, elem), item.clone())
+            };
+            body.push(return_if_none(
+                compare(BinOp::Eq, array_count(source, array), TExpr::Int(0)),
+                cx.none_of(ret),
+            ));
+            body.push(TStmt::Let {
+                local: best,
+                init: TExpr::ArrayOp {
+                    op: ArrayOp::Get,
+                    elem,
+                    args: vec![local(source, array), TExpr::Int(0)],
+                    ty: elem,
+                },
+            });
+            body.extend(each_position(
+                source,
+                array,
+                position,
+                vec![TStmt::If {
+                    cond: better,
+                    then_body: vec![TStmt::Assign {
+                        local: best,
+                        value: item,
+                    }],
+                    else_body: Vec::new(),
+                }],
+            ));
+            body.push(TStmt::Return(Some(TExpr::StructInit {
+                ty: ret,
+                args: vec![TExpr::Int(SOME_CASE as i64), local(best, elem)],
+            })));
+        }
         HofOp::SortedBy | HofOp::Sorted => {
             let less = |left: TExpr, right: TExpr| -> TExpr {
                 if op == HofOp::Sorted {
@@ -964,15 +1147,27 @@ pub fn higher_order_function(
     ))
 }
 
+fn has_closure(op: HofOp) -> bool {
+    !matches!(op, HofOp::Sorted | HofOp::Min | HofOp::Max)
+}
+
 fn param_count(op: HofOp, func_ty: Option<Ty>) -> usize {
     let mut count = 1;
     if op == HofOp::Reduce {
         count += 1;
     }
-    if func_ty.is_some() && op != HofOp::Sorted {
+    if func_ty.is_some() && has_closure(op) {
         count += 1;
     }
     count
+}
+
+fn return_if_none(cond: TExpr, none: TExpr) -> TStmt {
+    TStmt::If {
+        cond,
+        then_body: vec![TStmt::Return(Some(none))],
+        else_body: Vec::new(),
+    }
 }
 
 fn sort_body(
@@ -1825,6 +2020,7 @@ enum Update<'e> {
     RemoveLast(&'e [Arg]),
     Remove(&'e [Arg]),
     Unique,
+    Sort(&'e [Arg]),
     RemoveAll(&'e [Arg]),
     Entry {
         key: &'e Expr,
@@ -3609,6 +3805,16 @@ impl<'a> FnCx<'a> {
                     .sigs
                     .construct(target_ty, vec![TExpr::Int(0), TExpr::Int(0), buffer]))
             }
+            Update::Sort(args) => {
+                let elem = self.array_target(line, target_ty)?;
+                match self.array_closure_method(line, &current, elem, "sorted", args)? {
+                    Some(sorted) => Ok(sorted),
+                    None => Err(CheckError::at(
+                        line,
+                        "sort takes no argument or a comparison closure",
+                    )),
+                }
+            }
             Update::Unique => {
                 let elem = self.array_target(line, target_ty)?;
                 Ok(TExpr::ArrayOp {
@@ -4182,6 +4388,13 @@ impl<'a> FnCx<'a> {
             ("firstIndex", [arg]) if closure_arg(arg, "where") => Some(HofOp::FirstIndexWhere),
             ("sorted", [arg]) if closure_arg(arg, "by") => Some(HofOp::SortedBy),
             ("sorted", []) => Some(HofOp::Sorted),
+            ("compactMap", [_]) => Some(HofOp::CompactMap),
+            ("flatMap", [_]) => Some(HofOp::FlatMap),
+            ("count", [arg]) if closure_arg(arg, "where") => Some(HofOp::CountWhere),
+            ("min", [arg]) if closure_arg(arg, "by") => Some(HofOp::MinBy),
+            ("max", [arg]) if closure_arg(arg, "by") => Some(HofOp::MaxBy),
+            ("min", []) => Some(HofOp::Min),
+            ("max", []) => Some(HofOp::Max),
             _ => None,
         };
         let Some(op) = operation else {
@@ -4190,12 +4403,21 @@ impl<'a> FnCx<'a> {
         let usage = format!("'{name}' takes a closure");
         let unlabeled_only = matches!(
             op,
-            HofOp::Map | HofOp::Filter | HofOp::ForEach | HofOp::AllSatisfy
+            HofOp::Map
+                | HofOp::Filter
+                | HofOp::ForEach
+                | HofOp::AllSatisfy
+                | HofOp::CompactMap
+                | HofOp::FlatMap
         );
         if unlabeled_only && args.iter().any(|a| a.label().is_some()) {
             return Err(CheckError::at(line, usage));
         }
         let (extra, closure_at) = match op {
+            HofOp::Reduce if args[0].label() == Some("into") => {
+                let initial = self.value(args[0].value())?;
+                (Some(initial), 1)
+            }
             HofOp::Reduce => {
                 if args[0].label().is_some() || args[1].label().is_some() {
                     return Err(CheckError::at(
@@ -4216,31 +4438,49 @@ impl<'a> FnCx<'a> {
             | HofOp::FirstIndexWhere
             | HofOp::AllSatisfy => (vec![elem], Some(Ty::Bool)),
             HofOp::ForEach => (vec![elem], Some(Ty::Void)),
-            HofOp::SortedBy => (vec![elem, elem], Some(Ty::Bool)),
+            HofOp::CompactMap | HofOp::FlatMap => (vec![elem], None),
+            HofOp::CountWhere => (vec![elem], Some(Ty::Bool)),
+            HofOp::SortedBy | HofOp::MinBy | HofOp::MaxBy => (vec![elem, elem], Some(Ty::Bool)),
             HofOp::Reduce => {
                 let initial = extra.as_ref().map_or(Ty::Void, TExpr::ty);
                 (vec![initial, elem], Some(initial))
             }
-            HofOp::Sorted => (Vec::new(), None),
+            HofOp::Sorted | HofOp::Min | HofOp::Max => (Vec::new(), None),
         };
-        if op == HofOp::Sorted {
+        if matches!(op, HofOp::Sorted | HofOp::Min | HofOp::Max) {
             if !matches!(elem, Ty::Int | Ty::Char | Ty::Str) {
                 return Err(CheckError::at(
                     line,
                     format!(
-                        "sorted() needs elements that can be ordered, but {} cannot: use sorted(by:)",
+                        "{name}() needs elements that can be ordered, but {} cannot: use {name}(by:)",
                         self.name_of(elem)
                     ),
                 ));
             }
+            let ret = if op == HofOp::Sorted {
+                array
+            } else {
+                sigs.optional_of(elem)?
+            };
             return Ok(Some(TExpr::Call {
                 callee: op.callee().to_string(),
                 type_args: vec![array],
                 args: vec![receiver.clone()],
-                ret: array,
+                ret,
             }));
         }
-        let function = self.callable(line, &args[closure_at], callable_args, ret)?;
+        let function = if op == HofOp::Reduce && args[0].label() == Some("into") {
+            let ExprKind::Closure(closure) = args[1].value().kind() else {
+                return Err(CheckError::at(
+                    line,
+                    "reduce(into:) takes a closure that changes its first parameter",
+                ));
+            };
+            let initial = extra.as_ref().map_or(Ty::Void, TExpr::ty);
+            self.closure_into(line, closure, initial, elem)?
+        } else {
+            self.callable(line, &args[closure_at], callable_args, ret)?
+        };
         let function_ty = function.ty();
         let Some((_, result)) = sigs.func_parts(function_ty) else {
             return Err(CheckError::at(line, "internal error: not a function"));
@@ -4259,9 +4499,28 @@ impl<'a> FnCx<'a> {
             HofOp::Reduce => result,
             HofOp::ForEach => Ty::Void,
             HofOp::ContainsWhere | HofOp::AllSatisfy => Ty::Bool,
-            HofOp::FirstWhere => sigs.optional_of(elem)?,
+            HofOp::FirstWhere | HofOp::MinBy | HofOp::MaxBy => sigs.optional_of(elem)?,
             HofOp::FirstIndexWhere => sigs.optional_of(Ty::Int)?,
-            HofOp::Sorted => array,
+            HofOp::Sorted | HofOp::Min | HofOp::Max => array,
+            HofOp::CompactMap => {
+                let Some(inner) = sigs.unwrapped(result) else {
+                    return Err(CheckError::at(
+                        line,
+                        "compactMap needs a closure that returns an optional",
+                    ));
+                };
+                sigs.array_of(inner, line)?
+            }
+            HofOp::FlatMap => {
+                if sigs.array_element(result).is_none() {
+                    return Err(CheckError::at(
+                        line,
+                        "flatMap needs a closure that returns an array",
+                    ));
+                }
+                result
+            }
+            HofOp::CountWhere => Ty::Int,
         };
         let mut arguments = vec![receiver.clone()];
         arguments.extend(extra);
@@ -4652,6 +4911,49 @@ impl<'a> FnCx<'a> {
                     ));
                 }
             }
+            Ok(body)
+        })
+    }
+
+    fn closure_into(
+        &mut self,
+        line: u32,
+        closure: &ClosureExpr,
+        accumulator: Ty,
+        elem: Ty,
+    ) -> CResult<TExpr> {
+        let (first, second) = match closure.params() {
+            Some([a, b]) => (a.name().to_string(), b.name().to_string()),
+            None => ("$0".to_string(), "$1".to_string()),
+            Some(_) => {
+                return Err(CheckError::at(
+                    line,
+                    "reduce(into:) takes a closure with two parameters",
+                ));
+            }
+        };
+        let names = crate::free::names_in(closure.body());
+        let parameters = vec![(first.clone(), accumulator), (second, elem)];
+        let statements = closure.body();
+        self.lift(line, &names, &parameters, accumulator, None, move |cx| {
+            let copy = LocalId::new(cx.locals.len());
+            cx.locals.push(accumulator);
+            if let Some(scope) = cx.scopes.first_mut() {
+                scope.insert(
+                    first.clone(),
+                    Binding {
+                        local: copy,
+                        ty: accumulator,
+                        mutable: true,
+                    },
+                );
+            }
+            let mut body = vec![TStmt::Let {
+                local: copy,
+                init: TExpr::Local(LocalId::new(1), accumulator),
+            }];
+            body.extend(cx.block(statements)?);
+            body.push(TStmt::Return(Some(TExpr::Local(copy, accumulator))));
             Ok(body)
         })
     }
@@ -5307,11 +5609,13 @@ impl<'a> FnCx<'a> {
 
     fn set_closure_name(&self, name: &str, args: &[Arg]) -> bool {
         match (name, args) {
-            ("map" | "filter" | "forEach" | "allSatisfy", [_]) | ("reduce", [_, _]) => true,
-            ("sorted", []) => true,
-            ("sorted", [arg]) => {
+            ("map" | "filter" | "forEach" | "allSatisfy" | "compactMap" | "flatMap", [_])
+            | ("reduce", [_, _]) => true,
+            ("sorted" | "min" | "max", []) => true,
+            ("sorted" | "min" | "max", [arg]) => {
                 arg.label() == Some("by") || matches!(arg.value().kind(), ExprKind::Closure(_))
             }
+            ("count", [arg]) => arg.label() == Some("where"),
             ("contains" | "first", [arg]) => {
                 arg.label() == Some("where") || matches!(arg.value().kind(), ExprKind::Closure(_))
             }
@@ -5723,7 +6027,7 @@ impl<'a> FnCx<'a> {
         if let ExprKind::MemberCall { base, name, args } = expr.kind()
             && matches!(
                 name.as_str(),
-                "append" | "insert" | "remove" | "removeLast" | "removeAll"
+                "append" | "insert" | "remove" | "removeLast" | "removeAll" | "sort"
             )
             && let Ok(subject) = self.value(base)
             && (self.sigs.array_element(subject.ty()).is_some()
@@ -5738,6 +6042,7 @@ impl<'a> FnCx<'a> {
                 "remove" if set => Update::SetRemove(args),
                 "remove" => Update::Remove(args),
                 "removeAll" => Update::RemoveAll(args),
+                "sort" => Update::Sort(args),
                 _ => Update::RemoveLast(args),
             };
             if !(table && !set && !matches!(update, Update::RemoveAll(_))) {

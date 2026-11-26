@@ -6250,3 +6250,95 @@ fn the_collection_closures_report_a_wrong_use() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn compact_map_keeps_the_present_values_and_flat_map_joins_arrays() {
+    assert_eq!(
+        main_printing(
+            "let xs = [1, 2, 3, 4]\nlet halves = xs.compactMap { (x: Int) -> Int? in\n  if x % 2 == 0 { return nil }\n  return x * 10\n}\nprint(halves.count)\nprint(halves[1])\nlet words = [\"a\", \"\", \"bc\"]\nlet firsts = words.compactMap { $0.first }\nprint(firsts.count)\nlet flat = [[1, 2], [], [3]].flatMap { $0 }\nprint(flat.count)\nprint(flat[2])\nlet pairs = xs.flatMap { [$0, $0 * 100] }\nprint(pairs.count)\nprint(pairs[7])\nlet letters = [[1, 2], [3]].flatMap { row in row.map { v in v * 2 } }\nprint(letters.count)"
+        ),
+        "2\n30\n2\n3\n3\n8\n400\n3\n"
+    );
+}
+
+#[test]
+fn min_max_and_count_search_with_orderings_and_predicates() {
+    assert_eq!(
+        main_printing(
+            "let xs = [4, 9, 2, 7]\nprint(xs.min() ?? -1)\nprint(xs.max() ?? -1)\nprint(xs.min(by: { $0 > $1 }) ?? -1)\nprint(xs.max { $0 > $1 } ?? -1)\nlet e: [Int] = []\nprint(e.min() == nil)\nprint(e.max(by: { $0 < $1 }) == nil)\nprint(xs.count(where: { $0 > 3 }))\nprint(xs.count { $0 > 100 })\nprint([\"pear\", \"fig\", \"apple\"].min() ?? \"\")\nprint([\"pear\", \"fig\", \"apple\"].max(by: { $0.count < $1.count }) ?? \"\")"
+        ),
+        "2\n9\n9\n2\ntrue\ntrue\n3\n0\napple\napple\n"
+    );
+}
+
+#[test]
+fn sort_orders_an_array_in_place_and_leaves_a_copy_alone() {
+    assert_eq!(
+        main_printing(
+            "var xs = [3, 1, 2]\nlet before = xs\nxs.sort()\nprint(xs[0] * 100 + xs[1] * 10 + xs[2])\nprint(before[0])\nxs.sort { $0 > $1 }\nprint(xs[0])\nxs.sort(by: { $0 < $1 })\nprint(xs[0])\nvar names = [\"b\", \"c\", \"a\"]\nnames.sort()\nprint(names.joined())"
+        ),
+        "123\n3\n3\n1\nabc\n"
+    );
+}
+
+#[test]
+fn reduce_into_changes_its_accumulator_in_the_closure() {
+    assert_eq!(
+        main_printing(
+            "let xs = [1, 2, 3, 4]\nlet evens = xs.reduce(into: [Int]()) { acc, x in\n  if x % 2 == 0 { acc.append(x) }\n}\nprint(evens.count)\nprint(evens[1])\nlet counts = [\"a\", \"b\", \"a\"].reduce(into: [String: Int]()) { acc, w in\n  acc[w, default: 0] += 1\n}\nprint(counts[\"a\"] ?? 0)\nlet total = xs.reduce(into: 0) { $0 += $1 }\nprint(total)\nlet text = xs.reduce(into: \"\") { s, x in s += String(x) }\nprint(text)"
+        ),
+        "2\n4\n2\n10\n1234\n"
+    );
+}
+
+#[test]
+fn a_set_offers_the_new_closure_members() {
+    assert_eq!(
+        main_printing(
+            "let s: Set<Int> = [5, 2, 8]\nprint(s.min() ?? 0)\nprint(s.max { $0 < $1 } ?? 0)\nprint(s.count(where: { $0 > 3 }))\nprint(s.compactMap { (x: Int) -> Int? in\n  if x > 2 { return x }\n  return nil\n}.count)\nprint(s.flatMap { [$0, $0] }.count)\nlet grouped = s.reduce(into: [Int]()) { acc, x in acc.append(x) }\nprint(grouped.count)"
+        ),
+        "2\n8\n2\n2\n6\n3\n"
+    );
+}
+
+#[test]
+fn the_new_closure_members_check_their_arguments() {
+    for (body, message) in [
+        (
+            "let xs = [1]\n  print(xs.compactMap { $0 }.count)",
+            "compactMap needs a closure that returns an optional",
+        ),
+        (
+            "let xs = [1]\n  print(xs.flatMap { $0 }.count)",
+            "flatMap needs a closure that returns an array",
+        ),
+        (
+            "let xs = [[1]]\n  print(xs.min())",
+            "needs elements that can be ordered",
+        ),
+        (
+            "var xs = [[1]]\n  xs.sort()",
+            "needs elements that can be ordered",
+        ),
+        (
+            "let xs = [1]\n  print(xs.reduce(into: 0, 5))",
+            "reduce(into:) takes a closure",
+        ),
+        (
+            "let xs = [1]\n  print(xs.reduce(into: 0) { a in a })",
+            "takes a closure with two parameters",
+        ),
+        (
+            "let xs = [1]\n  print(xs.count(of: 1))",
+            "no method 'count'",
+        ),
+        ("let xs = [1]\n  print(xs.max(by: 5))", "expected"),
+        ("let xs = [1]\n  let c = xs.sort()", "no method 'sort'"),
+        ("var xs = [1]\n  xs.sort(1, 2)", "sort takes"),
+        ("let xs = [1]\n  xs.sort()", "constant"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}
