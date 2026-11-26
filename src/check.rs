@@ -560,6 +560,7 @@ pub enum SetOp {
     Subtracting,
     Symmetric,
     Subset,
+    StrictSubset,
     Disjoint,
 }
 
@@ -571,6 +572,7 @@ impl SetOp {
             SetOp::Subtracting => "$subtracting",
             SetOp::Symmetric => "$symmetric",
             SetOp::Subset => "$subset",
+            SetOp::StrictSubset => "$strictSubset",
             SetOp::Disjoint => "$disjoint",
         }
     }
@@ -582,6 +584,7 @@ impl SetOp {
             SetOp::Subtracting,
             SetOp::Symmetric,
             SetOp::Subset,
+            SetOp::StrictSubset,
             SetOp::Disjoint,
         ]
         .into_iter()
@@ -589,7 +592,7 @@ impl SetOp {
     }
 
     fn is_predicate(self) -> bool {
-        matches!(self, SetOp::Subset | SetOp::Disjoint)
+        matches!(self, SetOp::Subset | SetOp::StrictSubset | SetOp::Disjoint)
     }
 }
 
@@ -713,11 +716,13 @@ pub fn set_function(sigs: &Signatures, ty: Ty, name: String, op: SetOp) -> CResu
                 vec![when(absent(left, key_of(right)), vec![add(key_of(right))])],
             ));
         }
-        SetOp::Subset => {
-            body.push(return_if(
-                compare(BinOp::Gt, count(left), count(right)),
-                false,
-            ));
+        SetOp::Subset | SetOp::StrictSubset => {
+            let too_big = if op == SetOp::Subset {
+                compare(BinOp::Gt, count(left), count(right))
+            } else {
+                compare(BinOp::Ge, count(left), count(right))
+            };
+            body.push(return_if(too_big, false));
             body.extend(records(
                 left,
                 vec![return_if(absent(right, key_of(left)), false)],
@@ -2038,6 +2043,7 @@ enum Update<'e> {
     Remove(&'e [Arg]),
     Unique,
     Sort(&'e [Arg]),
+    Algebra(SetOp, &'e str, &'e [Arg]),
     RemoveAll(&'e [Arg]),
     Entry {
         key: &'e Expr,
@@ -3821,6 +3827,21 @@ impl<'a> FnCx<'a> {
                 Ok(self
                     .sigs
                     .construct(target_ty, vec![TExpr::Int(0), TExpr::Int(0), buffer]))
+            }
+            Update::Algebra(op, name, args) => {
+                if !self.sigs.is_set(target_ty) {
+                    return Err(CheckError::at(
+                        line,
+                        format!("{} is not a set", self.name_of(target_ty)),
+                    ));
+                }
+                let other = self.set_operand(line, name, None, target_ty, args)?;
+                Ok(TExpr::Call {
+                    callee: op.callee().to_string(),
+                    type_args: vec![target_ty],
+                    args: vec![current, other],
+                    ret: target_ty,
+                })
             }
             Update::Sort(args) => {
                 let elem = self.array_target(line, target_ty)?;
@@ -5718,12 +5739,17 @@ impl<'a> FnCx<'a> {
                     ret: ty,
                 })
             }
-            (true, "isSubset" | "isSuperset" | "isDisjoint") => {
+            (
+                true,
+                "isSubset" | "isSuperset" | "isStrictSubset" | "isStrictSuperset" | "isDisjoint",
+            ) => {
                 let label = if name == "isDisjoint" { "with" } else { "of" };
                 let other = self.set_operand(line, name, Some(label), ty, args)?;
                 let (op, arguments) = match name {
                     "isSubset" => (SetOp::Subset, vec![receiver, other]),
                     "isSuperset" => (SetOp::Subset, vec![other, receiver]),
+                    "isStrictSubset" => (SetOp::StrictSubset, vec![receiver, other]),
+                    "isStrictSuperset" => (SetOp::StrictSubset, vec![other, receiver]),
                     _ => (SetOp::Disjoint, vec![receiver, other]),
                 };
                 Ok(TExpr::Call {
@@ -5798,7 +5824,16 @@ impl<'a> FnCx<'a> {
                     after,
                 })
             }
-            (_, "insert" | "remove" | "removeAll") => Err(CheckError::at(
+            (
+                _,
+                "insert"
+                | "remove"
+                | "removeAll"
+                | "formUnion"
+                | "formIntersection"
+                | "subtract"
+                | "formSymmetricDifference",
+            ) => Err(CheckError::at(
                 line,
                 format!("'{name}' changes the collection: write it as a statement of its own"),
             )),
@@ -6051,7 +6086,16 @@ impl<'a> FnCx<'a> {
         if let ExprKind::MemberCall { base, name, args } = expr.kind()
             && matches!(
                 name.as_str(),
-                "append" | "insert" | "remove" | "removeLast" | "removeAll" | "sort"
+                "append"
+                    | "insert"
+                    | "remove"
+                    | "removeLast"
+                    | "removeAll"
+                    | "sort"
+                    | "formUnion"
+                    | "formIntersection"
+                    | "subtract"
+                    | "formSymmetricDifference"
             )
             && let Ok(subject) = self.value(base)
             && (self.sigs.array_element(subject.ty()).is_some()
@@ -6067,6 +6111,10 @@ impl<'a> FnCx<'a> {
                 "remove" => Update::Remove(args),
                 "removeAll" => Update::RemoveAll(args),
                 "sort" => Update::Sort(args),
+                "formUnion" => Update::Algebra(SetOp::Union, name, args),
+                "formIntersection" => Update::Algebra(SetOp::Intersection, name, args),
+                "subtract" => Update::Algebra(SetOp::Subtracting, name, args),
+                "formSymmetricDifference" => Update::Algebra(SetOp::Symmetric, name, args),
                 _ => Update::RemoveLast(args),
             };
             if !(table && !set && !matches!(update, Update::RemoveAll(_))) {

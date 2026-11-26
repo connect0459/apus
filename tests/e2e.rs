@@ -6420,3 +6420,47 @@ fn a_closure_that_returns_a_closure_works_and_a_local_function_can_escape() {
         "123\n11\n12\n"
     );
 }
+
+#[test]
+fn the_mutating_set_operations_change_the_set_in_place() {
+    assert_eq!(
+        main_printing(
+            "var a: Set<Int> = [1, 2, 3]\nlet b: Set<Int> = [3, 4]\nlet copy = a\na.formUnion(b)\nprint(a.count)\nprint(copy.count)\na.formIntersection([2, 3, 4, 9])\nprint(a.count)\nprint(a.contains(2))\nprint(a.contains(1))\na.subtract([3])\nprint(a.count)\nprint(a.contains(3))\na.formSymmetricDifference([2, 7])\nprint(a.count)\nprint(a.contains(2))\nprint(a.contains(7))\nvar names: Set<String> = [\"x\"]\nnames.formUnion([\"y\", \"x\"])\nprint(names.count)"
+        ),
+        "4\n3\n3\ntrue\nfalse\n2\nfalse\n2\nfalse\ntrue\n2\n"
+    );
+}
+
+#[test]
+fn strict_subset_and_superset_require_a_smaller_or_larger_set() {
+    assert_eq!(
+        main_printing(
+            "let a: Set<Int> = [1, 2]\nlet b: Set<Int> = [1, 2, 3]\nprint(a.isStrictSubset(of: b))\nprint(b.isStrictSubset(of: a))\nprint(a.isStrictSubset(of: a))\nprint(b.isStrictSuperset(of: a))\nprint(a.isStrictSuperset(of: b))\nprint(a.isStrictSuperset(of: a))\nlet e: Set<Int> = []\nprint(e.isStrictSubset(of: a))\nprint(e.isStrictSubset(of: e))"
+        ),
+        "true\nfalse\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn the_mutating_set_operations_work_on_members_and_check_their_use() {
+    assert_eq!(
+        run(
+            "class Group {\n  var members: Set<Int>\n  init() { self.members = [1] }\n  func join(_ others: Set<Int>) { members.formUnion(others) }\n}\nstruct Pair {\n  var left: Set<Int>\n}\nfunc main() {\n  let g = Group()\n  g.join([2, 3])\n  print(g.members.count)\n  var p = Pair(left: [1, 2])\n  p.left.subtract([1])\n  print(p.left.count)\n}"
+        ),
+        "3\n1\n"
+    );
+    for (body, message) in [
+        ("let s: Set<Int> = [1]\n  s.formUnion([2])", "constant"),
+        ("var s: Set<Int> = [1]\n  s.formUnion()", "formUnion"),
+        ("var s: Set<Int> = [1]\n  s.formUnion([\"x\"])", "expected"),
+        (
+            "var s: Set<Int> = [1]\n  let t = s.subtract([1])",
+            "statement",
+        ),
+        ("var a = [1]\n  a.formUnion([2])", "not a set"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}
