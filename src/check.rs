@@ -298,7 +298,80 @@ pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFu
     let mut cx = synthetic_cx(sigs, &name, Ty::Bool);
     let left = cx.declare(0, "left", ty, false)?;
     let right = cx.declare(0, "right", ty, false)?;
-    let body = if let Some(elem) = sigs.array_element(ty) {
+    let body = if let Some((key, value)) = sigs.table_parts(ty) {
+        let position = cx.temp(Ty::Int);
+        let at = cx.temp(Ty::Int);
+        let entry = |op: DictOp, table: LocalId, index: TExpr, result: Ty| {
+            table_op(op, key, value, vec![local(table, ty), index], result)
+        };
+        let mut checks = vec![
+            TStmt::Let {
+                local: at,
+                init: entry(
+                    DictOp::Find,
+                    right,
+                    entry(DictOp::Key, left, local(position, Ty::Int), key),
+                    Ty::Int,
+                ),
+            },
+            return_if(compare(BinOp::Lt, local(at, Ty::Int), TExpr::Int(0)), false),
+        ];
+        if value != Ty::Void {
+            let same = cx.equality_of(
+                0,
+                value,
+                entry(DictOp::Value, left, local(position, Ty::Int), value),
+                entry(DictOp::Value, right, local(at, Ty::Int), value),
+            )?;
+            checks.push(return_if(
+                TExpr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(same),
+                },
+                false,
+            ));
+        }
+        let differs = compare(
+            BinOp::Ne,
+            TExpr::Field {
+                base: Box::new(local(left, ty)),
+                index: DICT_COUNT,
+                ty: Ty::Int,
+            },
+            TExpr::Field {
+                base: Box::new(local(right, ty)),
+                index: DICT_COUNT,
+                ty: Ty::Int,
+            },
+        );
+        vec![
+            return_if(differs, false),
+            TStmt::Let {
+                local: position,
+                init: TExpr::Int(0),
+            },
+            TStmt::While {
+                cond: compare(
+                    BinOp::Lt,
+                    local(position, Ty::Int),
+                    TExpr::Field {
+                        base: Box::new(local(left, ty)),
+                        index: DICT_USED,
+                        ty: Ty::Int,
+                    },
+                ),
+                body: vec![
+                    TStmt::If {
+                        cond: entry(DictOp::Live, left, local(position, Ty::Int), Ty::Bool),
+                        then_body: checks,
+                        else_body: Vec::new(),
+                    },
+                    step(position),
+                ],
+            },
+            TStmt::Return(Some(TExpr::Bool(true))),
+        ]
+    } else if let Some(elem) = sigs.array_element(ty) {
         let position = cx.temp(Ty::Int);
         let same = cx.equality_of(
             0,
@@ -4460,7 +4533,12 @@ impl FnCx<'_> {
                 let implicit = |e: &Expr| {
                     matches!(e.kind(), ExprKind::ImplicitMember { .. } | ExprKind::Str(_))
                 };
-                let literal = |e: &Expr| matches!(e.kind(), ExprKind::ArrayLiteral(_));
+                let literal = |e: &Expr| {
+                    matches!(
+                        e.kind(),
+                        ExprKind::ArrayLiteral(_) | ExprKind::DictLiteral(_)
+                    )
+                };
                 let comparing = matches!(
                     op,
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
@@ -4524,7 +4602,8 @@ impl FnCx<'_> {
                     return self.struct_equality(line, *op, lhs, rhs);
                 }
                 if matches!(op, BinOp::Eq | BinOp::Ne)
-                    && self.sigs.array_element(lhs.ty()).is_some()
+                    && (self.sigs.array_element(lhs.ty()).is_some()
+                        || self.sigs.table_parts(lhs.ty()).is_some())
                 {
                     return self.array_equality(line, *op, lhs, rhs);
                 }
@@ -5499,7 +5578,7 @@ impl FnCx<'_> {
                 rhs: Box::new(rhs),
             }),
             Ty::Param(index) => self.parameter_operator(line, BinOp::Eq, index, lhs, rhs),
-            _ if self.sigs.array_element(ty).is_some() => {
+            _ if self.sigs.array_element(ty).is_some() || self.sigs.table_parts(ty).is_some() => {
                 self.array_equality(line, BinOp::Eq, lhs, rhs)
             }
             _ if self.sigs.unwrapped(ty).is_some() => {
@@ -5519,6 +5598,11 @@ impl FnCx<'_> {
         let ty = lhs.ty();
         if let Some(elem) = self.sigs.array_element(ty) {
             self.equality_of(line, elem, TExpr::Zero(elem), TExpr::Zero(elem))?;
+        }
+        if let Some((_, value)) = self.sigs.table_parts(ty)
+            && value != Ty::Void
+        {
+            self.equality_of(line, value, TExpr::Zero(value), TExpr::Zero(value))?;
         }
         let equal = TExpr::Call {
             callee: EQUAL.to_string(),
@@ -5620,6 +5704,7 @@ impl FnCx<'_> {
                 let comparable =
                     matches!(lhs, Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_))
                         || self.sigs.array_element(lhs).is_some()
+                        || self.sigs.table_parts(lhs).is_some()
                         || (lhs.is_struct() && self.sigs.enum_of(lhs).is_none());
                 if comparable {
                     Ok(())

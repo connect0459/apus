@@ -5661,7 +5661,6 @@ fn the_dictionary_and_set_forms_reject_misuse() {
         build_error("func main() { var d = [\"a\": 1]\n d.updateValue(1) }")
             .contains("updateValue")
     );
-    assert!(build_error("func main() { let d = [\"a\": 1]\n print(d == d) }").contains("equality"));
     assert!(
         build_error("func main() { let a = [1]\n print(a[0, default: 1]) }").contains("default")
     );
@@ -5720,5 +5719,58 @@ fn a_default_update_checks_its_dictionary_and_constants() {
     assert!(
         build_error("func main() { var a = [[1]]\n a[0, default: []].append(2) }")
             .contains("default")
+    );
+}
+
+#[test]
+fn dictionaries_are_equal_when_they_hold_the_same_entries_in_any_order() {
+    assert_eq!(
+        main_printing(
+            "var a = [\"x\": 1, \"y\": 2]\nvar b: [String: Int] = [:]\nb[\"y\"] = 2\nb[\"x\"] = 1\nprint(a == b)\nprint(a != b)\nb[\"x\"] = 5\nprint(a == b)\nb[\"x\"] = 1\nb[\"z\"] = 0\nprint(a == b)\nb[\"z\"] = nil\nprint(a == b)\nlet e: [String: Int] = [:]\nprint(e == [:])\nprint(a == [:])\na[\"y\"] = nil\nb[\"y\"] = nil\nprint(a == b)\nprint([1: [1, 2]] == [1: [1, 2]])\nprint([1: [1, 2]] == [1: [2, 1]])\nprint([1: \"a\"] == [2: \"a\"])"
+        ),
+        "true\nfalse\nfalse\nfalse\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\nfalse\n"
+    );
+}
+
+#[test]
+fn sets_are_equal_when_they_hold_the_same_members_in_any_order() {
+    assert_eq!(
+        main_printing(
+            "var a: Set<Int> = [1, 2, 3]\nvar b: Set<Int> = [3, 2, 1]\nprint(a == b)\nb.remove(2)\nprint(a == b)\nprint(a != b)\nb.insert(2)\nb.insert(2)\nprint(a == b)\nlet e: Set<String> = []\nprint(e == [])\nprint(a == [1, 2, 3, 3])\nlet s: Set<[Int]> = [[1], [2]]\nprint(s == [[2], [1]])"
+        ),
+        "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn dictionaries_and_sets_with_struct_keys_and_values_compare_by_value() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var s: String\n}\nfunc main() {\n  let a = [P(x: 1, s: \"a\"): P(x: 2, s: \"b\")]\n  var b: [P: P] = [:]\n  b[P(x: 1, s: \"a\")] = P(x: 2, s: \"b\")\n  print(a == b)\n  b[P(x: 1, s: \"a\")] = P(x: 3, s: \"b\")\n  print(a == b)\n  let s1: Set<P> = [P(x: 1, s: \"a\")]\n  var s2: Set<P> = []\n  s2.insert(P(x: 1, s: \"a\"))\n  print(s1 == s2)\n}"
+        ),
+        "true\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn dictionary_equality_works_in_generic_code_and_nested_collections() {
+    assert_eq!(
+        run(
+            "func same<T: Equatable>(_ a: T, _ b: T) -> Bool { return a == b }\nfunc main() {\n  print(same([1: 2], [1: 2]))\n  print(same([1: 2], [1: 3]))\n  let nested: [[String: Int]] = [[\"a\": 1], [:]]\n  print(nested == [[\"a\": 1], [:]])\n  print(nested == [[:], [\"a\": 1]])\n  print(same([1, 2], [1, 2]))\n}"
+        ),
+        "true\nfalse\ntrue\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn comparing_collections_without_equatable_values_is_rejected() {
+    assert!(
+        build_error("class C {}\nfunc main() {\n  let a: [Int: C] = [:]\n  print(a == a)\n}")
+            .contains("equality")
+    );
+    assert!(build_error("func main() { print([1: 2] == [\"a\": 2]) }").contains("expected"));
+    assert!(
+        build_error("func main() { let s: Set<Int> = [1]\n let d = [1: 2]\n print(s == d) }")
+            .contains("expected")
     );
 }

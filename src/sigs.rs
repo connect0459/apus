@@ -923,6 +923,9 @@ impl Signatures {
                     || self
                         .array_element(ty)
                         .is_some_and(|inner| self.conforms(inner, EQUATABLE))
+                    || self.table_parts(ty).is_some_and(|(_, value)| {
+                        value == Ty::Void || self.conforms(value, EQUATABLE)
+                    })
             }
             COMPARABLE => matches!(ty, Ty::Int | Ty::Str | Ty::Char),
             _ => self.declared_conformances(ty).contains(&protocol),
@@ -987,9 +990,13 @@ impl Signatures {
     fn equatable_value(&self, ty: Ty) -> bool {
         match ty {
             Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_) => true,
-            Ty::Class(_) => self
-                .array_element(ty)
-                .is_some_and(|inner| self.equatable_value(inner)),
+            Ty::Class(_) => {
+                self.array_element(ty)
+                    .is_some_and(|inner| self.equatable_value(inner))
+                    || self
+                        .table_parts(ty)
+                        .is_some_and(|(_, value)| value == Ty::Void || self.equatable_value(value))
+            }
             Ty::Struct(_) => match self.unwrapped(ty) {
                 Some(inner) => self.equatable_value(inner),
                 None => self.enum_of(ty).is_none() && self.equality_leaves(0, ty).is_ok(),
