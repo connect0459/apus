@@ -6178,3 +6178,75 @@ fn higher_order_members_check_their_closures() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_set_offers_the_higher_order_members_of_an_array() {
+    assert_eq!(
+        main_printing(
+            "let s: Set<Int> = [3, 1, 2, 5]\nlet doubled = s.map { $0 * 2 }\nlet big = s.filter { $0 > 1 }\nprint(doubled.count)\nprint(doubled[0])\nprint(big.count)\nprint(big.contains(5))\nprint(big.contains(1))\nprint(s.reduce(0) { $0 + $1 })\nvar sum = 0\ns.forEach { sum += $0 }\nprint(sum)\nprint(s.contains { $0 > 4 })\nprint(s.allSatisfy { $0 > 0 })\nprint(s.first { $0 > 2 } ?? 0)\nlet sorted = s.sorted()\nprint(sorted[0] * 10 + sorted[3])\nprint(s.sorted { $0 > $1 }[0])\nprint(s.contains(3))"
+        ),
+        "4\n6\n3\ntrue\nfalse\n11\n11\ntrue\ntrue\n3\n15\n5\ntrue\n"
+    );
+}
+
+#[test]
+fn a_dictionary_maps_values_filters_and_walks_its_entries_with_closures() {
+    assert_eq!(
+        main_printing(
+            "let d = [\"a\": 1, \"b\": 2, \"c\": 3]\nlet doubled = d.mapValues { $0 * 2 }\nlet labels = d.mapValues { \"#\" + String($0) }\nlet odd = d.filter { k, v in v % 2 == 1 }\nprint(doubled[\"c\"] ?? 0)\nprint(labels[\"b\"] ?? \"\")\nprint(odd.count)\nprint(odd[\"b\"] == nil)\nvar total = 0\nvar keys = \"\"\nd.forEach { k, v in\n  total += v\n  keys += k\n}\nprint(total)\nprint(keys)\nprint(d.contains { $0 == \"b\" && $1 == 2 })\nprint(d.allSatisfy { $1 > 0 })\nprint(d.keys.sorted().joined())\nprint(d.values.reduce(0) { $0 + $1 })\nprint(doubled == [\"a\": 2, \"b\": 4, \"c\": 6])"
+        ),
+        "6\n#2\n2\ntrue\n6\nabc\ntrue\ntrue\nabc\n6\ntrue\n"
+    );
+}
+
+#[test]
+fn a_dictionary_groups_an_array_by_a_closure() {
+    assert_eq!(
+        main_printing(
+            "let words = [\"apple\", \"fig\", \"kiwi\", \"pear\", \"plum\", \"date\"]\nlet byLength = Dictionary(grouping: words, by: { $0.count })\nprint(byLength.count)\nprint(byLength[3]?.count ?? 0)\nprint(byLength[4]?.joined(separator: \",\") ?? \"\")\nprint((byLength[5] ?? [])[0])\nlet parity = Dictionary(grouping: [1, 2, 3, 4, 5], by: { $0 % 2 == 0 })\nprint(parity[true]?.count ?? 0)\nprint(parity[false]?.count ?? 0)\nlet empty = Dictionary(grouping: [Int](), by: { $0 })\nprint(empty.isEmpty)"
+        ),
+        "3\n1\nkiwi,pear,plum,date\napple\n2\n3\ntrue\n"
+    );
+}
+
+#[test]
+fn the_collection_closures_report_a_wrong_use() {
+    for (body, message) in [
+        (
+            "let d = [1: 2]\n  print(d.mapValues { }.count)",
+            "mapValues needs a closure that returns a value",
+        ),
+        (
+            "let d = [1: 2]\n  print(d.filter { $0 }.count)",
+            "expected Bool",
+        ),
+        (
+            "let d = [1: 2]\n  print(d.filter { a in true }.count)",
+            "takes 1 parameter(s), but 2 are expected",
+        ),
+        (
+            "let s: Set<Int> = [1]\n  print(s.map { }.count)",
+            "map needs a closure that returns a value",
+        ),
+        (
+            "let s: Set<Int> = [1]\n  print(s.sorted(by: 3).count)",
+            "expected",
+        ),
+        (
+            "let d = Dictionary(grouping: 5, by: { $0 })",
+            "cannot group",
+        ),
+        (
+            "let d = Dictionary(grouping: [1], by: { $0 }, 3)",
+            "Dictionary takes",
+        ),
+        (
+            "let d = [1: 2]\n  print(d.map { $0 }.count)",
+            "no method 'map'",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

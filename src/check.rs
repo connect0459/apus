@@ -1149,6 +1149,273 @@ fn sort_body(
     ]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryOp {
+    MapValues,
+    Filter,
+    ForEach,
+    ContainsWhere,
+    AllSatisfy,
+    Grouping,
+}
+
+impl EntryOp {
+    const ALL: [EntryOp; 6] = [
+        EntryOp::MapValues,
+        EntryOp::Filter,
+        EntryOp::ForEach,
+        EntryOp::ContainsWhere,
+        EntryOp::AllSatisfy,
+        EntryOp::Grouping,
+    ];
+
+    pub fn callee(self) -> &'static str {
+        match self {
+            EntryOp::MapValues => "$mapValues",
+            EntryOp::Filter => "$filterEntries",
+            EntryOp::ForEach => "$forEachEntry",
+            EntryOp::ContainsWhere => "$containsEntry",
+            EntryOp::AllSatisfy => "$allEntries",
+            EntryOp::Grouping => "$grouping",
+        }
+    }
+
+    pub fn from_callee(callee: &str) -> Option<EntryOp> {
+        Self::ALL.into_iter().find(|op| op.callee() == callee)
+    }
+}
+
+pub fn entry_function(sigs: &Signatures, op: EntryOp, args: &[Ty], name: String) -> CResult<TFunc> {
+    let source = *args
+        .first()
+        .ok_or_else(|| CheckError::at(0, "internal error: an entry function needs a collection"))?;
+    let func_ty = *args
+        .get(1)
+        .ok_or_else(|| CheckError::at(0, "internal error: an entry function needs a closure"))?;
+    let (params, result) = sigs
+        .func_parts(func_ty)
+        .ok_or_else(|| CheckError::at(0, "internal error: not a function"))?;
+    if op == EntryOp::Grouping {
+        return grouping_function(sigs, source, func_ty, params, result, name);
+    }
+    let (key, value) = sigs
+        .table_parts(source)
+        .ok_or_else(|| CheckError::at(0, "internal error: not a dictionary"))?;
+    let ret = match op {
+        EntryOp::MapValues => sigs.dictionary_of(key, result, 0)?,
+        EntryOp::Filter => source,
+        EntryOp::ForEach => Ty::Void,
+        EntryOp::ContainsWhere | EntryOp::AllSatisfy => Ty::Bool,
+        EntryOp::Grouping => source,
+    };
+    let mut cx = synthetic_cx(sigs, &name, ret);
+    let table = cx.declare(0, "table", source, false)?;
+    let body_fn = cx.declare(0, "body", func_ty, false)?;
+    let result_table = cx.temp(if matches!(op, EntryOp::MapValues | EntryOp::Filter) {
+        ret
+    } else {
+        Ty::Int
+    });
+    let position = cx.temp(Ty::Int);
+    let entry = |kind: DictOp, of: Ty| {
+        table_op(
+            kind,
+            key,
+            value,
+            vec![local(table, source), local(position, Ty::Int)],
+            of,
+        )
+    };
+    let call = |arguments: Vec<TExpr>| TExpr::CallValue {
+        func: Box::new(local(body_fn, func_ty)),
+        args: arguments,
+        params: params.clone(),
+        ret: result,
+    };
+    let pair = || vec![entry(DictOp::Key, key), entry(DictOp::Value, value)];
+    let walk = |inner: Vec<TStmt>| {
+        vec![
+            TStmt::Let {
+                local: position,
+                init: TExpr::Int(0),
+            },
+            TStmt::While {
+                cond: compare(
+                    BinOp::Lt,
+                    local(position, Ty::Int),
+                    TExpr::Field {
+                        base: Box::new(local(table, source)),
+                        index: DICT_USED,
+                        ty: Ty::Int,
+                    },
+                ),
+                body: vec![
+                    TStmt::If {
+                        cond: entry(DictOp::Live, Ty::Bool),
+                        then_body: inner,
+                        else_body: Vec::new(),
+                    },
+                    step(position),
+                ],
+            },
+        ]
+    };
+    let mut body = Vec::new();
+    match op {
+        EntryOp::MapValues | EntryOp::Filter => {
+            let stored = if op == EntryOp::MapValues {
+                call(vec![entry(DictOp::Value, value)])
+            } else {
+                entry(DictOp::Value, value)
+            };
+            let element = if op == EntryOp::MapValues {
+                result
+            } else {
+                value
+            };
+            let add = TStmt::Assign {
+                local: result_table,
+                value: table_op(
+                    DictOp::Set,
+                    key,
+                    element,
+                    vec![local(result_table, ret), entry(DictOp::Key, key), stored],
+                    ret,
+                ),
+            };
+            let inner = if op == EntryOp::Filter {
+                vec![TStmt::If {
+                    cond: call(pair()),
+                    then_body: vec![add],
+                    else_body: Vec::new(),
+                }]
+            } else {
+                vec![add]
+            };
+            body.push(TStmt::Let {
+                local: result_table,
+                init: empty_table(sigs, ret),
+            });
+            body.extend(walk(inner));
+            body.push(TStmt::Return(Some(local(result_table, ret))));
+        }
+        EntryOp::ForEach => body.extend(walk(vec![TStmt::Eval(call(pair()))])),
+        EntryOp::ContainsWhere => {
+            body.extend(walk(vec![return_if(call(pair()), true)]));
+            body.push(TStmt::Return(Some(TExpr::Bool(false))));
+        }
+        EntryOp::AllSatisfy => {
+            body.extend(walk(vec![return_if(
+                TExpr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(call(pair())),
+                },
+                false,
+            )]));
+            body.push(TStmt::Return(Some(TExpr::Bool(true))));
+        }
+        EntryOp::Grouping => {}
+    }
+    Ok(TFunc::new(name, 2, ret, cx.locals, body))
+}
+
+fn grouping_function(
+    sigs: &Signatures,
+    array: Ty,
+    func_ty: Ty,
+    params: Vec<Ty>,
+    key: Ty,
+    name: String,
+) -> CResult<TFunc> {
+    let element = sigs
+        .array_element(array)
+        .ok_or_else(|| CheckError::at(0, "internal error: grouping needs an array"))?;
+    let groups = array;
+    let value = sigs.array_of(element, 0)?;
+    let ret = sigs.dictionary_of(key, value, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, ret);
+    let source = cx.declare(0, "source", groups, false)?;
+    let body_fn = cx.declare(0, "body", func_ty, false)?;
+    let result = cx.temp(ret);
+    let position = cx.temp(Ty::Int);
+    let held = cx.temp(ret);
+    let key_local = cx.temp(key);
+    let at = cx.temp(Ty::Int);
+    let item = array_get(source, groups, position, element);
+    let classify = TExpr::CallValue {
+        func: Box::new(local(body_fn, func_ty)),
+        args: vec![item.clone()],
+        params,
+        ret: key,
+    };
+    let ensured = table_op(
+        DictOp::Ensure,
+        key,
+        value,
+        vec![
+            local(result, ret),
+            TExpr::Bind {
+                local: key_local,
+                init: Box::new(classify),
+            },
+            empty_array(sigs, value, element),
+        ],
+        ret,
+    );
+    let located = table_op(
+        DictOp::Find,
+        key,
+        value,
+        vec![local(held, ret), local(key_local, key)],
+        Ty::Int,
+    );
+    let current = table_op(
+        DictOp::Value,
+        key,
+        value,
+        vec![local(held, ret), local(at, Ty::Int)],
+        value,
+    );
+    let extended = TExpr::ArrayOp {
+        op: ArrayOp::Append,
+        elem: element,
+        args: vec![current, item],
+        ty: value,
+    };
+    let store = table_op(
+        DictOp::Store,
+        key,
+        value,
+        vec![
+            TExpr::Bind {
+                local: held,
+                init: Box::new(ensured),
+            },
+            TExpr::Bind {
+                local: at,
+                init: Box::new(located),
+            },
+            extended,
+        ],
+        ret,
+    );
+    let mut body = vec![TStmt::Let {
+        local: result,
+        init: empty_table(sigs, ret),
+    }];
+    body.extend(each_position(
+        source,
+        groups,
+        position,
+        vec![TStmt::Assign {
+            local: result,
+            value: store,
+        }],
+    ));
+    body.push(TStmt::Return(Some(local(result, ret))));
+    Ok(TFunc::new(name, 2, ret, cx.locals, body))
+}
+
 pub fn set_from_array_function(sigs: &Signatures, array: Ty, name: String) -> CResult<TFunc> {
     let element = sigs
         .array_element(array)
@@ -4816,7 +5083,35 @@ impl<'a> FnCx<'a> {
                 })?;
                 Ok(empty_table(sigs, ty))
             }
-            (DICTIONARY, _) => Err(CheckError::at(line, "Dictionary takes no arguments")),
+            (DICTIONARY, [grouping, by])
+                if grouping.label() == Some("grouping") && by.label() == Some("by") =>
+            {
+                self.expected = None;
+                let source = self.value(grouping.value())?;
+                let Some(element) = sigs.array_element(source.ty()) else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("cannot group {}", self.name_of(source.ty())),
+                    ));
+                };
+                let function = self.callable(line, by, vec![element], None)?;
+                let function_ty = function.ty();
+                let Some((_, key)) = sigs.func_parts(function_ty) else {
+                    return Err(CheckError::at(line, "internal error: not a function"));
+                };
+                let groups = sigs.array_of(element, line)?;
+                let ret = sigs.dictionary_of(key, groups, line)?;
+                Ok(TExpr::Call {
+                    callee: EntryOp::Grouping.callee().to_string(),
+                    type_args: vec![source.ty(), function_ty],
+                    args: vec![source, function],
+                    ret,
+                })
+            }
+            (DICTIONARY, _) => Err(CheckError::at(
+                line,
+                "Dictionary takes no arguments, or 'grouping:' and 'by:'",
+            )),
             (SET, []) => {
                 let ty = contextual.ok_or_else(|| {
                     CheckError::at(line, "Set needs its element type, such as 'Set<Int>()'")
@@ -4952,6 +5247,112 @@ impl<'a> FnCx<'a> {
         self.coerce(line, ty, other)
     }
 
+    fn is_entry_closure(&self, name: &str, args: &[Arg]) -> bool {
+        match (name, args) {
+            ("mapValues" | "filter" | "forEach" | "allSatisfy", [_]) => true,
+            ("contains", [arg]) => {
+                arg.label() == Some("where") || matches!(arg.value().kind(), ExprKind::Closure(_))
+            }
+            _ => false,
+        }
+    }
+
+    fn dictionary_closure(
+        &mut self,
+        line: u32,
+        receiver: TExpr,
+        key: Ty,
+        value: Ty,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let table = receiver.ty();
+        let (op, params, expected_ret) = match name {
+            "mapValues" => (EntryOp::MapValues, vec![value], None),
+            "filter" => (EntryOp::Filter, vec![key, value], Some(Ty::Bool)),
+            "forEach" => (EntryOp::ForEach, vec![key, value], Some(Ty::Void)),
+            "allSatisfy" => (EntryOp::AllSatisfy, vec![key, value], Some(Ty::Bool)),
+            _ => (EntryOp::ContainsWhere, vec![key, value], Some(Ty::Bool)),
+        };
+        if name != "contains" && args[0].label().is_some() {
+            return Err(CheckError::at(line, format!("'{name}' takes a closure")));
+        }
+        let function = self.callable(line, &args[0], params, expected_ret)?;
+        let function_ty = function.ty();
+        let Some((_, result)) = sigs.func_parts(function_ty) else {
+            return Err(CheckError::at(line, "internal error: not a function"));
+        };
+        let ret = match op {
+            EntryOp::MapValues => {
+                if result == Ty::Void {
+                    return Err(CheckError::at(
+                        line,
+                        "mapValues needs a closure that returns a value",
+                    ));
+                }
+                sigs.dictionary_of(key, result, line)?
+            }
+            EntryOp::Filter => table,
+            EntryOp::ForEach => Ty::Void,
+            _ => Ty::Bool,
+        };
+        Ok(TExpr::Call {
+            callee: op.callee().to_string(),
+            type_args: vec![table, function_ty],
+            args: vec![receiver, function],
+            ret,
+        })
+    }
+
+    fn set_closure_name(&self, name: &str, args: &[Arg]) -> bool {
+        match (name, args) {
+            ("map" | "filter" | "forEach" | "allSatisfy", [_]) | ("reduce", [_, _]) => true,
+            ("sorted", []) => true,
+            ("sorted", [arg]) => {
+                arg.label() == Some("by") || matches!(arg.value().kind(), ExprKind::Closure(_))
+            }
+            ("contains" | "first", [arg]) => {
+                arg.label() == Some("where") || matches!(arg.value().kind(), ExprKind::Closure(_))
+            }
+            _ => false,
+        }
+    }
+
+    fn set_closure(
+        &mut self,
+        line: u32,
+        receiver: TExpr,
+        element: Ty,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let set = receiver.ty();
+        let array = sigs.array_of(element, line)?;
+        let listing = TExpr::Call {
+            callee: KEYS.to_string(),
+            type_args: vec![set],
+            args: vec![receiver],
+            ret: array,
+        };
+        let Some(call) = self.array_closure_method(line, &listing, element, name, args)? else {
+            return Err(CheckError::at(
+                line,
+                format!("{} has no method '{name}'", self.name_of(set)),
+            ));
+        };
+        if name == "filter" {
+            return Ok(TExpr::Call {
+                callee: TO_SET.to_string(),
+                type_args: vec![array],
+                args: vec![call],
+                ret: set,
+            });
+        }
+        Ok(call)
+    }
+
     fn table_method(
         &mut self,
         line: u32,
@@ -4965,6 +5366,15 @@ impl<'a> FnCx<'a> {
         let ty = receiver.ty();
         let set = self.sigs.is_set(ty);
         match (set, name) {
+            (false, "mapValues" | "filter" | "forEach" | "allSatisfy")
+            | (false, "contains" | "first")
+                if self.is_entry_closure(name, args) =>
+            {
+                self.dictionary_closure(line, receiver, key, value, name, args)
+            }
+            (true, _) if self.set_closure_name(name, args) => {
+                self.set_closure(line, receiver, key, name, args)
+            }
             (true, "union" | "intersection" | "subtracting" | "symmetricDifference") => {
                 let op = match name {
                     "union" => SetOp::Union,
