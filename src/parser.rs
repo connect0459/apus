@@ -90,6 +90,25 @@ const ASSIGN_OPS: [(&str, Option<BinOp>); 6] = [
     ("%=", Some(BinOp::Rem)),
 ];
 
+fn operator_function(text: &str) -> Option<BinOp> {
+    Some(match text {
+        "+" => BinOp::Add,
+        "-" => BinOp::Sub,
+        "*" => BinOp::Mul,
+        "/" => BinOp::Div,
+        "%" => BinOp::Rem,
+        "<" => BinOp::Lt,
+        ">" => BinOp::Gt,
+        "<=" => BinOp::Le,
+        ">=" => BinOp::Ge,
+        "==" => BinOp::Eq,
+        "!=" => BinOp::Ne,
+        "&&" => BinOp::And,
+        "||" => BinOp::Or,
+        _ => return None,
+    })
+}
+
 fn expr_as_type(expr: &Expr) -> Option<TypeRef> {
     match expr.kind() {
         ExprKind::Ident(name) => Some(TypeRef::from(name.as_str())),
@@ -1172,7 +1191,13 @@ impl Parser<'_> {
 
     fn unary(&mut self) -> PResult<Expr> {
         let line = self.line();
-        let op = if self.is_punct("-") {
+        let alone = matches!(
+            self.peek_at(1),
+            Some(Token::Punct(next)) if next == ")" || next == ","
+        );
+        let op = if self.is_punct("-") && alone {
+            None
+        } else if self.is_punct("-") {
             Some(UnaryOp::Neg)
         } else if self.is_punct("!") {
             Some(UnaryOp::Not)
@@ -1599,6 +1624,32 @@ impl Parser<'_> {
                 return self.interpolation(line, &pieces);
             }
             Some(Token::Punct(p)) if p == "{" => return self.closure_expr(line),
+            Some(Token::Punct(p))
+                if operator_function(p).is_some()
+                    && matches!(self.peek_at(1), Some(Token::Punct(next)) if next == ")" || next == ",") =>
+            {
+                let Some(op) = operator_function(p) else {
+                    return self.fail("expected an expression");
+                };
+                self.pos += 1;
+                let operand = |index: &str| Expr::new(line, ExprKind::Ident(index.to_string()));
+                let body = Expr::new(
+                    line,
+                    ExprKind::Binary {
+                        op,
+                        lhs: Box::new(operand("$0")),
+                        rhs: Box::new(operand("$1")),
+                    },
+                );
+                return Ok(Expr::new(
+                    line,
+                    ExprKind::Closure(Box::new(ClosureExpr::new(
+                        None,
+                        None,
+                        vec![Stmt::new(line, StmtKind::Expr(body))],
+                    ))),
+                ));
+            }
             Some(Token::Punct(p)) if p == "$" => {
                 if let Some(Token::Int(n)) = self.peek_at(1) {
                     let name = format!("${n}");

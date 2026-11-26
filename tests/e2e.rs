@@ -6342,3 +6342,27 @@ fn the_new_closure_members_check_their_arguments() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn an_operator_can_be_given_where_a_function_is_expected() {
+    assert_eq!(
+        run(
+            "func fold(_ xs: [Int], _ start: Int, _ f: (Int, Int) -> Int) -> Int {\n  var acc = start\n  for x in xs { acc = f(acc, x) }\n  return acc\n}\nfunc test(_ a: Int, _ b: Int, _ p: (Int, Int) -> Bool) -> Bool { return p(a, b) }\nfunc main() {\n  let xs = [3, 1, 4, 1, 5]\n  print(xs.reduce(0, +))\n  print(xs.reduce(1, *))\n  print(fold(xs, 100, -))\n  print(xs.sorted(by: <)[0])\n  print(xs.sorted(by: >)[0])\n  print(xs.min(by: <) ?? -1)\n  print(xs.max(by: >) ?? -1)\n  print([\"a\", \"b\"].reduce(\"\", +))\n  print(test(2, 2, ==))\n  print(test(2, 3, !=))\n  print(test(1, 2, <=))\n  print(test(3, 2, >=))\n  print(fold([7, 2], 0, %))\n  print(fold([8, 2], 16, /))\n  print([true, false].reduce(true, &&))\n  print([true, false].reduce(false, ||))\n}"
+        ),
+        "14\n60\n86\n1\n5\n1\n1\nab\ntrue\ntrue\ntrue\ntrue\n0\n1\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn an_operator_function_checks_the_types_it_is_given() {
+    for (body, message) in [
+        ("print([1].reduce(0, &&))", "expected Bool"),
+        ("print([\"a\"].reduce(0, +))", "expected"),
+        ("print([1].map(+))", "cannot find '$1'"),
+        ("let f = +\n  print(f)", "expected an expression"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}
