@@ -332,6 +332,20 @@ struct EnumTarget<'e> {
     name: String,
 }
 
+#[derive(Clone, Copy)]
+enum Update<'e> {
+    Assign {
+        op: Option<BinOp>,
+        value: &'e Expr,
+    },
+    Append(&'e [Arg]),
+    Element {
+        index: &'e Expr,
+        op: Option<BinOp>,
+        value: &'e Expr,
+    },
+}
+
 struct AssignPath {
     value: TExpr,
     root: String,
@@ -1680,8 +1694,12 @@ impl FnCx<'_> {
         value: &Expr,
     ) -> CResult<TStmt> {
         match target.kind() {
-            ExprKind::Ident(name) => self.assign_variable(line, name, op, value),
-            ExprKind::Member { base, name } => self.assign_member(line, base, name, op, value),
+            ExprKind::Index { base, index } => {
+                self.update(line, base, &Update::Element { index, op, value })
+            }
+            ExprKind::Ident(_) | ExprKind::Member { .. } => {
+                self.update(line, target, &Update::Assign { op, value })
+            }
             _ => Err(CheckError::at(
                 line,
                 "the left side of an assignment must be assignable",
@@ -1689,19 +1707,91 @@ impl FnCx<'_> {
         }
     }
 
-    fn assign_variable(
+    fn update(&mut self, line: u32, target: &Expr, update: &Update) -> CResult<TStmt> {
+        match target.kind() {
+            ExprKind::Ident(name) => self.assign_variable(line, name, update),
+            ExprKind::Member { base, name } => self.assign_member(line, base, name, update),
+            _ => Err(CheckError::at(
+                line,
+                "only a variable or a member of a variable can be changed",
+            )),
+        }
+    }
+
+    fn updated(
         &mut self,
         line: u32,
-        name: &str,
-        op: Option<BinOp>,
-        value: &Expr,
-    ) -> CResult<TStmt> {
+        update: &Update,
+        target_ty: Ty,
+        current: TExpr,
+    ) -> CResult<TExpr> {
+        match update {
+            Update::Assign { op, value } => {
+                self.expected = Some(target_ty);
+                let rhs = self.value(value)?;
+                self.assigned_value(line, target_ty, current, *op, rhs)
+            }
+            Update::Append(args) => {
+                let elem = self.array_target(line, target_ty)?;
+                let [arg] = args else {
+                    return Err(CheckError::at(line, "append takes one unlabeled value"));
+                };
+                if arg.label().is_some() {
+                    return Err(CheckError::at(line, "append takes one unlabeled value"));
+                }
+                self.expected = Some(elem);
+                let value = self.value(arg.value())?;
+                let value = self.coerce(line, elem, value)?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Append,
+                    elem,
+                    args: vec![current, value],
+                    ty: target_ty,
+                })
+            }
+            Update::Element { index, op, value } => {
+                let elem = self.array_target(line, target_ty)?;
+                let position = self.int_value(index)?;
+                let held = self.temp(Ty::Int);
+                self.expected = Some(elem);
+                let rhs = self.value(value)?;
+                let element = TExpr::ArrayOp {
+                    op: ArrayOp::Get,
+                    elem,
+                    args: vec![current.clone(), TExpr::Local(held, Ty::Int)],
+                    ty: elem,
+                };
+                let stored = self.assigned_value(line, elem, element, *op, rhs)?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Set,
+                    elem,
+                    args: vec![
+                        current,
+                        TExpr::Bind {
+                            local: held,
+                            init: Box::new(position),
+                        },
+                        stored,
+                    ],
+                    ty: target_ty,
+                })
+            }
+        }
+    }
+
+    fn array_target(&self, line: u32, ty: Ty) -> CResult<Ty> {
+        self.sigs
+            .array_element(ty)
+            .ok_or_else(|| CheckError::at(line, format!("{} is not an array", self.name_of(ty))))
+    }
+
+    fn assign_variable(&mut self, line: u32, name: &str, update: &Update) -> CResult<TStmt> {
         let binding = match self.lookup(name, line) {
             Ok(binding) => binding,
             Err(error) => {
                 return match self.implicit_member(line, name) {
                     Some((receiver, _, _)) => {
-                        self.assign_through(line, "self", receiver, name, op, value)
+                        self.assign_through(line, "self", receiver, name, update)
                     }
                     None => Err(error),
                 };
@@ -1713,10 +1803,8 @@ impl FnCx<'_> {
                 format!("cannot assign to '{name}': it is a constant"),
             ));
         }
-        self.expected = Some(binding.ty);
-        let rhs = self.value(value)?;
         let current = TExpr::Local(binding.local, binding.ty);
-        let new_value = self.assigned_value(line, binding.ty, current, op, rhs)?;
+        let new_value = self.updated(line, update, binding.ty, current)?;
         Ok(TStmt::Assign {
             local: binding.local,
             value: new_value,
@@ -1728,15 +1816,14 @@ impl FnCx<'_> {
         line: u32,
         base: &Expr,
         name: &str,
-        op: Option<BinOp>,
-        value: &Expr,
+        update: &Update,
     ) -> CResult<TStmt> {
         if let ExprKind::Ident(var) = base.kind()
             && let Ok(binding) = self.lookup(var, line)
         {
-            return self.assign_through(line, var, binding, name, op, value);
+            return self.assign_through(line, var, binding, name, update);
         }
-        self.assign_nested(line, base, name, op, value)
+        self.assign_nested(line, base, name, update)
     }
 
     fn assign_nested(
@@ -1744,8 +1831,7 @@ impl FnCx<'_> {
         line: u32,
         base: &Expr,
         name: &str,
-        op: Option<BinOp>,
-        value: &Expr,
+        update: &Update,
     ) -> CResult<TStmt> {
         let path = self.assignable_path(line, base)?;
         let container = path.value.ty();
@@ -1767,14 +1853,12 @@ impl FnCx<'_> {
             ));
         }
         let field_ty = field.ty();
-        self.expected = Some(field_ty);
-        let rhs = self.value(value)?;
         let current = TExpr::Field {
             base: Box::new(path.value.clone()),
             index,
             ty: field_ty,
         };
-        let new_value = self.assigned_value(line, field_ty, current, op, rhs)?;
+        let new_value = self.updated(line, update, field_ty, current)?;
         Ok(TStmt::AssignPath {
             base: path.value,
             index,
@@ -1856,8 +1940,7 @@ impl FnCx<'_> {
         var: &str,
         binding: Binding,
         name: &str,
-        op: Option<BinOp>,
-        value: &Expr,
+        update: &Update,
     ) -> CResult<TStmt> {
         if !binding.mutable && !binding.ty.is_class() {
             return Err(CheckError::at(
@@ -1874,14 +1957,12 @@ impl FnCx<'_> {
             ));
         }
         let field_ty = field.ty();
-        self.expected = Some(field_ty);
-        let rhs = self.value(value)?;
         let current = TExpr::Field {
             base: Box::new(TExpr::Local(binding.local, binding.ty)),
             index,
             ty: field_ty,
         };
-        let new_value = self.assigned_value(line, field_ty, current, op, rhs)?;
+        let new_value = self.updated(line, update, field_ty, current)?;
         Ok(TStmt::AssignField {
             local: binding.local,
             index,
@@ -2322,6 +2403,14 @@ impl FnCx<'_> {
             } => Some((base, name, args, Some(type_args.as_slice()))),
             _ => None,
         };
+        if let ExprKind::MemberCall { base, name, args } = expr.kind()
+            && name == "append"
+            && self
+                .value(base)
+                .is_ok_and(|v| self.sigs.array_element(v.ty()).is_some())
+        {
+            return self.update(expr.line(), base, &Update::Append(args));
+        }
         if let Some((base, name, args, explicit)) = member_call
             && self.enum_target(base).is_none()
         {

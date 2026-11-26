@@ -4933,3 +4933,101 @@ fn arrays_built_and_dropped_in_a_loop_keep_their_contents_intact() {
     let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 200000 {\n    let a = [String(i), \"k\", String(i + 1)]\n    let b = [a, a]\n    total += b[1][2].count\n    i += 1\n  }\n  print(total)\n}";
     assert_eq!(run(source), "1088895\n");
 }
+#[test]
+fn append_adds_an_element_at_the_end() {
+    assert_eq!(
+        main_printing(
+            "var a = [1]\na.append(2)\na.append(3)\nprint(a.count)\nprint(a[0] + a[1] + a[2])\nvar e: [String] = []\ne.append(\"x\")\nprint(e[0])"
+        ),
+        "3\n6\nx\n"
+    );
+}
+
+#[test]
+fn assigning_an_element_replaces_it() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 2, 3]\na[1] = 20\na[2] += 5\nprint(a[0])\nprint(a[1])\nprint(a[2])"
+        ),
+        "1\n20\n8\n"
+    );
+}
+
+#[test]
+fn a_copy_of_an_array_is_independent_of_the_original() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 2]\nlet b = a\na.append(3)\na[0] = 9\nprint(a.count)\nprint(b.count)\nprint(a[0])\nprint(b[0])"
+        ),
+        "3\n2\n9\n1\n"
+    );
+}
+
+#[test]
+fn an_array_passed_to_a_function_is_not_changed_by_the_callee() {
+    assert_eq!(
+        run(
+            "func grow(_ xs: [Int]) -> [Int] {\n  var ys = xs\n  ys.append(100)\n  return ys\n}\nfunc main() {\n  let a = [1]\n  let b = grow(a)\n  print(a.count)\n  print(b.count)\n}"
+        ),
+        "1\n2\n"
+    );
+}
+
+#[test]
+fn an_array_grows_past_its_first_capacity() {
+    assert_eq!(
+        main_printing(
+            "var a: [Int] = []\nvar i = 0\nwhile i < 1000 {\n  a.append(i)\n  i += 1\n}\nvar total = 0\nfor x in a { total += x }\nprint(total)\nprint(a.count)"
+        ),
+        "499500\n1000\n"
+    );
+}
+
+#[test]
+fn an_array_member_of_a_struct_or_class_can_be_appended_to() {
+    assert_eq!(
+        run(
+            "struct Bag {\n  var items: [Int]\n}\nclass Log {\n  var lines: [String]\n  init() { self.lines = [] }\n  func add(_ s: String) { lines.append(s) }\n}\nfunc main() {\n  var bag = Bag(items: [1])\n  bag.items.append(2)\n  let copy = bag\n  bag.items.append(3)\n  print(bag.items.count)\n  print(copy.items.count)\n  let log = Log()\n  log.add(\"a\")\n  log.add(\"b\")\n  print(log.lines.count)\n}"
+        ),
+        "3\n2\n2\n"
+    );
+}
+
+#[test]
+fn replacing_and_appending_class_elements_runs_deinit_when_they_are_dropped() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  var a = [Box(n: 1)]\n  a.append(Box(n: 2))\n  a[0] = Box(n: 3)\n  print(0)\n}"
+        ),
+        "1\n0\n3\n2\n"
+    );
+}
+
+#[test]
+fn a_loop_variable_copy_keeps_the_original_array_while_it_is_modified() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 2, 3]\nvar seen = 0\nfor x in a {\n  a.append(x)\n  seen += 1\n}\nprint(seen)\nprint(a.count)"
+        ),
+        "3\n6\n"
+    );
+}
+
+#[test]
+fn appending_the_wrong_type_or_to_a_constant_is_rejected() {
+    assert!(build_error("func main() { var a = [1]\n a.append(\"x\") }").contains("expected Int"));
+    assert!(build_error("func main() { let a = [1]\n a.append(2) }").contains("constant"));
+    assert!(build_error("func main() { var a = [1]\n a.append() }").contains("append"));
+    assert!(build_error("func main() { let a = [1]\n a[0] = 2 }").contains("constant"));
+    assert!(build_error("func main() { var a = [1]\n a[0] = true }").contains("expected Int"));
+}
+
+#[test]
+fn a_generic_function_can_append_to_an_array_of_its_type_parameter() {
+    assert_eq!(
+        run(
+            "func pushed<T>(_ xs: [T], _ x: T) -> [T] {\n  var ys = xs\n  ys.append(x)\n  ys[0] = x\n  return ys\n}\nfunc main() {\n  let a = pushed([1, 2], 9)\n  print(a[0])\n  print(a.count)\n  let b = pushed([\"p\"], \"q\")\n  print(b[1])\n}"
+        ),
+        "9\n3\nq\n"
+    );
+}

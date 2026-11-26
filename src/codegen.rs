@@ -192,8 +192,8 @@ impl Backend {
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
         for name in [
-            "printf", "puts", "malloc", "free", "fflush", "write", "memcpy", "memcmp", "memmem",
-            "snprintf",
+            "printf", "puts", "malloc", "realloc", "free", "fflush", "write", "memcpy", "memcmp",
+            "memmem", "snprintf",
         ] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);

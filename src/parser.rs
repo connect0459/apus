@@ -948,8 +948,12 @@ impl Parser<'_> {
         let Some((_, op)) = op else {
             return Ok(StmtKind::Expr(target));
         };
-        if !matches!(target.kind(), ExprKind::Ident(_) | ExprKind::Member { .. }) {
-            return self.fail("the left side of an assignment must be a variable or a member");
+        if !matches!(
+            target.kind(),
+            ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. }
+        ) {
+            return self
+                .fail("the left side of an assignment must be a variable, a member or an element");
         }
         self.pos += 1;
         let value = self.expr()?;
