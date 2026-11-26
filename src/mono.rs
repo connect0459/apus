@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use crate::ast::BinOp;
 use crate::check::{
-    boxed_requirement, contains_function, equality_function, hash_function, joined_function,
-    split_function, table_listing_function,
+    SetOp, boxed_requirement, contains_function, equality_function, hash_function, joined_function,
+    set_function, split_function, table_listing_function,
 };
 use crate::sigs::{
     COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, KEYS, SPLIT, Signatures,
@@ -270,7 +270,14 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if callee == HASH {
+        let generic = if let Some(op) = SetOp::from_callee(callee) {
+            Rc::new(
+                args.first()
+                    .map(|ty| set_function(sigs, *ty, mangled.clone(), op))
+                    .ok_or_else(|| "internal error: no type for a set operation".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == HASH {
             Rc::new(
                 args.first()
                     .map(|ty| hash_function(sigs, *ty, mangled.clone()))

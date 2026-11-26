@@ -5774,3 +5774,55 @@ fn comparing_collections_without_equatable_values_is_rejected() {
             .contains("expected")
     );
 }
+
+#[test]
+fn union_intersection_subtracting_and_symmetric_difference_build_new_sets() {
+    let output = main_printing(
+        "let a: Set<Int> = [1, 2, 3]\nlet b: Set<Int> = [3, 4]\nlet u = a.union(b)\nlet i = a.intersection(b)\nlet s = a.subtracting(b)\nlet x = a.symmetricDifference(b)\nprint(u.count)\nprint(i.count)\nprint(s.count)\nprint(x.count)\nvar order = 0\nfor m in u { order = order * 10 + m }\nprint(order)\nprint(i.contains(3))\nprint(s.contains(1))\nprint(x.contains(4))\nprint(x.contains(3))\nprint(a.count)\nprint(b.count)\nprint(a.union([9]).count)",
+    );
+    assert_eq!(
+        output,
+        "4\n1\n2\n3\n1234\ntrue\ntrue\ntrue\nfalse\n3\n2\n4\n"
+    );
+}
+
+#[test]
+fn subset_superset_and_disjoint_compare_members() {
+    assert_eq!(
+        main_printing(
+            "let a: Set<Int> = [1, 2]\nlet b: Set<Int> = [1, 2, 3]\nlet c: Set<Int> = [7]\nlet e: Set<Int> = []\nprint(a.isSubset(of: b))\nprint(b.isSubset(of: a))\nprint(b.isSuperset(of: a))\nprint(a.isSuperset(of: b))\nprint(a.isSubset(of: a))\nprint(e.isSubset(of: a))\nprint(a.isDisjoint(with: c))\nprint(a.isDisjoint(with: b))\nprint(e.isDisjoint(with: e))\nprint(a.isSubset(of: [1, 2, 5]))"
+        ),
+        "true\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn set_operations_work_for_strings_structs_and_in_generic_code() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nfunc both<T>(_ a: Set<T>, _ b: Set<T>) -> Int { return a.intersection(b).count }\nfunc main() {\n  let s: Set<String> = [\"a\", \"b\"]\n  let t: Set<String> = [\"b\", \"c\"]\n  print(s.union(t).count)\n  print(s.subtracting(t).contains(\"a\"))\n  let p: Set<P> = [P(x: 1), P(x: 2)]\n  let q: Set<P> = [P(x: 2)]\n  print(p.intersection(q).contains(P(x: 2)))\n  print(q.isSubset(of: p))\n  let s1: Set<Int> = [1, 2, 3]\n  let s2: Set<Int> = [2, 3]\n  print(both(s1, s2))\n}"
+        ),
+        "3\ntrue\ntrue\ntrue\n2\n"
+    );
+}
+
+#[test]
+fn set_operations_check_their_arguments() {
+    let head = "func main() {\n  let a: Set<Int> = [1]\n  let d = [1: 2]\n";
+    for (call, message) in [
+        ("a.union()", "union"),
+        ("a.union(of: a)", "union"),
+        ("a.isSubset(a)", "isSubset"),
+        ("a.isSuperset(with: a)", "isSuperset"),
+        ("a.isDisjoint(of: a)", "isDisjoint"),
+        ("a.union([\"x\"])", "expected"),
+        ("a.intersection(d)", "expected"),
+        ("a.subtracting(1)", "expected"),
+    ] {
+        let source = format!("{head}  print({call})\n}}");
+        assert!(build_error(&source).contains(message), "{call}");
+    }
+    assert!(
+        build_error("func main() { let d = [1: 2]\n print(d.union(d)) }").contains("no method")
+    );
+}

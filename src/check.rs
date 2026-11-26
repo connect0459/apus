@@ -540,6 +540,191 @@ pub fn hash_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> 
     Ok(TFunc::new(name, 1, Ty::Int, cx.locals, body))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOp {
+    Union,
+    Intersection,
+    Subtracting,
+    Symmetric,
+    Subset,
+    Disjoint,
+}
+
+impl SetOp {
+    pub fn callee(self) -> &'static str {
+        match self {
+            SetOp::Union => "$union",
+            SetOp::Intersection => "$intersection",
+            SetOp::Subtracting => "$subtracting",
+            SetOp::Symmetric => "$symmetric",
+            SetOp::Subset => "$subset",
+            SetOp::Disjoint => "$disjoint",
+        }
+    }
+
+    pub fn from_callee(callee: &str) -> Option<SetOp> {
+        [
+            SetOp::Union,
+            SetOp::Intersection,
+            SetOp::Subtracting,
+            SetOp::Symmetric,
+            SetOp::Subset,
+            SetOp::Disjoint,
+        ]
+        .into_iter()
+        .find(|op| op.callee() == callee)
+    }
+
+    fn is_predicate(self) -> bool {
+        matches!(self, SetOp::Subset | SetOp::Disjoint)
+    }
+}
+
+pub fn set_function(sigs: &Signatures, ty: Ty, name: String, op: SetOp) -> CResult<TFunc> {
+    let (member, _) = sigs
+        .table_parts(ty)
+        .ok_or_else(|| CheckError::at(0, "internal error: a set operation needs a set"))?;
+    let ret = if op.is_predicate() { Ty::Bool } else { ty };
+    let mut cx = synthetic_cx(sigs, &name, ret);
+    let left = cx.declare(0, "left", ty, false)?;
+    let right = cx.declare(0, "right", ty, false)?;
+    let result = cx.temp(ty);
+    let position = cx.temp(Ty::Int);
+    let key_of = |table: LocalId| {
+        table_op(
+            DictOp::Key,
+            member,
+            Ty::Void,
+            vec![local(table, ty), local(position, Ty::Int)],
+            member,
+        )
+    };
+    let find_in = |table: LocalId, wanted: TExpr| {
+        table_op(
+            DictOp::Find,
+            member,
+            Ty::Void,
+            vec![local(table, ty), wanted],
+            Ty::Int,
+        )
+    };
+    let add = |wanted: TExpr| TStmt::Assign {
+        local: result,
+        value: table_op(
+            DictOp::Set,
+            member,
+            Ty::Void,
+            vec![local(result, ty), wanted],
+            ty,
+        ),
+    };
+    let records = |table: LocalId, body: Vec<TStmt>| {
+        vec![
+            TStmt::Let {
+                local: position,
+                init: TExpr::Int(0),
+            },
+            TStmt::While {
+                cond: compare(
+                    BinOp::Lt,
+                    local(position, Ty::Int),
+                    TExpr::Field {
+                        base: Box::new(local(table, ty)),
+                        index: DICT_USED,
+                        ty: Ty::Int,
+                    },
+                ),
+                body: vec![
+                    TStmt::If {
+                        cond: table_op(
+                            DictOp::Live,
+                            member,
+                            Ty::Void,
+                            vec![local(table, ty), local(position, Ty::Int)],
+                            Ty::Bool,
+                        ),
+                        then_body: body,
+                        else_body: Vec::new(),
+                    },
+                    step(position),
+                ],
+            },
+        ]
+    };
+    let when = |cond: TExpr, then_body: Vec<TStmt>| TStmt::If {
+        cond,
+        then_body,
+        else_body: Vec::new(),
+    };
+    let absent =
+        |table: LocalId, wanted: TExpr| compare(BinOp::Lt, find_in(table, wanted), TExpr::Int(0));
+    let present =
+        |table: LocalId, wanted: TExpr| compare(BinOp::Ge, find_in(table, wanted), TExpr::Int(0));
+    let fresh = |init: TExpr| TStmt::Let {
+        local: result,
+        init,
+    };
+    let count = |table: LocalId| TExpr::Field {
+        base: Box::new(local(table, ty)),
+        index: DICT_COUNT,
+        ty: Ty::Int,
+    };
+    let mut body = Vec::new();
+    match op {
+        SetOp::Union => {
+            body.push(fresh(local(left, ty)));
+            body.extend(records(right, vec![add(key_of(right))]));
+        }
+        SetOp::Intersection => {
+            body.push(fresh(empty_table(sigs, ty)));
+            body.extend(records(
+                left,
+                vec![when(present(right, key_of(left)), vec![add(key_of(left))])],
+            ));
+        }
+        SetOp::Subtracting => {
+            body.push(fresh(empty_table(sigs, ty)));
+            body.extend(records(
+                left,
+                vec![when(absent(right, key_of(left)), vec![add(key_of(left))])],
+            ));
+        }
+        SetOp::Symmetric => {
+            body.push(fresh(empty_table(sigs, ty)));
+            body.extend(records(
+                left,
+                vec![when(absent(right, key_of(left)), vec![add(key_of(left))])],
+            ));
+            body.extend(records(
+                right,
+                vec![when(absent(left, key_of(right)), vec![add(key_of(right))])],
+            ));
+        }
+        SetOp::Subset => {
+            body.push(return_if(
+                compare(BinOp::Gt, count(left), count(right)),
+                false,
+            ));
+            body.extend(records(
+                left,
+                vec![return_if(absent(right, key_of(left)), false)],
+            ));
+            body.push(TStmt::Return(Some(TExpr::Bool(true))));
+        }
+        SetOp::Disjoint => {
+            body.extend(records(
+                left,
+                vec![return_if(present(right, key_of(left)), false)],
+            ));
+            body.push(TStmt::Return(Some(TExpr::Bool(true))));
+        }
+    }
+    if !op.is_predicate() {
+        body.push(TStmt::Return(Some(local(result, ty))));
+    }
+    Ok(TFunc::new(name, 2, ret, cx.locals, body))
+}
+
 pub fn table_listing_function(
     sigs: &Signatures,
     ty: Ty,
@@ -3595,6 +3780,29 @@ impl FnCx<'_> {
         })
     }
 
+    fn set_operand(
+        &mut self,
+        line: u32,
+        name: &str,
+        label: Option<&str>,
+        ty: Ty,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let usage = match label {
+            Some(label) => format!("'{name}' takes one set with the label '{label}:'"),
+            None => format!("'{name}' takes one unlabeled set"),
+        };
+        let [arg] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if arg.label() != label {
+            return Err(CheckError::at(line, usage));
+        }
+        self.expected = Some(ty);
+        let other = self.value(arg.value())?;
+        self.coerce(line, ty, other)
+    }
+
     fn table_method(
         &mut self,
         line: u32,
@@ -3608,6 +3816,36 @@ impl FnCx<'_> {
         let ty = receiver.ty();
         let set = self.sigs.is_set(ty);
         match (set, name) {
+            (true, "union" | "intersection" | "subtracting" | "symmetricDifference") => {
+                let op = match name {
+                    "union" => SetOp::Union,
+                    "intersection" => SetOp::Intersection,
+                    "subtracting" => SetOp::Subtracting,
+                    _ => SetOp::Symmetric,
+                };
+                let other = self.set_operand(line, name, None, ty, args)?;
+                Ok(TExpr::Call {
+                    callee: op.callee().to_string(),
+                    type_args: vec![ty],
+                    args: vec![receiver, other],
+                    ret: ty,
+                })
+            }
+            (true, "isSubset" | "isSuperset" | "isDisjoint") => {
+                let label = if name == "isDisjoint" { "with" } else { "of" };
+                let other = self.set_operand(line, name, Some(label), ty, args)?;
+                let (op, arguments) = match name {
+                    "isSubset" => (SetOp::Subset, vec![receiver, other]),
+                    "isSuperset" => (SetOp::Subset, vec![other, receiver]),
+                    _ => (SetOp::Disjoint, vec![receiver, other]),
+                };
+                Ok(TExpr::Call {
+                    callee: op.callee().to_string(),
+                    type_args: vec![ty],
+                    args: arguments,
+                    ret: Ty::Bool,
+                })
+            }
             (true, "contains") => {
                 let [arg] = args else {
                     return Err(CheckError::at(line, "contains takes one unlabeled value"));
