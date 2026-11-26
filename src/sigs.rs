@@ -1681,17 +1681,8 @@ impl Signatures {
         }
         let decl = &self.struct_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
-        if decl.name() == ARRAY
-            && let Some(element) = key.1.first()
-            && matches!(element, Ty::Struct(_) | Ty::Void)
-        {
-            return Err(CheckError::at(
-                line,
-                format!(
-                    "an array cannot hold {} yet: its elements must fit one slot",
-                    self.display(*element, scope)
-                ),
-            ));
+        if decl.name() == ARRAY && key.1.first() == Some(&Ty::Void) {
+            return Err(CheckError::at(line, "an array cannot hold Void"));
         }
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
             .map(|i| decl.bound(i).to_vec())

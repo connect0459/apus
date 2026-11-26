@@ -733,25 +733,31 @@ impl Emitter<'_, '_> {
             .iter()
             .map(|a| self.value(a))
             .collect::<GResult<Vec<_>>>()?;
-        let clif = clif_type(elem)
-            .ok_or_else(|| CodegenError::from("an array element has no representable type"))?;
         let flags = MemFlagsData::trusted();
+        let stride = self.stride(elem)?;
+        let inline = elem.is_struct();
         match op {
             ArrayOp::Buffer => {
                 let slots = i64::try_from(values.len().max(1))?;
-                let size = self.builder.ins().iconst(types::I64, slots * ELEMENT_SIZE);
+                let size = self.builder.ins().iconst(types::I64, slots * stride);
                 let buffer = self.allocate(size)?;
                 for (index, value) in values.into_iter().enumerate() {
-                    let offset = i32::try_from(index)?.saturating_mul(ELEMENT_SIZE as i32);
-                    self.builder.ins().store(flags, value, buffer, offset);
+                    let offset = i64::try_from(index)? * stride;
+                    self.put_element(buffer, offset, value, elem)?;
                 }
                 Ok(buffer)
             }
             ArrayOp::Get => {
-                let address = self.element_address(values[0], values[1]);
-                Ok(self.builder.ins().load(clif, flags, address, 0))
+                let address = self.element_address(values[0], values[1], stride);
+                if inline {
+                    Ok(address)
+                } else {
+                    let clif = self.element_type(elem)?;
+                    Ok(self.builder.ins().load(clif, flags, address, 0))
+                }
             }
             ArrayOp::Append => {
+                let value = self.detach(values[1], elem)?;
                 let array = self.unique_array(values[0], elem, 1)?;
                 let count =
                     self.builder
@@ -761,9 +767,9 @@ impl Emitter<'_, '_> {
                     self.builder
                         .ins()
                         .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
-                let at = self.builder.ins().imul_imm_s(count, ELEMENT_SIZE);
+                let at = self.builder.ins().imul_imm_s(count, stride);
                 let address = self.builder.ins().iadd(buffer, at);
-                self.builder.ins().store(flags, values[1], address, 0);
+                self.put_element(address, 0, value, elem)?;
                 let next = self.builder.ins().iadd_imm_s(count, 1);
                 self.builder
                     .ins()
@@ -771,15 +777,54 @@ impl Emitter<'_, '_> {
                 Ok(array)
             }
             ArrayOp::Set => {
-                self.element_address(values[0], values[1]);
+                self.element_address(values[0], values[1], stride);
+                let value = self.detach(values[2], elem)?;
                 let array = self.unique_array(values[0], elem, 0)?;
-                let address = self.element_address(array, values[1]);
-                let old = self.builder.ins().load(clif, flags, address, 0);
-                self.builder.ins().store(flags, values[2], address, 0);
-                self.release(old, elem)?;
+                let address = self.element_address(array, values[1], stride);
+                if inline {
+                    self.release(address, elem)?;
+                } else {
+                    let clif = self.element_type(elem)?;
+                    let old = self.builder.ins().load(clif, flags, address, 0);
+                    self.release(old, elem)?;
+                }
+                self.put_element(address, 0, value, elem)?;
                 Ok(array)
             }
         }
+    }
+
+    fn element_type(&self, elem: Ty) -> GResult<Type> {
+        clif_type(elem)
+            .ok_or_else(|| CodegenError::from("an array element has no representable type"))
+    }
+
+    fn stride(&self, elem: Ty) -> GResult<i64> {
+        if elem.is_struct() {
+            Ok(i64::try_from(self.struct_fields(elem)?.len().max(1))? * ELEMENT_SIZE)
+        } else {
+            Ok(ELEMENT_SIZE)
+        }
+    }
+
+    fn put_element(&mut self, base: Value, offset: i64, value: Value, elem: Ty) -> GResult<()> {
+        if elem.is_struct() {
+            let target = self.builder.ins().iadd_imm_s(base, offset);
+            return self.copy_struct(target, value, elem);
+        }
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), value, base, i32::try_from(offset)?);
+        Ok(())
+    }
+
+    fn detach(&mut self, value: Value, elem: Ty) -> GResult<Value> {
+        if !elem.is_struct() {
+            return Ok(value);
+        }
+        let copy = self.alloc_struct(elem)?;
+        self.copy_struct(copy, value, elem)?;
+        Ok(copy)
     }
 
     fn allocate(&mut self, size: Value) -> GResult<Value> {
@@ -795,7 +840,7 @@ impl Emitter<'_, '_> {
             .ok_or_else(|| CodegenError::from("malloc returned no value"))
     }
 
-    fn element_address(&mut self, array: Value, index: Value) -> Value {
+    fn element_address(&mut self, array: Value, index: Value, stride: i64) -> Value {
         let flags = MemFlagsData::trusted();
         let count = self
             .builder
@@ -810,12 +855,13 @@ impl Emitter<'_, '_> {
             .builder
             .ins()
             .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
-        let at = self.builder.ins().imul_imm_s(index, ELEMENT_SIZE);
+        let at = self.builder.ins().imul_imm_s(index, stride);
         self.builder.ins().iadd(buffer, at)
     }
 
     fn unique_array(&mut self, array: Value, elem: Ty, extra: i64) -> GResult<Value> {
         let flags = MemFlagsData::trusted();
+        let stride = self.stride(elem)?;
         let merge = self.builder.create_block();
         self.builder.append_block_param(merge, types::I64);
         let reuse = self.builder.create_block();
@@ -846,7 +892,7 @@ impl Emitter<'_, '_> {
         self.builder.ins().brif(fits, keep, &[], grow, &[]);
         self.builder.switch_to_block(grow);
         let wanted = self.grown_capacity(needed, capacity);
-        let bytes = self.builder.ins().imul_imm_s(wanted, ELEMENT_SIZE);
+        let bytes = self.builder.ins().imul_imm_s(wanted, stride);
         let buffer = self
             .builder
             .ins()
@@ -909,7 +955,7 @@ impl Emitter<'_, '_> {
         self.builder
             .ins()
             .store(flags, wanted, fresh, field_offset(ARRAY_CAPACITY));
-        let bytes = self.builder.ins().imul_imm_s(wanted, ELEMENT_SIZE);
+        let bytes = self.builder.ins().imul_imm_s(wanted, stride);
         let target = self.allocate(bytes)?;
         self.builder
             .ins()
@@ -919,9 +965,13 @@ impl Emitter<'_, '_> {
             .ins()
             .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
         self.each_element(count, |this, index| {
-            let at = this.builder.ins().imul_imm_s(index, ELEMENT_SIZE);
+            let at = this.builder.ins().imul_imm_s(index, stride);
             let from = this.builder.ins().iadd(source, at);
             let to = this.builder.ins().iadd(target, at);
+            if elem.is_struct() {
+                this.copy_struct(to, from, elem)?;
+                return this.retain(to, elem);
+            }
             let value = this.builder.ins().load(types::I64, flags, from, 0);
             this.retain(value, elem)?;
             this.builder.ins().store(flags, value, to, 0);
@@ -969,14 +1019,23 @@ impl Emitter<'_, '_> {
             .builder
             .ins()
             .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
-        if matches!(elem, Ty::Str | Ty::Class(_)) {
+        let counted = match elem {
+            Ty::Str | Ty::Class(_) => true,
+            Ty::Struct(_) => !self.counted_slots(elem)?.is_empty(),
+            _ => false,
+        };
+        if counted {
+            let stride = self.stride(elem)?;
             let count =
                 self.builder
                     .ins()
                     .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
             self.each_element(count, |this, index| {
-                let at = this.builder.ins().imul_imm_s(index, ELEMENT_SIZE);
+                let at = this.builder.ins().imul_imm_s(index, stride);
                 let address = this.builder.ins().iadd(buffer, at);
+                if elem.is_struct() {
+                    return this.release(address, elem);
+                }
                 let value = this.builder.ins().load(types::I64, flags, address, 0);
                 this.release(value, elem)
             })?;

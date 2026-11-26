@@ -4922,10 +4922,6 @@ fn array_misuse_is_rejected_with_a_message() {
         build_error("func main() { let a = 5\n print(a[0]) }").contains("cannot be subscripted")
     );
     assert!(build_error("func main() { let a = [1]\n a.count = 2 }").contains("count"));
-    assert!(
-        build_error("struct P { var x: Int }\nfunc main() { let a = [P(x: 1)] }")
-            .contains("cannot hold")
-    );
 }
 
 #[test]
@@ -5039,4 +5035,40 @@ fn only_a_variable_or_a_member_can_be_the_array_that_is_changed() {
     assert!(build_error("func main() { var a = [1]\n a.append(x: 2) }").contains("append"));
     assert!(build_error("func main() { var a = [1]\n a.append(1, 2) }").contains("append"));
     assert!(build_error("func main() { var n = 5\n n[0] = 1 }").contains("not an array"));
+}
+
+#[test]
+fn an_array_holds_structs_and_updates_them_in_place() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var y: Int\n}\nfunc main() {\n  var ps = [P(x: 1, y: 2)]\n  ps.append(P(x: 3, y: 4))\n  ps.append(ps[0])\n  ps[0] = P(x: 9, y: 8)\n  ps[1] = ps[2]\n  let copy = ps\n  ps.append(P(x: 7, y: 7))\n  var sum = 0\n  for p in ps { sum += p.x * 10 + p.y }\n  print(sum)\n  print(ps[0].x)\n  print(ps[1].y)\n  print(copy.count)\n  print(ps.count)\n}"
+        ),
+        "199\n9\n2\n3\n4\n"
+    );
+}
+
+#[test]
+fn an_array_holds_optionals_and_enums_with_payloads() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case square(Int)\n}\nfunc main() {\n  var a: [Int?] = [1, nil]\n  a.append(3)\n  a[1] = 2\n  var total = 0\n  for x in a {\n    if let v = x { total += v }\n  }\n  print(total)\n  var names: [String?] = []\n  names.append(\"n\")\n  names.append(nil)\n  print(names[0] ?? \"-\")\n  print(names[1] ?? \"-\")\n  var shapes = [Shape.circle(1)]\n  shapes.append(.square(5))\n  switch shapes[1] {\n  case .circle(let r): print(r)\n  case .square(let s): print(s * 2)\n  }\n}"
+        ),
+        "6\nn\n-\n10\n"
+    );
+}
+
+#[test]
+fn structs_with_counted_members_in_an_array_are_released_with_it() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nstruct H {\n  var box: Box\n  var tag: Int\n}\nfunc main() {\n  var hs = [H(box: Box(n: 1), tag: 1)]\n  hs.append(H(box: Box(n: 2), tag: 2))\n  let copy = hs\n  hs[0] = H(box: Box(n: 3), tag: 3)\n  print(0)\n  var os: [Box?] = [Box(n: 4)]\n  os[0] = nil\n  print(5)\n}"
+        ),
+        "0\n4\n5\n1\n3\n2\n"
+    );
+}
+
+#[test]
+fn arrays_of_structs_built_and_dropped_in_a_loop_keep_their_contents() {
+    let source = "struct P {\n  var s: String\n  var n: Int\n}\nfunc main() {\n  var total = 0\n  var i = 0\n  while i < 100000 {\n    var a = [P(s: String(i), n: 1)]\n    a.append(P(s: \"k\", n: 2))\n    let b = a\n    a[0] = P(s: \"z\", n: 3)\n    total += b[0].s.count + a[0].n + b[1].n\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "988890\n");
 }
