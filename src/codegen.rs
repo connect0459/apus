@@ -1410,6 +1410,83 @@ impl Emitter<'_, '_> {
             }
             (StrOp::ByteIndex, [text, needle]) => Ok(self.byte_index(*text, *needle)),
             (StrOp::ScalarCount, [text, bytes]) => Ok(self.scalar_count(*text, *bytes)),
+            (StrOp::ByteIndexFrom, [text, needle, from]) => {
+                let length = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let needle_len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *needle, STRING_LEN);
+                let remaining = self.builder.ins().isub(length, *from);
+                let hay = self.builder.ins().iadd(*text, *from);
+                let found = self.find(hay, remaining, *needle, needle_len);
+                let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, found, 0);
+                let offset = self.builder.ins().isub(found, *text);
+                let none = self.builder.ins().iconst(types::I64, -1);
+                Ok(self.builder.ins().select(missing, none, offset))
+            }
+            (StrOp::ByteSlice, [text, start, end]) => {
+                let length = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let ordered = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::UnsignedLessThanOrEqual, *start, *end);
+                self.builder.ins().trapz(ordered, INDEX_OUT_OF_RANGE);
+                let inside = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::UnsignedLessThanOrEqual, *end, length);
+                self.builder.ins().trapz(inside, INDEX_OUT_OF_RANGE);
+                Ok(self.slice(*text, *start, *end))
+            }
+            (StrOp::ScalarAt, [text, index]) => {
+                let length = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let non_negative =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, *index, 0);
+                self.builder.ins().trapz(non_negative, INDEX_OUT_OF_RANGE);
+                let offset = self.forward_offset(*text, *index);
+                let inside = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThan, offset, length);
+                self.builder.ins().trapz(inside, INDEX_OUT_OF_RANGE);
+                Ok(self.char_at(*text, offset))
+            }
+            (StrOp::ScalarSlice, [text, low, high]) => {
+                let length = self
+                    .builder
+                    .ins()
+                    .load(types::I64, flags, *text, STRING_LEN);
+                let non_negative =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, *low, 0);
+                self.builder.ins().trapz(non_negative, INDEX_OUT_OF_RANGE);
+                let ordered = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThanOrEqual, *low, *high);
+                self.builder.ins().trapz(ordered, INDEX_OUT_OF_RANGE);
+                let total = self.scalar_count(*text, length);
+                let inside = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::SignedLessThanOrEqual, *high, total);
+                self.builder.ins().trapz(inside, INDEX_OUT_OF_RANGE);
+                let start = self.forward_offset(*text, *low);
+                let end = self.forward_offset(*text, *high);
+                Ok(self.slice(*text, start, end))
+            }
             (StrOp::Prefix | StrOp::Suffix | StrOp::DropFirst | StrOp::DropLast, [text, count]) => {
                 let non_negative =
                     self.builder

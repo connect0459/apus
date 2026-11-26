@@ -5409,3 +5409,76 @@ fn assigning_a_member_of_a_struct_element_traps_out_of_range_and_checks_constant
         .contains("no member")
     );
 }
+
+#[test]
+fn split_cuts_a_string_at_a_separator_and_skips_empty_pieces() {
+    assert_eq!(
+        main_printing(
+            "let parts = \"a,b,,c\".split(separator: \",\")\nprint(parts.count)\nprint(parts[0] + parts[1] + parts[2])\nlet words = \"  one two  three \".split(separator: \" \")\nprint(words.count)\nprint(words[2])\nlet c: Character = \"-\"\nprint(\"x-y\".split(separator: c).count)\nprint(\"abc\".split(separator: \"abc\").count)\nprint(\"\".split(separator: \",\").count)\nprint(\"a::b\".split(separator: \"::\").count)\nprint(\"abc\".split(separator: \"\").count)"
+        ),
+        "3\nabc\n3\nthree\n2\n0\n0\n2\n1\n"
+    );
+}
+
+#[test]
+fn split_handles_multibyte_text_and_returns_independent_strings() {
+    assert_eq!(
+        main_printing(
+            "let parts = \"héllo→wörld→!\".split(separator: \"→\")\nprint(parts[0])\nprint(parts[1])\nprint(parts[2])\nvar total = 0\nfor p in parts { total += p.count }\nprint(total)"
+        ),
+        "héllo\nwörld\n!\n13\n"
+    );
+}
+
+#[test]
+fn joined_concatenates_strings_with_a_separator() {
+    assert_eq!(
+        main_printing(
+            "let a = [\"x\", \"y\", \"z\"]\nprint(a.joined(separator: \", \"))\nprint(a.joined())\nlet e: [String] = []\nprint(e.joined(separator: \"-\").isEmpty)\nprint(\"1 2 3\".split(separator: \" \").joined(separator: \"+\"))\nprint([\"solo\"].joined(separator: \"/\"))"
+        ),
+        "x, y, z\nxyz\ntrue\n1+2+3\nsolo\n"
+    );
+}
+
+#[test]
+fn a_string_is_subscripted_by_scalar_offset_and_by_range() {
+    assert_eq!(
+        main_printing(
+            "let s = \"héllo\"\nprint(s[0])\nprint(s[1])\nprint(s[4])\nprint(s[1..<3])\nprint(s[0...1])\nprint(s[2..<2].isEmpty)\nprint(s[0..<5] == s)\nvar i = 3\nprint(s[i])"
+        ),
+        "h\né\no\nél\nhé\ntrue\ntrue\nl\n"
+    );
+}
+
+#[test]
+fn a_string_subscript_outside_the_string_traps() {
+    for access in ["s[5]", "s[-1]", "s[2..<9]", "s[3..<2]", "s[-1..<2]"] {
+        run_expecting_a_crash(&format!(
+            "func main() {{\n  let s = \"héllo\"\n  var a = 0\n  a += 0\n  print({access})\n}}"
+        ));
+    }
+}
+
+#[test]
+fn the_new_string_members_check_their_arguments() {
+    assert!(build_error("func main() { print(\"a\".split(\",\")) }").contains("split"));
+    assert!(
+        build_error("func main() { print(\"a\".split(separator: 1)) }").contains("expected String")
+    );
+    assert!(build_error("func main() { print([1].joined()) }").contains("joined"));
+    assert!(build_error("func main() { print([\"a\"].joined(\",\")) }").contains("joined"));
+    assert!(
+        build_error("func main() { print([\"a\"].joined(separator: 1)) }")
+            .contains("expected String")
+    );
+    assert!(build_error("func main() { print(\"a\"[true]) }").contains("expected Int"));
+    assert!(
+        build_error("func main() {\n var s = \"ab\"\n s[0] = \"x\"\n}").contains("not an array")
+    );
+}
+
+#[test]
+fn splitting_joining_and_slicing_in_a_loop_keep_their_results() {
+    let source = "func main() {\n  var total = 0\n  var i = 0\n  while i < 50000 {\n    let line = \"k\" + String(i) + \",v,\" + String(i + 1)\n    let parts = line.split(separator: \",\")\n    let back = parts.joined(separator: \";\")\n    total += back.count + parts[1].count + back[0..<2].count\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "827784\n");
+}

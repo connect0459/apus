@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::BinOp;
-use crate::check::{boxed_requirement, contains_function, equality_function};
-use crate::sigs::{COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, Signatures};
+use crate::check::{
+    boxed_requirement, contains_function, equality_function, joined_function, split_function,
+};
+use crate::sigs::{COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, JOINED, SPLIT, Signatures};
 use crate::tir::{Descriptor, TFunc, Witnessed};
 use crate::types::Ty;
 
@@ -264,7 +266,11 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if callee == CONTAINS {
+        let generic = if callee == SPLIT {
+            Rc::new(split_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?)
+        } else if callee == JOINED {
+            Rc::new(joined_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?)
+        } else if callee == CONTAINS {
             Rc::new(
                 args.first()
                     .map(|ty| contains_function(sigs, *ty, mangled.clone()))

@@ -118,6 +118,10 @@ pub enum StrOp {
     Trimmed,
     ByteIndex,
     ScalarCount,
+    ByteIndexFrom,
+    ByteSlice,
+    ScalarAt,
+    ScalarSlice,
 }
 
 impl StrOp {
@@ -134,15 +138,20 @@ impl StrOp {
             | StrOp::DropFirst
             | StrOp::DropLast
             | StrOp::Replace
-            | StrOp::Trimmed => Ty::Str,
+            | StrOp::Trimmed
+            | StrOp::ByteSlice
+            | StrOp::ScalarSlice => Ty::Str,
             StrOp::Count
             | StrOp::CharWidth
             | StrOp::CharValue
             | StrOp::ByteIndex
+            | StrOp::ByteIndexFrom
             | StrOp::ScalarCount => Ty::Int,
-            StrOp::CharAt | StrOp::CharFromInt | StrOp::CharFromString | StrOp::LastChar => {
-                Ty::Char
-            }
+            StrOp::CharAt
+            | StrOp::ScalarAt
+            | StrOp::CharFromInt
+            | StrOp::CharFromString
+            | StrOp::LastChar => Ty::Char,
             StrOp::IsEmpty | StrOp::HasPrefix | StrOp::HasSuffix | StrOp::Contains => Ty::Bool,
         }
     }
@@ -162,6 +171,8 @@ impl StrOp {
                 | StrOp::DropLast
                 | StrOp::Replace
                 | StrOp::Trimmed
+                | StrOp::ByteSlice
+                | StrOp::ScalarSlice
         )
     }
 
@@ -192,6 +203,10 @@ impl StrOp {
             StrOp::Trimmed => 23,
             StrOp::ByteIndex => 24,
             StrOp::ScalarCount => 25,
+            StrOp::ByteIndexFrom => 26,
+            StrOp::ByteSlice => 27,
+            StrOp::ScalarAt => 28,
+            StrOp::ScalarSlice => 29,
         }
     }
 }

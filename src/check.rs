@@ -7,7 +7,7 @@ use crate::ast::{
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
     ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, EQUAL, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig,
-    FuncSig, NONE_CASE, PRINT, ParamSig, SOME_CASE, bound_includes, scope_of,
+    FuncSig, JOINED, NONE_CASE, PRINT, ParamSig, SOME_CASE, SPLIT, bound_includes, scope_of,
 };
 use crate::tir::{ArrayOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -330,6 +330,169 @@ pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFu
         vec![TStmt::Return(Some(same))]
     };
     Ok(TFunc::new(name, 2, Ty::Bool, cx.locals, body))
+}
+
+fn local(id: LocalId, ty: Ty) -> TExpr {
+    TExpr::Local(id, ty)
+}
+
+fn compare(op: BinOp, lhs: TExpr, rhs: TExpr) -> TExpr {
+    TExpr::Binary {
+        op,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }
+}
+
+fn text_op(op: StrOp, args: Vec<TExpr>) -> TExpr {
+    TExpr::StrOp { op, args }
+}
+
+pub fn split_function(sigs: &Signatures, name: String) -> CResult<TFunc> {
+    let parts_ty = sigs.array_of(Ty::Str, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, parts_ty);
+    let text = cx.declare(0, "text", Ty::Str, false)?;
+    let separator = cx.declare(0, "separator", Ty::Str, false)?;
+    let parts = cx.temp(parts_ty);
+    let length = cx.temp(Ty::Int);
+    let width = cx.temp(Ty::Int);
+    let start = cx.temp(Ty::Int);
+    let found = cx.temp(Ty::Int);
+    let push = |piece: TExpr| TStmt::Assign {
+        local: parts,
+        value: TExpr::ArrayOp {
+            op: ArrayOp::Append,
+            elem: Ty::Str,
+            args: vec![local(parts, parts_ty), piece],
+            ty: parts_ty,
+        },
+    };
+    let slice =
+        |from: TExpr, to: TExpr| text_op(StrOp::ByteSlice, vec![local(text, Ty::Str), from, to]);
+    let empty = sigs.construct(
+        parts_ty,
+        vec![
+            TExpr::Int(0),
+            TExpr::Int(0),
+            TExpr::ArrayOp {
+                op: ArrayOp::Buffer,
+                elem: Ty::Str,
+                args: Vec::new(),
+                ty: Ty::Int,
+            },
+        ],
+    );
+    let int = |id: LocalId| local(id, Ty::Int);
+    let body = vec![
+        TStmt::Let {
+            local: parts,
+            init: empty,
+        },
+        TStmt::Let {
+            local: length,
+            init: text_op(StrOp::Count, vec![local(text, Ty::Str)]),
+        },
+        TStmt::Let {
+            local: width,
+            init: text_op(StrOp::Count, vec![local(separator, Ty::Str)]),
+        },
+        TStmt::Let {
+            local: start,
+            init: TExpr::Int(0),
+        },
+        TStmt::If {
+            cond: compare(BinOp::Eq, int(width), TExpr::Int(0)),
+            then_body: vec![
+                TStmt::If {
+                    cond: compare(BinOp::Ne, int(length), TExpr::Int(0)),
+                    then_body: vec![push(local(text, Ty::Str))],
+                    else_body: Vec::new(),
+                },
+                TStmt::Return(Some(local(parts, parts_ty))),
+            ],
+            else_body: Vec::new(),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Le, int(start), int(length)),
+            body: vec![
+                TStmt::Let {
+                    local: found,
+                    init: text_op(
+                        StrOp::ByteIndexFrom,
+                        vec![local(text, Ty::Str), local(separator, Ty::Str), int(start)],
+                    ),
+                },
+                TStmt::If {
+                    cond: compare(BinOp::Lt, int(found), TExpr::Int(0)),
+                    then_body: vec![
+                        TStmt::If {
+                            cond: compare(BinOp::Lt, int(start), int(length)),
+                            then_body: vec![push(slice(int(start), int(length)))],
+                            else_body: Vec::new(),
+                        },
+                        TStmt::Assign {
+                            local: start,
+                            value: compare(BinOp::Add, int(length), TExpr::Int(1)),
+                        },
+                    ],
+                    else_body: vec![
+                        TStmt::If {
+                            cond: compare(BinOp::Gt, int(found), int(start)),
+                            then_body: vec![push(slice(int(start), int(found)))],
+                            else_body: Vec::new(),
+                        },
+                        TStmt::Assign {
+                            local: start,
+                            value: compare(BinOp::Add, int(found), int(width)),
+                        },
+                    ],
+                },
+            ],
+        },
+        TStmt::Return(Some(local(parts, parts_ty))),
+    ];
+    Ok(TFunc::new(name, 2, parts_ty, cx.locals, body))
+}
+
+pub fn joined_function(sigs: &Signatures, name: String) -> CResult<TFunc> {
+    let parts_ty = sigs.array_of(Ty::Str, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, Ty::Str);
+    let parts = cx.declare(0, "parts", parts_ty, false)?;
+    let separator = cx.declare(0, "separator", Ty::Str, false)?;
+    let result = cx.temp(Ty::Str);
+    let position = cx.temp(Ty::Int);
+    let append = |piece: TExpr| TStmt::Assign {
+        local: result,
+        value: text_op(StrOp::Concat, vec![local(result, Ty::Str), piece]),
+    };
+    let body = vec![
+        TStmt::Let {
+            local: result,
+            init: TExpr::Str(String::new()),
+        },
+        TStmt::Let {
+            local: position,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: compare(
+                BinOp::Lt,
+                local(position, Ty::Int),
+                array_count(parts, parts_ty),
+            ),
+            body: vec![
+                TStmt::If {
+                    cond: compare(BinOp::Gt, local(position, Ty::Int), TExpr::Int(0)),
+                    then_body: vec![append(local(separator, Ty::Str))],
+                    else_body: Vec::new(),
+                },
+                append(array_get(parts, parts_ty, position, Ty::Str)),
+                step(position),
+            ],
+        },
+        TStmt::Return(Some(local(result, Ty::Str))),
+    ];
+    Ok(TFunc::new(name, 2, Ty::Str, cx.locals, body))
 }
 
 pub fn contains_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> {
@@ -2425,6 +2588,7 @@ impl FnCx<'_> {
                     ret: Ty::Bool,
                 })
             }
+            "joined" => self.array_joined(line, receiver, args),
             "removeLast" | "popLast" | "remove" => {
                 self.array_taking(line, base, receiver, elem, name, args)
             }
@@ -2619,6 +2783,9 @@ impl FnCx<'_> {
 
     fn subscript(&mut self, line: u32, base: &Expr, index: &Expr) -> CResult<TExpr> {
         let array = self.value(base)?;
+        if array.ty() == Ty::Str {
+            return self.string_subscript(array, index);
+        }
         let Some(elem) = self.sigs.array_element(array.ty()) else {
             return Err(CheckError::at(
                 line,
@@ -3110,6 +3277,9 @@ impl FnCx<'_> {
         if name == "firstIndex" {
             return self.string_first_index(line, receiver, args);
         }
+        if name == "split" {
+            return self.string_split(line, receiver, args);
+        }
         let counted = match name {
             "prefix" => Some(StrOp::Prefix),
             "suffix" => Some(StrOp::Suffix),
@@ -3164,6 +3334,76 @@ impl FnCx<'_> {
             op,
             args: vec![receiver, value],
         })
+    }
+
+    fn string_split(&mut self, line: u32, receiver: TExpr, args: &[Arg]) -> CResult<TExpr> {
+        let usage = "'split' takes the label 'separator:'";
+        let [arg] = args else {
+            return Err(CheckError::at(line, usage));
+        };
+        if arg.label() != Some("separator") {
+            return Err(CheckError::at(line, usage));
+        }
+        self.expected = Some(Ty::Str);
+        let mut separator = self.value(arg.value())?;
+        if separator.ty() == Ty::Char {
+            separator = text_op(StrOp::FromChar, vec![separator]);
+        }
+        self.expect(line, Ty::Str, separator.ty())?;
+        let parts = self.sigs.array_of(Ty::Str, line)?;
+        Ok(TExpr::Call {
+            callee: SPLIT.to_string(),
+            type_args: vec![Ty::Str],
+            args: vec![receiver, separator],
+            ret: parts,
+        })
+    }
+
+    fn array_joined(&mut self, line: u32, receiver: TExpr, args: &[Arg]) -> CResult<TExpr> {
+        let separator = match args {
+            [] => TExpr::Str(String::new()),
+            [arg] if arg.label() == Some("separator") => {
+                self.expected = Some(Ty::Str);
+                let value = self.value(arg.value())?;
+                self.expect(line, Ty::Str, value.ty())?;
+                value
+            }
+            _ => {
+                return Err(CheckError::at(
+                    line,
+                    "'joined' takes no argument or the label 'separator:'",
+                ));
+            }
+        };
+        let strings = self.sigs.array_of(Ty::Str, line)?;
+        if receiver.ty() != strings {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'joined' needs an array of String, but found {}",
+                    self.name_of(receiver.ty())
+                ),
+            ));
+        }
+        Ok(TExpr::Call {
+            callee: JOINED.to_string(),
+            type_args: vec![Ty::Str],
+            args: vec![receiver, separator],
+            ret: Ty::Str,
+        })
+    }
+
+    fn string_subscript(&mut self, text: TExpr, index: &Expr) -> CResult<TExpr> {
+        if let ExprKind::Range { lo, hi, inclusive } = index.kind() {
+            let low = self.int_value(lo)?;
+            let mut high = self.int_value(hi)?;
+            if *inclusive {
+                high = compare(BinOp::Add, high, TExpr::Int(1));
+            }
+            return Ok(text_op(StrOp::ScalarSlice, vec![text, low, high]));
+        }
+        let position = self.int_value(index)?;
+        Ok(text_op(StrOp::ScalarAt, vec![text, position]))
     }
 
     fn string_replacement(&mut self, line: u32, receiver: TExpr, args: &[Arg]) -> CResult<TExpr> {
