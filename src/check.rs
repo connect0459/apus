@@ -2231,9 +2231,10 @@ enum Update<'e> {
     SetRemove(&'e [Arg]),
     Default {
         key: &'e Expr,
-        default: &'e Expr,
+        default: Option<&'e Expr>,
         inner: &'e Update<'e>,
     },
+    EnsureKey(&'e Expr),
     Within {
         index: &'e Expr,
         inner: &'e Update<'e>,
@@ -2243,6 +2244,63 @@ enum Update<'e> {
         op: Option<BinOp>,
         value: &'e Expr,
     },
+}
+
+enum ChainKind<'e> {
+    Assign { op: Option<BinOp>, value: &'e Expr },
+    Call { name: &'e str, args: &'e [Arg] },
+}
+
+fn chain_names<'e>(link: &'e Expr, names: &mut Vec<&'e str>) -> bool {
+    match link.kind() {
+        ExprKind::ChainValue => true,
+        ExprKind::Member { base, name } => {
+            if !chain_names(base, names) {
+                return false;
+            }
+            names.push(name);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn collection_mutator(name: &str) -> bool {
+    matches!(
+        name,
+        "append"
+            | "insert"
+            | "remove"
+            | "removeLast"
+            | "removeAll"
+            | "sort"
+            | "formUnion"
+            | "formIntersection"
+            | "subtract"
+            | "formSymmetricDifference"
+    )
+}
+
+fn collection_statement_update<'e>(
+    name: &'e str,
+    args: &'e [Arg],
+    set: bool,
+) -> Option<Update<'e>> {
+    Some(match name {
+        "append" => Update::Append(args),
+        "insert" if set => Update::SetInsert(args),
+        "insert" => Update::Insert(args),
+        "remove" if set => Update::SetRemove(args),
+        "remove" => Update::Remove(args),
+        "removeAll" => Update::RemoveAll(args),
+        "sort" => Update::Sort(args),
+        "formUnion" => Update::Algebra(SetOp::Union, name, args),
+        "formIntersection" => Update::Algebra(SetOp::Intersection, name, args),
+        "subtract" => Update::Algebra(SetOp::Subtracting, name, args),
+        "formSymmetricDifference" => Update::Algebra(SetOp::Symmetric, name, args),
+        "removeLast" => Update::RemoveLast(args),
+        _ => return None,
+    })
 }
 
 struct AssignPath {
@@ -2860,6 +2918,17 @@ impl<'a> FnCx<'a> {
                 let ExprKind::OptionalChain { subject, link } = expr.kind() else {
                     return Ok(());
                 };
+                if let ExprKind::MemberCall { name, args, .. } = link.kind()
+                    && let Some(changed) = self.chain_update(
+                        stmt.line(),
+                        subject,
+                        link,
+                        ChainKind::Call { name, args },
+                    )?
+                {
+                    out.push(changed);
+                    return Ok(());
+                }
                 self.chain_statements(stmt.line(), subject, link, out)
             }
             StmtKind::Expr(expr) if self.is_self_init(expr) => {
@@ -3661,6 +3730,15 @@ impl<'a> FnCx<'a> {
                 }
                 self.update(line, base, &Update::Element { index, op, value })
             }
+            ExprKind::OptionalChain { subject, link } => {
+                match self.chain_update(line, subject, link, ChainKind::Assign { op, value })? {
+                    Some(stmt) => Ok(stmt),
+                    None => Err(CheckError::at(
+                        line,
+                        "an assignment through '?.' needs an optional variable, member or dictionary entry on the left",
+                    )),
+                }
+            }
             ExprKind::IndexDefault {
                 base,
                 index,
@@ -3714,7 +3792,7 @@ impl<'a> FnCx<'a> {
                 base,
                 &Update::Default {
                     key: index,
-                    default,
+                    default: Some(default),
                     inner: update,
                 },
             ),
@@ -3906,9 +3984,14 @@ impl<'a> FnCx<'a> {
                 self.expected = Some(key);
                 let wanted = self.value(key_expr)?;
                 let wanted = self.coerce(line, key, wanted)?;
-                self.expected = Some(stored);
-                let fallback = self.value(default)?;
-                let fallback = self.coerce(line, stored, fallback)?;
+                let fallback = match default {
+                    Some(default) => {
+                        self.expected = Some(stored);
+                        let value = self.value(default)?;
+                        self.coerce(line, stored, value)?
+                    }
+                    None => TExpr::Zero(stored),
+                };
                 let held = self.temp(target_ty);
                 let key_local = self.temp(key);
                 let at = self.temp(Ty::Int);
@@ -4012,6 +4095,28 @@ impl<'a> FnCx<'a> {
                 Ok(self
                     .sigs
                     .construct(target_ty, vec![TExpr::Int(0), TExpr::Int(0), buffer]))
+            }
+            Update::EnsureKey(key_expr) => {
+                let Some((key, stored)) = self
+                    .sigs
+                    .table_parts(target_ty)
+                    .filter(|_| !self.sigs.is_set(target_ty))
+                else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("{} is not a dictionary", self.name_of(target_ty)),
+                    ));
+                };
+                self.expected = Some(key);
+                let wanted = self.value(key_expr)?;
+                let wanted = self.coerce(line, key, wanted)?;
+                Ok(table_op(
+                    DictOp::Ensure,
+                    key,
+                    stored,
+                    vec![current, wanted, TExpr::Zero(stored)],
+                    target_ty,
+                ))
             }
             Update::Algebra(op, name, args) => {
                 if !self.sigs.is_set(target_ty) {
@@ -4186,6 +4291,16 @@ impl<'a> FnCx<'a> {
         update: &Update,
     ) -> CResult<TStmt> {
         let path = self.assignable_path(line, base)?;
+        self.assign_at(line, path, name, update)
+    }
+
+    fn assign_at(
+        &mut self,
+        line: u32,
+        path: AssignPath,
+        name: &str,
+        update: &Update,
+    ) -> CResult<TStmt> {
         let container = path.value.ty();
         let (index, field) = self.member_of(line, container, name)?;
         let initializing = path.root == "self" && self.init_self.is_some();
@@ -4216,6 +4331,206 @@ impl<'a> FnCx<'a> {
             index,
             value: new_value,
         })
+    }
+
+    fn chain_root(
+        &mut self,
+        line: u32,
+        subject: &Expr,
+    ) -> CResult<Option<(TExpr, Vec<TStmt>, AssignPath)>> {
+        match subject.kind() {
+            ExprKind::Index { base, index } => {
+                let Ok(table) = self.value(base) else {
+                    return Ok(None);
+                };
+                let Some((key, stored)) = self
+                    .sigs
+                    .table_parts(table.ty())
+                    .filter(|_| !self.sigs.is_set(table.ty()))
+                else {
+                    return Ok(None);
+                };
+                self.expected = Some(key);
+                let wanted = self.value(index)?;
+                let wanted = self.coerce(line, key, wanted)?;
+                let guard = compare(
+                    BinOp::Ge,
+                    table_op(
+                        DictOp::Find,
+                        key,
+                        stored,
+                        vec![table, wanted.clone()],
+                        Ty::Int,
+                    ),
+                    TExpr::Int(0),
+                );
+                let mut prelude = self.update_stmts(line, base, &Update::EnsureKey(index))?;
+                let table = self.value(base)?;
+                let at = self.temp(Ty::Int);
+                prelude.push(TStmt::Let {
+                    local: at,
+                    init: table_op(
+                        DictOp::Find,
+                        key,
+                        stored,
+                        vec![table.clone(), wanted],
+                        Ty::Int,
+                    ),
+                });
+                let value = table_op(
+                    DictOp::Value,
+                    key,
+                    stored,
+                    vec![table, local(at, Ty::Int)],
+                    stored,
+                );
+                Ok(Some((
+                    guard,
+                    prelude,
+                    AssignPath {
+                        value,
+                        root: "a dictionary entry".to_string(),
+                        root_mutable: true,
+                        crossed_class: stored.is_class(),
+                    },
+                )))
+            }
+            ExprKind::Ident(_) | ExprKind::Member { .. } => {
+                let path = self.assignable_path(line, subject)?;
+                let Some(inner) = self.sigs.unwrapped(path.value.ty()) else {
+                    return Ok(None);
+                };
+                let guard = compare(
+                    BinOp::Ne,
+                    TExpr::Field {
+                        base: Box::new(path.value.clone()),
+                        index: 0,
+                        ty: Ty::Int,
+                    },
+                    TExpr::Int(NONE_CASE as i64),
+                );
+                let value = TExpr::Field {
+                    base: Box::new(path.value),
+                    index: 1,
+                    ty: inner,
+                };
+                Ok(Some((
+                    guard,
+                    Vec::new(),
+                    AssignPath {
+                        value,
+                        root: path.root,
+                        root_mutable: path.root_mutable,
+                        crossed_class: path.crossed_class,
+                    },
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn chain_update(
+        &mut self,
+        line: u32,
+        subject: &Expr,
+        link: &Expr,
+        kind: ChainKind,
+    ) -> CResult<Option<TStmt>> {
+        let mut names = Vec::new();
+        let call = match &kind {
+            ChainKind::Assign { .. } => {
+                if !chain_names(link, &mut names) || names.is_empty() {
+                    return Ok(None);
+                }
+                None
+            }
+            ChainKind::Call { name, args } => {
+                let ExprKind::MemberCall { base, .. } = link.kind() else {
+                    return Ok(None);
+                };
+                if !collection_mutator(name) || !chain_names(base, &mut names) {
+                    return Ok(None);
+                }
+                Some((*name, *args))
+            }
+        };
+        if names.is_empty() {
+            let (Some((name, args)), ExprKind::Index { base, index }) = (call, subject.kind())
+            else {
+                return Ok(None);
+            };
+            let Ok(table) = self.value(base) else {
+                return Ok(None);
+            };
+            let Some((key, stored)) = self
+                .sigs
+                .table_parts(table.ty())
+                .filter(|_| !self.sigs.is_set(table.ty()))
+            else {
+                return Ok(None);
+            };
+            let set = self.sigs.is_set(stored);
+            let Some(update) = collection_statement_update(name, args, set) else {
+                return Ok(None);
+            };
+            self.expected = Some(key);
+            let wanted = self.value(index)?;
+            let wanted = self.coerce(line, key, wanted)?;
+            let guard = compare(
+                BinOp::Ge,
+                table_op(DictOp::Find, key, stored, vec![table, wanted], Ty::Int),
+                TExpr::Int(0),
+            );
+            let changed = self.update_stmts(
+                line,
+                base,
+                &Update::Default {
+                    key: index,
+                    default: None,
+                    inner: &update,
+                },
+            )?;
+            return Ok(Some(TStmt::If {
+                cond: guard,
+                then_body: changed,
+                else_body: Vec::new(),
+            }));
+        }
+        let Some((guard, mut body, mut path)) = self.chain_root(line, subject)? else {
+            return Ok(None);
+        };
+        let Some((last, hops)) = names.split_last() else {
+            return Ok(None);
+        };
+        for name in hops {
+            path = self.hop(line, path, name)?;
+        }
+        let changed = match (kind, call) {
+            (ChainKind::Assign { op, value }, _) => {
+                self.assign_at(line, path, last, &Update::Assign { op, value })?
+            }
+            (ChainKind::Call { .. }, Some((name, args))) => {
+                let (_, field) = self.member_of(line, path.value.ty(), last)?;
+                let field_ty = field.ty();
+                let set = self.sigs.is_set(field_ty);
+                let is_collection = self.sigs.array_element(field_ty).is_some()
+                    || self.sigs.table_parts(field_ty).is_some();
+                let Some(update) = collection_statement_update(name, args, set) else {
+                    return Ok(None);
+                };
+                if !is_collection {
+                    return Ok(None);
+                }
+                self.assign_at(line, path, last, &update)?
+            }
+            _ => return Ok(None),
+        };
+        body.push(changed);
+        Ok(Some(TStmt::If {
+            cond: guard,
+            then_body: body,
+            else_body: Vec::new(),
+        }))
     }
 
     fn assignable_path(&mut self, line: u32, expr: &Expr) -> CResult<AssignPath> {

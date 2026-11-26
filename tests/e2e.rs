@@ -6548,3 +6548,57 @@ fn tuple_misuse_is_rejected_with_a_message() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_member_of_a_dictionary_entry_is_assigned_through_an_optional_chain() {
+    assert_eq!(
+        run(
+            "struct Stats {\n  var count: Int\n  var name: String\n}\nclass Counter {\n  var n: Int\n}\nstruct Outer {\n  var inner: Stats\n}\nfunc main() {\n  var d = [\"a\": Stats(count: 1, name: \"x\")]\n  d[\"a\"]?.count += 5\n  d[\"a\"]?.name = \"renamed\"\n  d[\"missing\"]?.count = 99\n  print(d[\"a\"]?.count ?? -1)\n  print(d[\"a\"]?.name ?? \"\")\n  print(d.count)\n  let copy = d\n  d[\"a\"]?.count = 0\n  print(copy[\"a\"]?.count ?? -1)\n  var cs = [1: Counter(n: 1)]\n  cs[1]?.n += 10\n  cs[2]?.n = 5\n  print(cs[1]?.n ?? 0)\n  var os = [\"k\": Outer(inner: Stats(count: 0, name: \"i\"))]\n  os[\"k\"]?.inner.count = 7\n  print(os[\"k\"]?.inner.count ?? 0)\n}"
+        ),
+        "6\nrenamed\n1\n6\n11\n7\n"
+    );
+}
+
+#[test]
+fn a_collection_is_changed_through_an_optional_chain_only_when_the_entry_exists() {
+    assert_eq!(
+        run(
+            "struct Team {\n  var members: [String]\n}\nfunc main() {\n  var groups = [\"a\": [1]]\n  groups[\"a\"]?.append(2)\n  groups[\"b\"]?.append(3)\n  print(groups[\"a\"]?.count ?? 0)\n  print(groups[\"b\"] == nil)\n  groups[\"a\"]?.removeLast()\n  groups[\"a\"]?.insert(7, at: 0)\n  print(groups[\"a\"]?[0] ?? 0)\n  var teams = [\"x\": Team(members: [\"p\"])]\n  teams[\"x\"]?.members.append(\"q\")\n  teams[\"y\"]?.members.append(\"z\")\n  print(teams[\"x\"]?.members.count ?? 0)\n  print(teams.count)\n}"
+        ),
+        "2\ntrue\n7\n2\n1\n"
+    );
+}
+
+#[test]
+fn a_member_of_an_optional_variable_or_member_is_assigned_through_a_chain() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var items: [Int]\n}\nclass Node {\n  var value: Int\n}\nclass Holder {\n  var p: P?\n  var node: Node?\n  init() {\n    self.p = P(x: 1, items: [])\n    self.node = nil\n  }\n}\nfunc main() {\n  var maybe: P? = P(x: 1, items: [])\n  maybe?.x = 5\n  maybe?.items.append(9)\n  print(maybe?.x ?? 0)\n  print(maybe?.items.count ?? 0)\n  var none: P? = nil\n  none?.x = 3\n  print(none == nil)\n  let h = Holder()\n  h.p?.x += 10\n  h.node?.value = 4\n  print(h.p?.x ?? 0)\n  print(h.node == nil)\n  let copy = maybe\n  maybe?.x = 0\n  print(copy?.x ?? -1)\n}"
+        ),
+        "5\n1\ntrue\n11\ntrue\n5\n"
+    );
+}
+
+#[test]
+fn an_optional_chain_can_subscript_its_value() {
+    assert_eq!(
+        main_printing(
+            "let d = [\"a\": [10, 20]]\nprint(d[\"a\"]?[1] ?? -1)\nprint(d[\"z\"]?[0] ?? -1)\nlet maybe: [Int]? = [4]\nprint(maybe?[0] ?? -1)"
+        ),
+        "20\n-1\n4\n"
+    );
+}
+
+#[test]
+fn an_assignment_through_a_chain_is_checked() {
+    for (body, message) in [
+        ("var d = [1: 2]\n  d[1]?.foo = 3", "has no members"),
+        ("var x = 5\n  x?.y = 1", "an assignment through '?.'"),
+        ("let d = [\"a\": [1]]\n  d[\"a\"]?.append(1)", "constant"),
+        ("var d = [1: (1, 2)]\n  d[1]?.0 = \"s\"", "expected Int"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

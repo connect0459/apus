@@ -1082,6 +1082,7 @@ impl Parser<'_> {
                 | ExprKind::Member { .. }
                 | ExprKind::Index { .. }
                 | ExprKind::IndexDefault { .. }
+                | ExprKind::OptionalChain { .. }
         ) {
             return self
                 .fail("the left side of an assignment must be a variable, a member or an element");
@@ -1278,7 +1279,7 @@ impl Parser<'_> {
             } else if self.is_punct("?")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(Spanned::token),
-                    Some(Token::Punct(p)) if p == "."
+                    Some(Token::Punct(p)) if p == "." || p == "["
                 )
             {
                 self.pos += 1;
