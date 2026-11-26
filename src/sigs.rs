@@ -45,6 +45,8 @@ pub const ARRAY: &str = "Array";
 pub const CELL: &str = "$Cell";
 pub const CELL_DEF: usize = 4;
 pub const TUPLE_DEF: usize = 5;
+pub const WEAK_CELL_DEF: usize = 8;
+pub const UNOWNED_CELL_DEF: usize = 9;
 pub const DICTIONARY: &str = "Dictionary";
 pub const SET: &str = "Set";
 pub const DICT_COUNT: usize = 4;
@@ -115,6 +117,33 @@ fn tuple_decl(count: usize) -> StructDecl {
         })
         .collect();
     StructDecl::new(0, format!("$Tuple{count}"), fields).with_generics(generics)
+}
+
+fn weak_cell_decl() -> StructDecl {
+    StructDecl::new(
+        0,
+        "$WeakCell".to_string(),
+        vec![
+            Field::new(
+                "value".to_string(),
+                true,
+                TypeRef::new("Optional".to_string(), vec![TypeRef::from("T")]),
+            )
+            .as_weak(),
+        ],
+    )
+    .with_generics(vec!["T".to_string()])
+    .as_class()
+}
+
+fn unowned_cell_decl() -> StructDecl {
+    StructDecl::new(
+        0,
+        "$UnownedCell".to_string(),
+        vec![Field::new("value".to_string(), false, TypeRef::from("T")).as_unowned()],
+    )
+    .with_generics(vec!["T".to_string()])
+    .as_class()
 }
 
 fn cell_decl() -> StructDecl {
@@ -529,6 +558,8 @@ impl Signatures {
         for count in 2..=4 {
             sigs.register_struct_def(&tuple_decl(count))?;
         }
+        sigs.register_struct_def(&weak_cell_decl())?;
+        sigs.register_struct_def(&unowned_cell_decl())?;
         for decl in decls {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
@@ -1901,9 +1932,9 @@ impl Signatures {
                 ));
             }
             if field.is_weak() {
-                let holds_class = self
-                    .unwrapped(ty)
-                    .is_some_and(|inner| matches!(inner, Ty::Class(_)));
+                let holds_class = self.unwrapped(ty).is_some_and(|inner| {
+                    matches!(inner, Ty::Class(_) | Ty::Param(_) | Ty::Assoc(_))
+                });
                 if !holds_class || !field.is_mutable() {
                     return Err(CheckError::at(
                         at,
@@ -1915,7 +1946,7 @@ impl Signatures {
                     ));
                 }
             }
-            if field.is_unowned() && !ty.is_class() {
+            if field.is_unowned() && !ty.is_class() && !matches!(ty, Ty::Param(_) | Ty::Assoc(_)) {
                 return Err(CheckError::at(
                     at,
                     format!(
@@ -2456,6 +2487,20 @@ impl Signatures {
             (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => Some(args),
             _ => None,
         }
+    }
+
+    pub fn weak_cell_of(&self, class: Ty) -> Ty {
+        let id = self
+            .instantiate_struct(WEAK_CELL_DEF, vec![class], &[], 0)
+            .unwrap_or(StructId::new(0));
+        self.struct_ty(WEAK_CELL_DEF, id)
+    }
+
+    pub fn unowned_cell_of(&self, class: Ty) -> Ty {
+        let id = self
+            .instantiate_struct(UNOWNED_CELL_DEF, vec![class], &[], 0)
+            .unwrap_or(StructId::new(0));
+        self.struct_ty(UNOWNED_CELL_DEF, id)
     }
 
     pub fn cell_of(&self, ty: Ty) -> Ty {

@@ -4,6 +4,13 @@ use crate::sigs::Signatures;
 use crate::tir::{HEADER_SLOTS, LocalHook, LocalId, TExpr, TFunc, TStmt};
 use crate::types::Ty;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvKind {
+    Strong,
+    Weak,
+    Unowned,
+}
+
 struct Cell {
     holder: LocalId,
     value: Ty,
@@ -133,7 +140,7 @@ impl LocalHook for Lowering<'_> {
 pub fn lower(
     func: &TFunc,
     celled: &[LocalId],
-    environment: &[(LocalId, usize)],
+    environment: &[(LocalId, usize, EnvKind)],
     sigs: &Signatures,
 ) -> TFunc {
     if celled.is_empty() && environment.is_empty() {
@@ -173,14 +180,19 @@ pub fn lower(
         }
     }
     let mut captured = HashMap::new();
-    for (local, index) in environment {
+    for (local, index, kind) in environment {
         let value = locals[local.index()];
+        let cell = match kind {
+            EnvKind::Strong => sigs.cell_of(value),
+            EnvKind::Weak => sigs.weak_cell_of(sigs.unwrapped(value).unwrap_or(value)),
+            EnvKind::Unowned => sigs.unowned_cell_of(value),
+        };
         captured.insert(
             *local,
             Environment {
                 index: *index,
                 value,
-                cell: sigs.cell_of(value),
+                cell,
             },
         );
     }

@@ -813,8 +813,36 @@ impl ClosureParam {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureKind {
+    Strong,
+    Weak,
+    Unowned,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureEntry {
+    name: String,
+    kind: CaptureKind,
+}
+
+impl CaptureEntry {
+    pub fn new(name: String, kind: CaptureKind) -> Self {
+        Self { name, kind }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> CaptureKind {
+        self.kind
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClosureExpr {
+    captures: Vec<CaptureEntry>,
     params: Option<Vec<ClosureParam>>,
     ret: Option<TypeRef>,
     body: Vec<Stmt>,
@@ -822,7 +850,21 @@ pub struct ClosureExpr {
 
 impl ClosureExpr {
     pub fn new(params: Option<Vec<ClosureParam>>, ret: Option<TypeRef>, body: Vec<Stmt>) -> Self {
-        Self { params, ret, body }
+        Self {
+            captures: Vec::new(),
+            params,
+            ret,
+            body,
+        }
+    }
+
+    pub fn with_captures(mut self, captures: Vec<CaptureEntry>) -> Self {
+        self.captures = captures;
+        self
+    }
+
+    pub fn captures(&self) -> &[CaptureEntry] {
+        &self.captures
     }
 
     pub fn params(&self) -> Option<&[ClosureParam]> {

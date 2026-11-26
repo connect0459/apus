@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{
-    Arg, BinOp, CaseLabel, ClosureExpr, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind,
-    SwitchCase, TypeRef, UnaryOp,
+    Arg, BinOp, CaptureKind, CaseLabel, ClosureExpr, Expr, ExprKind, FuncDecl, Pattern, Stmt,
+    StmtKind, SwitchCase, TypeRef, UnaryOp,
 };
+use crate::capture::EnvKind;
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
     ARRAY, ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, DICTIONARY,
@@ -2336,7 +2337,7 @@ struct FnCx<'a> {
     owner: String,
     counter: Rc<Cell<usize>>,
     captured: Vec<LocalId>,
-    environment: Vec<(LocalId, usize)>,
+    environment: Vec<(LocalId, usize, EnvKind)>,
     labels: HashMap<LocalId, Vec<Option<String>>>,
 }
 
@@ -5365,6 +5366,7 @@ impl<'a> FnCx<'a> {
         parameters: &[(String, Ty)],
         ret: Ty,
         self_name: Option<(&str, Ty)>,
+        listed: &[(String, EnvKind)],
         body: impl FnOnce(&mut FnCx<'a>) -> CResult<Vec<TStmt>>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
@@ -5375,6 +5377,11 @@ impl<'a> FnCx<'a> {
             cx.declare(line, param, *ty, false)?;
         }
         let mut candidates: Vec<String> = names.to_vec();
+        for (entry, _) in listed {
+            if !candidates.contains(entry) {
+                candidates.push(entry.clone());
+            }
+        }
         if !candidates.iter().any(|n| n == "self") {
             candidates.push("self".to_string());
         }
@@ -5389,10 +5396,53 @@ impl<'a> FnCx<'a> {
             let Ok(outer) = self.lookup(candidate, line) else {
                 continue;
             };
-            let inner = cx.declare(line, candidate, outer.ty, outer.mutable)?;
-            cx.environment.push((inner, captures.len()));
-            let already_a_cell = self.environment.iter().any(|(l, _)| *l == outer.local);
-            if !already_a_cell && !self.captured.contains(&outer.local) {
+            let requested = listed
+                .iter()
+                .find(|(entry, _)| entry == candidate)
+                .map(|(_, kind)| *kind);
+            let inherited = self
+                .environment
+                .iter()
+                .find(|(l, _, _)| *l == outer.local)
+                .map(|(_, _, kind)| *kind);
+            let kind = match (requested, inherited) {
+                (Some(kind @ (EnvKind::Weak | EnvKind::Unowned)), _) => kind,
+                (_, Some(kind)) => kind,
+                _ => EnvKind::Strong,
+            };
+            let weakened = requested.is_some_and(|k| k != EnvKind::Strong) && inherited.is_none();
+            if weakened && !matches!(outer.ty, Ty::Class(_)) {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "'{candidate}' cannot be captured weakly or unowned: it is {}, not a class instance",
+                        self.name_of(outer.ty)
+                    ),
+                ));
+            }
+            let inner_ty = if weakened && kind == EnvKind::Weak {
+                sigs.optional_of(outer.ty)?
+            } else {
+                outer.ty
+            };
+            let mutable = outer.mutable && kind == EnvKind::Strong;
+            let inner = cx.declare(line, candidate, inner_ty, mutable)?;
+            cx.environment.push((inner, captures.len(), kind));
+            if weakened {
+                let read = TExpr::Local(outer.local, outer.ty);
+                let cell = if kind == EnvKind::Weak {
+                    let wrapped = TExpr::StructInit {
+                        ty: inner_ty,
+                        args: vec![TExpr::Int(SOME_CASE as i64), read],
+                    };
+                    sigs.construct(sigs.weak_cell_of(outer.ty), vec![wrapped])
+                } else {
+                    sigs.construct(sigs.unowned_cell_of(outer.ty), vec![read])
+                };
+                captures.push(cell);
+                continue;
+            }
+            if inherited.is_none() && !self.captured.contains(&outer.local) {
                 self.captured.push(outer.local);
             }
             captures.push(TExpr::Capture(outer.local, outer.ty));
@@ -5427,6 +5477,34 @@ impl<'a> FnCx<'a> {
             ty,
             drop: String::new(),
         })
+    }
+
+    fn capture_list(&self, line: u32, closure: &ClosureExpr) -> CResult<Vec<(String, EnvKind)>> {
+        let mut listed = Vec::new();
+        for entry in closure.captures() {
+            let kind = match entry.kind() {
+                CaptureKind::Weak => EnvKind::Weak,
+                CaptureKind::Unowned => EnvKind::Unowned,
+                CaptureKind::Strong if entry.name() == "self" => EnvKind::Strong,
+                CaptureKind::Strong => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "'{}' in a capture list must be 'weak' or 'unowned': a copy of a value is not supported",
+                            entry.name()
+                        ),
+                    ));
+                }
+            };
+            if self.lookup(entry.name(), line).is_err() {
+                return Err(CheckError::at(
+                    line,
+                    format!("cannot find '{}' in scope", entry.name()),
+                ));
+            }
+            listed.push((entry.name().to_string(), kind));
+        }
+        Ok(listed)
     }
 
     fn closure_value(
@@ -5510,7 +5588,8 @@ impl<'a> FnCx<'a> {
                 "cannot infer the result of this closure: write '-> Type' after its parameters",
             ));
         }
-        self.lift(line, &names, &parameters, ret, None, move |cx| {
+        let listed = self.capture_list(line, closure)?;
+        self.lift(line, &names, &parameters, ret, None, &listed, move |cx| {
             let mut body: Vec<TStmt> = Vec::new();
             if annotated.is_none() {
                 if let Some(expr) = single {
@@ -5569,27 +5648,36 @@ impl<'a> FnCx<'a> {
         let names = crate::free::names_in(closure.body());
         let parameters = vec![(first.clone(), accumulator), (second, elem)];
         let statements = closure.body();
-        self.lift(line, &names, &parameters, accumulator, None, move |cx| {
-            let copy = LocalId::new(cx.locals.len());
-            cx.locals.push(accumulator);
-            if let Some(scope) = cx.scopes.first_mut() {
-                scope.insert(
-                    first.clone(),
-                    Binding {
-                        local: copy,
-                        ty: accumulator,
-                        mutable: true,
-                    },
-                );
-            }
-            let mut body = vec![TStmt::Let {
-                local: copy,
-                init: TExpr::Local(LocalId::new(1), accumulator),
-            }];
-            body.extend(cx.block(statements)?);
-            body.push(TStmt::Return(Some(TExpr::Local(copy, accumulator))));
-            Ok(body)
-        })
+        let listed = self.capture_list(line, closure)?;
+        self.lift(
+            line,
+            &names,
+            &parameters,
+            accumulator,
+            None,
+            &listed,
+            move |cx| {
+                let copy = LocalId::new(cx.locals.len());
+                cx.locals.push(accumulator);
+                if let Some(scope) = cx.scopes.first_mut() {
+                    scope.insert(
+                        first.clone(),
+                        Binding {
+                            local: copy,
+                            ty: accumulator,
+                            mutable: true,
+                        },
+                    );
+                }
+                let mut body = vec![TStmt::Let {
+                    local: copy,
+                    init: TExpr::Local(LocalId::new(1), accumulator),
+                }];
+                body.extend(cx.block(statements)?);
+                body.push(TStmt::Return(Some(TExpr::Local(copy, accumulator))));
+                Ok(body)
+            },
+        )
     }
 
     fn local_function(&mut self, line: u32, func: &FuncDecl) -> CResult<TStmt> {
@@ -5621,6 +5709,7 @@ impl<'a> FnCx<'a> {
             &parameters,
             ret,
             Some((func.name(), own_ty)),
+            &[],
             |cx| {
                 let statements = cx.block(body)?;
                 if ret != Ty::Void && !always_returns(body) {

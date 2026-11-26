@@ -6638,3 +6638,85 @@ fn a_default_entry_member_assignment_checks_its_use() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_weak_capture_breaks_a_cycle_between_an_object_and_its_closure() {
+    assert_eq!(
+        run(
+            "class Node {\n  var name: String\n  var onDone: (() -> Void)?\n  deinit { print(\"free \" + name) }\n  func setup() {\n    onDone = { [weak self] in\n      print(self?.name ?? \"gone\")\n    }\n  }\n}\nfunc main() {\n  let n = Node(name: \"a\", onDone: nil)\n  n.setup()\n  if let f = n.onDone { f() }\n  print(\"end\")\n}"
+        ),
+        "a\nend\nfree a\n"
+    );
+}
+
+#[test]
+fn a_weak_capture_becomes_nil_after_the_object_is_released() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(\"free\") }\n}\nfunc watch(_ b: Box) -> () -> Int {\n  return { [weak b] in\n    if let live = b { return live.n }\n    return -1\n  }\n}\nfunc main() {\n  var box: Box? = Box(n: 5)\n  var probe: (() -> Int)? = nil\n  if let b = box { probe = watch(b) }\n  if let p = probe { print(p()) }\n  box = nil\n  if let p = probe { print(p()) }\n  print(\"done\")\n}"
+        ),
+        "5\nfree\n-1\ndone\n"
+    );
+}
+
+#[test]
+fn an_unowned_capture_reads_the_object_without_keeping_it_alive() {
+    assert_eq!(
+        run(
+            "class Owner {\n  var tag: Int\n  var action: (() -> Int)?\n  deinit { print(\"free\") }\n  func arm() {\n    action = { [unowned self] in self.tag * 2 }\n  }\n}\nfunc main() {\n  let o = Owner(tag: 21, action: nil)\n  o.arm()\n  if let a = o.action { print(a()) }\n  print(\"end\")\n}"
+        ),
+        "42\nend\nfree\n"
+    );
+}
+
+#[test]
+fn a_nested_closure_keeps_the_weak_reference_of_its_parent() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(\"free\") }\n}\nfunc twice(_ f: () -> Int) -> Int { return f() + f() }\nfunc main() {\n  var box: Box? = Box(n: 4)\n  if let b = box {\n    let sum = twice { [weak b] in\n      twice { b?.n ?? 0 }\n    }\n    print(sum)\n  }\n  box = nil\n  print(\"done\")\n}"
+        ),
+        "16\nfree\ndone\n"
+    );
+}
+
+#[test]
+fn creating_closures_with_weak_captures_in_a_loop_does_not_leak() {
+    let source = "class Box {\n  var n: Int\n}\nfunc main() {\n  var total = 0\n  var i = 0\n  while i < 200000 {\n    let b = Box(n: i)\n    let f = { [weak b] in b?.n ?? 0 }\n    let g = { [unowned b] in b.n }\n    total += f() + g()\n    i += 1\n  }\n  print(total)\n}";
+    assert_eq!(run(source), "39999800000\n");
+}
+
+#[test]
+fn a_capture_list_is_checked() {
+    let class = "class C {\n  var v: Int\n}\n";
+    for (prelude, body, message) in [
+        (
+            "",
+            "var n = 1\n  let f = { [weak n] in n }",
+            "cannot be captured weakly or unowned",
+        ),
+        (
+            "",
+            "var n = 1\n  let f = { [n] in n }",
+            "must be 'weak' or 'unowned'",
+        ),
+        (
+            "",
+            "let f = { [weak ghost] in 1 }",
+            "cannot find 'ghost' in scope",
+        ),
+        (
+            class,
+            "let c = C(v: 1)\n  let f: () -> Void = { [weak c] in\n    c = nil\n  }",
+            "constant",
+        ),
+        (
+            class,
+            "let c = C(v: 1)\n  let f = { [weak c] in c.v }",
+            "no members",
+        ),
+    ] {
+        let source = format!("{prelude}func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

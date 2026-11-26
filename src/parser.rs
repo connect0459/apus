@@ -1474,8 +1474,14 @@ impl Parser<'_> {
         parsed
     }
 
-    fn closure_signature(&mut self) -> Option<(Vec<ClosureParam>, Option<TypeRef>)> {
+    fn closure_signature(
+        &mut self,
+        allow_empty: bool,
+    ) -> Option<(Vec<ClosureParam>, Option<TypeRef>)> {
         let start = self.pos;
+        if allow_empty && self.eat_keyword("in") {
+            return Some((Vec::new(), None));
+        }
         let parsed = self.try_closure_signature();
         if parsed.is_none() {
             self.pos = start;
@@ -1517,9 +1523,51 @@ impl Parser<'_> {
         self.eat_keyword("in").then_some((params, ret))
     }
 
+    fn capture_list(&mut self) -> Option<Vec<CaptureEntry>> {
+        let start = self.pos;
+        let parsed = self.try_capture_list();
+        if parsed.is_none() {
+            self.pos = start;
+        }
+        parsed
+    }
+
+    fn try_capture_list(&mut self) -> Option<Vec<CaptureEntry>> {
+        if !self.eat_punct("[") {
+            return None;
+        }
+        let mut entries = Vec::new();
+        loop {
+            let kind = if self.eat_keyword("weak") {
+                CaptureKind::Weak
+            } else if self.eat_keyword("unowned") {
+                CaptureKind::Unowned
+            } else {
+                CaptureKind::Strong
+            };
+            let name = match self.peek() {
+                Some(Token::Ident(text)) => text.clone(),
+                _ => return None,
+            };
+            self.pos += 1;
+            entries.push(CaptureEntry::new(name, kind));
+            if !self.eat_punct(",") {
+                break;
+            }
+        }
+        if !self.eat_punct("]") {
+            return None;
+        }
+        let ahead_is_signature =
+            self.is_keyword("in") || self.is_punct("(") || self.peek_name().is_some();
+        ahead_is_signature.then_some(entries)
+    }
+
     fn closure_expr(&mut self, line: u32) -> PResult<Expr> {
         self.expect_punct("{")?;
-        let signature = self.closure_signature();
+        let captures = self.capture_list().unwrap_or_default();
+        let had_captures = !captures.is_empty();
+        let signature = self.closure_signature(had_captures);
         self.enter()?;
         self.depth += 1;
         self.check_depth(0)?;
@@ -1535,7 +1583,9 @@ impl Parser<'_> {
         };
         Ok(Expr::new(
             line,
-            ExprKind::Closure(Box::new(ClosureExpr::new(params, ret, body))),
+            ExprKind::Closure(Box::new(
+                ClosureExpr::new(params, ret, body).with_captures(captures),
+            )),
         ))
     }
 
