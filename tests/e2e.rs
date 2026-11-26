@@ -5031,3 +5031,12 @@ fn a_generic_function_can_append_to_an_array_of_its_type_parameter() {
         "9\n3\nq\n"
     );
 }
+
+#[test]
+fn only_a_variable_or_a_member_can_be_the_array_that_is_changed() {
+    assert!(build_error("func main() { var g = [[1]]\n g[0][0] = 2 }").contains("can be changed"));
+    assert!(build_error("func main() { [1][0] = 2 }").contains("can be changed"));
+    assert!(build_error("func main() { var a = [1]\n a.append(x: 2) }").contains("append"));
+    assert!(build_error("func main() { var a = [1]\n a.append(1, 2) }").contains("append"));
+    assert!(build_error("func main() { var n = 5\n n[0] = 1 }").contains("not an array"));
+}
