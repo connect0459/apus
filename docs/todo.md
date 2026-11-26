@@ -77,7 +77,8 @@
   - [x] tuples of two to four elements (`(Int, String)`, `(1, "a")`, `t.0`, `let (a, b) = t`, `for (a, b) in pairs`), `zip`, `enumerated()` and `Dictionary(uniqueKeysWithValues:)` (see the tuple decision)
   - [x] tuple labels (`(x: Int, y: Int)`, `t.x`, `(x: 1, y: 2)`) with conversion between labeled and unlabeled tuples where the labels agree, `enumerated()` yielding `(offset:, element:)`, destructuring assignment (`(a, b) = (b, a)`, `(p.x, p.y) = (p.y, p.x)`), tuple patterns in `switch` (`case (0, _)`, `case (let a, let b)`, ranges and strings, several alternatives), and printing and `String(...)` of a tuple (see the tuple labels decision)
   - [x] `if case` with an enum, tuple, value or range pattern, `else` and `else if case` (see the if case decision)
-  - [ ] `guard case`, `while case`, several conditions in one `if case`, the `case let .circle(r)` form, `zip` of sequences other than arrays, `let` bindings inside nested tuple patterns, `where` clauses, a one-element or five-element tuple
+  - [x] condition lists in `if`, `while` and `guard`: Bool expressions, `let`/`var` bindings of optionals and `case` patterns, mixed and separated by commas, so `guard case`, `while case` and several conditions in one `if case` work (see the condition list decision)
+  - [ ] the `case let .circle(r)` form, `zip` of sequences other than arrays, `let` bindings inside nested tuple patterns, `where` clauses, a one-element or five-element tuple
   - [x] a member of a struct or class value through a default entry: `d[k, default: P()].x = 1`, `.x += 1`, `.inner.x = 3`, `.tags.append("t")` (see the default entry member decision)
   - [x] optional-chain assignment and mutation: `d[k]?.member = x`, `d[k]?.a.b += 1`, `d[k]?.items.append(x)`, `d[k]?.append(x)`, the same on an optional variable or member (`maybe?.x = 5`, `holder.p?.x += 10`), and the optional subscript `d[k]?[i]` (see the optional chain update decision)
 - [ ] M11: closures
@@ -679,3 +680,10 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `if case <pattern> = <subject> { ... } else { ... }` (`StmtKind::IfCase`) takes the same pattern as a `case` of a `switch`: an enum case with bindings (`.circle(let r)`, `.some(let v)`, `.none`), a tuple pattern (`(0, let y)`), or a literal or range. The parser shares the case-label code with the `switch`. The checker lowers it through `switch_stmt` with two cases, the pattern with the `then` body and a `default` with the `else` body (empty when there is none), so the exhaustiveness, binding, tuple and value rules are the ones of the switch. The result is wrapped in an `if true` block for the scope of the subject, and it is not registered as a target of `break`: a `break` or a `continue` inside the body leaves the enclosing loop, as in Swift, and `else if case` chains. The names bound by the pattern are visible only in the `then` body.
 
 **Consequences.** `if case` costs what a switch costs (one comparison chain). Only one pattern per statement is supported: `if case .a = x, cond`, `guard case`, `while case` and the `case let .circle(r)` spelling are not.
+
+### Condition lists are evaluated in order and bind names for what follows (2026-11-27)
+
+**Decision.** `if`, `while` and `guard` take a comma-separated list of conditions (`StmtKind::IfConds`, `WhileConds`, `GuardConds` with `Vec<Condition>`). A `Condition` is a Bool expression, a `let` or `var` binding of an optional, or `case <pattern> = <subject>` with the patterns of a `switch`. The conditions run left to right and stop at the first that fails; a name bound by one is visible in the later conditions and in the `then` body (for `guard`, in the rest of the scope, and the `else` body must leave the scope). A `while` evaluates the whole list again on every iteration, and a label, `break` and `continue` apply to the loop as before.
+
+**Consequences.** A failed condition costs no more than the comparisons before it. The `case let .circle(r)` spelling, `where` clauses and nested tuple patterns are still unsupported.
+
