@@ -42,6 +42,8 @@ const HEADER_FIELDS: [&str; 4] = ["$class", "$rc", "$drop", "$unowned"];
 
 pub const BOX: &str = "$Box";
 pub const ARRAY: &str = "Array";
+pub const EQUAL: &str = "$equal";
+pub const CONTAINS: &str = "$contains";
 pub const ARRAY_COUNT: usize = 4;
 pub const ARRAY_CAPACITY: usize = 5;
 pub const ARRAY_BUFFER: usize = 6;
@@ -882,6 +884,9 @@ impl Signatures {
                     || self
                         .unwrapped(ty)
                         .is_some_and(|inner| self.conforms(inner, EQUATABLE))
+                    || self
+                        .array_element(ty)
+                        .is_some_and(|inner| self.conforms(inner, EQUATABLE))
             }
             COMPARABLE => matches!(ty, Ty::Int | Ty::Str | Ty::Char),
             _ => self.declared_conformances(ty).contains(&protocol),
@@ -946,6 +951,9 @@ impl Signatures {
     fn equatable_value(&self, ty: Ty) -> bool {
         match ty {
             Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_) => true,
+            Ty::Class(_) => self
+                .array_element(ty)
+                .is_some_and(|inner| self.equatable_value(inner)),
             Ty::Struct(_) => match self.unwrapped(ty) {
                 Some(inner) => self.equatable_value(inner),
                 None => self.enum_of(ty).is_none() && self.equality_leaves(0, ty).is_ok(),

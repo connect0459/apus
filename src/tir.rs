@@ -64,6 +64,9 @@ pub enum ArrayOp {
     Get,
     Append,
     Set,
+    Insert,
+    RemoveLast,
+    Concat,
 }
 
 impl ArrayOp {
@@ -73,11 +76,14 @@ impl ArrayOp {
             ArrayOp::Get => 2,
             ArrayOp::Append => 3,
             ArrayOp::Set => 4,
+            ArrayOp::Insert => 5,
+            ArrayOp::RemoveLast => 6,
+            ArrayOp::Concat => 7,
         }
     }
 
     pub fn allocates(self) -> bool {
-        matches!(self, ArrayOp::Append | ArrayOp::Set)
+        !matches!(self, ArrayOp::Buffer | ArrayOp::Get)
     }
 }
 

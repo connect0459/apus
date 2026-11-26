@@ -5072,3 +5072,117 @@ fn arrays_of_structs_built_and_dropped_in_a_loop_keep_their_contents() {
     let source = "struct P {\n  var s: String\n  var n: Int\n}\nfunc main() {\n  var total = 0\n  var i = 0\n  while i < 100000 {\n    var a = [P(s: String(i), n: 1)]\n    a.append(P(s: \"k\", n: 2))\n    let b = a\n    a[0] = P(s: \"z\", n: 3)\n    total += b[0].s.count + a[0].n + b[1].n\n    i += 1\n  }\n  print(total)\n}";
     assert_eq!(run(source), "988890\n");
 }
+
+#[test]
+fn first_and_last_are_optionals_that_are_nil_for_an_empty_array() {
+    assert_eq!(
+        main_printing(
+            "let a = [4, 5, 6]\nprint(a.first ?? -1)\nprint(a.last ?? -1)\nlet e: [Int] = []\nprint(e.first ?? -1)\nprint(e.last == nil)\nlet s = [\"x\", \"y\"]\nif let l = s.last { print(l) }"
+        ),
+        "4\n6\n-1\ntrue\ny\n"
+    );
+}
+
+#[test]
+fn removing_the_last_element_shrinks_the_array_and_traps_when_empty() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 2, 3]\nlet b = a\na.removeLast()\nprint(a.count)\nprint(b.count)\nprint(a.last ?? 0)\na.removeLast()\na.removeLast()\nprint(a.isEmpty)"
+        ),
+        "2\n3\n2\ntrue\n"
+    );
+    run_expecting_a_crash("func main() {\n  var a: [Int] = []\n  a.removeLast()\n}");
+}
+
+#[test]
+fn removed_class_elements_run_deinit() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  var a = [Box(n: 1), Box(n: 2)]\n  a.removeLast()\n  print(0)\n}"
+        ),
+        "2\n0\n1\n"
+    );
+}
+
+#[test]
+fn insert_places_an_element_at_a_position_and_shifts_the_rest() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 3]\na.insert(2, at: 1)\na.insert(0, at: 0)\na.insert(4, at: 4)\nvar t = 0\nfor x in a { t = t * 10 + x }\nprint(t)\nprint(a.count)"
+        ),
+        "1234\n5\n"
+    );
+    run_expecting_a_crash("func main() {\n  var a = [1]\n  a.insert(2, at: 3)\n}");
+}
+
+#[test]
+fn insert_works_for_structs_strings_and_a_shared_array() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var y: Int\n}\nfunc main() {\n  var ps = [P(x: 1, y: 1), P(x: 3, y: 3)]\n  let old = ps\n  ps.insert(P(x: 2, y: 2), at: 1)\n  print(ps[1].x)\n  print(old.count)\n  var ss = [\"a\"]\n  ss.insert(\"b\", at: 0)\n  print(ss[0] + ss[1])\n}"
+        ),
+        "2\n2\nba\n"
+    );
+}
+
+#[test]
+fn arrays_are_concatenated_with_plus_and_plus_equals() {
+    assert_eq!(
+        main_printing(
+            "let a = [1, 2]\nlet b = a + [3]\nvar c = b + []\nc += a\nprint(b.count)\nprint(c.count)\nprint(c[4])\nprint(a.count)\nlet s = [\"x\"] + [\"y\", \"z\"]\nprint(s[2])"
+        ),
+        "3\n5\n2\n2\nz\n"
+    );
+}
+
+#[test]
+fn arrays_compare_by_length_and_elements() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nfunc main() {\n  print([1, 2] == [1, 2])\n  print([1, 2] != [1, 3])\n  print([1] == [1, 2])\n  print([\"a\"] == [\"a\"])\n  print([[1], [2]] == [[1], [2]])\n  let e: [Int] = []\n  print(e == [])\n  print([P(x: 1)] == [P(x: 1)])\n  let n: [Int?] = [nil]\n  print(n == [nil])\n}"
+        ),
+        "true\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn contains_searches_by_equality() {
+    assert_eq!(
+        main_printing(
+            "let a = [1, 2, 3]\nprint(a.contains(2))\nprint(a.contains(5))\nlet s = [\"x\", \"y\"]\nprint(s.contains(\"y\"))\nlet n: [Int?] = [1, nil]\nprint(n.contains(nil))\nlet g = [[1], [2]]\nprint(g.contains([2]))"
+        ),
+        "true\nfalse\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn array_equality_and_contains_work_in_generic_code() {
+    assert_eq!(
+        run(
+            "func has<T: Equatable>(_ xs: [T], _ x: T) -> Bool { return xs.contains(x) }\nfunc same<T: Equatable>(_ a: [T], _ b: [T]) -> Bool { return a == b }\nfunc main() {\n  print(has([1, 2], 2))\n  print(has([\"a\"], \"b\"))\n  print(same([1], [1]))\n  print(same([[1]], [[2]]))\n}"
+        ),
+        "true\nfalse\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn the_new_array_members_reject_misuse() {
+    assert!(
+        build_error("class C {}\nfunc main() { let a = [C()]\n print(a.contains(C())) }")
+            .contains("equality")
+    );
+    assert!(build_error("func main() { let a = [1]\n print(a.contains()) }").contains("contains"));
+    assert!(
+        build_error("func main() { let a = [1]\n print(a.contains(x: 1)) }").contains("contains")
+    );
+    assert!(
+        build_error("func main() { var a = [1]\n let b = a.removeLast() }").contains("statement")
+    );
+    assert!(build_error("func main() { var a = [1]\n a.removeLast(1) }").contains("removeLast"));
+    assert!(build_error("func main() { var a = [1]\n a.insert(1) }").contains("insert"));
+    assert!(build_error("func main() { var a = [1]\n a.insert(1, 0) }").contains("insert"));
+    assert!(build_error("func main() { let a = [1]\n print(a.sorted()) }").contains("no method"));
+    assert!(build_error("func main() { let a = [1] + [\"x\"] }").contains("expected"));
+    assert!(build_error("func main() { print([1] == [\"x\"]) }").contains("expected"));
+    assert!(build_error("func main() { let a = [1]\n a.first = 2 }").contains("no member"));
+}

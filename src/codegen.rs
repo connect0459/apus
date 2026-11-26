@@ -192,8 +192,8 @@ impl Backend {
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
         for name in [
-            "printf", "puts", "malloc", "realloc", "free", "fflush", "write", "memcpy", "memcmp",
-            "memmem", "snprintf",
+            "printf", "puts", "malloc", "realloc", "memmove", "free", "fflush", "write", "memcpy",
+            "memcmp", "memmem", "snprintf",
         ] {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
@@ -776,6 +776,79 @@ impl Emitter<'_, '_> {
                     .store(flags, next, array, field_offset(ARRAY_COUNT));
                 Ok(array)
             }
+            ArrayOp::Insert => {
+                let count0 = self.builder.ins().load(
+                    types::I64,
+                    flags,
+                    values[0],
+                    field_offset(ARRAY_COUNT),
+                );
+                let outside =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::UnsignedGreaterThan, values[1], count0);
+                self.builder.ins().trapnz(outside, INDEX_OUT_OF_RANGE);
+                let value = self.detach(values[2], elem)?;
+                let array = self.unique_array(values[0], elem, 1)?;
+                let count =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+                let buffer =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+                let from = self.builder.ins().imul_imm_s(values[1], stride);
+                let source = self.builder.ins().iadd(buffer, from);
+                let target = self.builder.ins().iadd_imm_s(source, stride);
+                let moved = self.builder.ins().isub(count, values[1]);
+                let bytes = self.builder.ins().imul_imm_s(moved, stride);
+                let mut sig = Signature::new(self.call_conv);
+                for _ in 0..3 {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                let memmove = self.import_func("memmove", sig, false);
+                self.builder.ins().call(memmove, &[target, source, bytes]);
+                self.put_element(source, 0, value, elem)?;
+                let next = self.builder.ins().iadd_imm_s(count, 1);
+                self.builder
+                    .ins()
+                    .store(flags, next, array, field_offset(ARRAY_COUNT));
+                Ok(array)
+            }
+            ArrayOp::RemoveLast => {
+                let count0 = self.builder.ins().load(
+                    types::I64,
+                    flags,
+                    values[0],
+                    field_offset(ARRAY_COUNT),
+                );
+                self.builder.ins().trapz(count0, INDEX_OUT_OF_RANGE);
+                let array = self.unique_array(values[0], elem, 0)?;
+                let count =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_COUNT));
+                let last = self.builder.ins().iadd_imm_s(count, -1);
+                self.builder
+                    .ins()
+                    .store(flags, last, array, field_offset(ARRAY_COUNT));
+                let buffer =
+                    self.builder
+                        .ins()
+                        .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+                let at = self.builder.ins().imul_imm_s(last, stride);
+                let address = self.builder.ins().iadd(buffer, at);
+                if inline {
+                    self.release(address, elem)?;
+                } else {
+                    let clif = self.element_type(elem)?;
+                    let old = self.builder.ins().load(clif, flags, address, 0);
+                    self.release(old, elem)?;
+                }
+                Ok(array)
+            }
+            ArrayOp::Concat => self.concat_arrays(values[0], values[1], elem, stride),
             ArrayOp::Set => {
                 self.element_address(values[0], values[1], stride);
                 let value = self.detach(values[2], elem)?;
@@ -964,6 +1037,88 @@ impl Emitter<'_, '_> {
             .builder
             .ins()
             .load(types::I64, flags, array, field_offset(ARRAY_BUFFER));
+        self.copy_elements(source, target, count, elem, stride)?;
+        self.builder.ins().jump(merge, &[BlockArg::Value(fresh)]);
+
+        self.builder.switch_to_block(merge);
+        Ok(self.builder.block_params(merge)[0])
+    }
+
+    fn concat_arrays(
+        &mut self,
+        left: Value,
+        right: Value,
+        elem: Ty,
+        stride: i64,
+    ) -> GResult<Value> {
+        let flags = MemFlagsData::trusted();
+        let left_count =
+            self.builder
+                .ins()
+                .load(types::I64, flags, left, field_offset(ARRAY_COUNT));
+        let right_count =
+            self.builder
+                .ins()
+                .load(types::I64, flags, right, field_offset(ARRAY_COUNT));
+        let total = self.builder.ins().iadd(left_count, right_count);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let capacity = self.builder.ins().smax(total, one);
+        let object_size = self
+            .builder
+            .ins()
+            .iconst(types::I64, i64::try_from(ARRAY_BUFFER + 1)? * ELEMENT_SIZE);
+        let fresh = self.allocate(object_size)?;
+        for slot in 0..ARRAY_COUNT {
+            let value = self
+                .builder
+                .ins()
+                .load(types::I64, flags, left, field_offset(slot));
+            self.builder
+                .ins()
+                .store(flags, value, fresh, field_offset(slot));
+        }
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        self.builder
+            .ins()
+            .store(flags, one, fresh, field_offset(RC_SLOT));
+        self.builder
+            .ins()
+            .store(flags, zero, fresh, field_offset(UNOWNED_SLOT));
+        self.builder
+            .ins()
+            .store(flags, total, fresh, field_offset(ARRAY_COUNT));
+        self.builder
+            .ins()
+            .store(flags, capacity, fresh, field_offset(ARRAY_CAPACITY));
+        let bytes = self.builder.ins().imul_imm_s(capacity, stride);
+        let target = self.allocate(bytes)?;
+        self.builder
+            .ins()
+            .store(flags, target, fresh, field_offset(ARRAY_BUFFER));
+        let left_buffer =
+            self.builder
+                .ins()
+                .load(types::I64, flags, left, field_offset(ARRAY_BUFFER));
+        let right_buffer =
+            self.builder
+                .ins()
+                .load(types::I64, flags, right, field_offset(ARRAY_BUFFER));
+        let shifted = self.builder.ins().imul_imm_s(left_count, stride);
+        let after = self.builder.ins().iadd(target, shifted);
+        self.copy_elements(left_buffer, target, left_count, elem, stride)?;
+        self.copy_elements(right_buffer, after, right_count, elem, stride)?;
+        Ok(fresh)
+    }
+
+    fn copy_elements(
+        &mut self,
+        source: Value,
+        target: Value,
+        count: Value,
+        elem: Ty,
+        stride: i64,
+    ) -> GResult<()> {
+        let flags = MemFlagsData::trusted();
         self.each_element(count, |this, index| {
             let at = this.builder.ins().imul_imm_s(index, stride);
             let from = this.builder.ins().iadd(source, at);
@@ -976,11 +1131,7 @@ impl Emitter<'_, '_> {
             this.retain(value, elem)?;
             this.builder.ins().store(flags, value, to, 0);
             Ok(())
-        })?;
-        self.builder.ins().jump(merge, &[BlockArg::Value(fresh)]);
-
-        self.builder.switch_to_block(merge);
-        Ok(self.builder.block_params(merge)[0])
+        })
     }
 
     fn grown_capacity(&mut self, needed: Value, current: Value) -> Value {

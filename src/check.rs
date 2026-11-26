@@ -6,8 +6,8 @@ use crate::ast::{
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    ARRAY_COUNT, COMPARABLE, CResult, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig, FuncSig,
-    NONE_CASE, PRINT, ParamSig, SOME_CASE, bound_includes, scope_of,
+    ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, EQUAL, EQUATABLE, EnumSig, FATAL_ERROR, FieldSig,
+    FuncSig, NONE_CASE, PRINT, ParamSig, SOME_CASE, bound_includes, scope_of,
 };
 use crate::tir::{ArrayOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -220,12 +220,12 @@ fn chain_branches(
     tail.unwrap_or_default()
 }
 
-pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> {
-    let mut cx = FnCx {
+fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
+    FnCx {
         sigs,
         scope: Vec::new(),
         expected: None,
-        ret: Ty::Bool,
+        ret,
         locals: Vec::new(),
         scopes: vec![HashMap::new()],
         init_self: None,
@@ -236,18 +236,119 @@ pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFu
         targets: Vec::new(),
         pending_label: None,
         bounds: Vec::new(),
-        name: name.clone(),
-    };
+        name: name.to_string(),
+    }
+}
+
+fn array_count(array: LocalId, ty: Ty) -> TExpr {
+    TExpr::Field {
+        base: Box::new(TExpr::Local(array, ty)),
+        index: ARRAY_COUNT,
+        ty: Ty::Int,
+    }
+}
+
+fn array_get(array: LocalId, ty: Ty, position: LocalId, elem: Ty) -> TExpr {
+    TExpr::ArrayOp {
+        op: ArrayOp::Get,
+        elem,
+        args: vec![TExpr::Local(array, ty), TExpr::Local(position, Ty::Int)],
+        ty: elem,
+    }
+}
+
+fn return_if(cond: TExpr, value: bool) -> TStmt {
+    TStmt::If {
+        cond,
+        then_body: vec![TStmt::Return(Some(TExpr::Bool(value)))],
+        else_body: Vec::new(),
+    }
+}
+
+fn step(position: LocalId) -> TStmt {
+    TStmt::Assign {
+        local: position,
+        value: TExpr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(TExpr::Local(position, Ty::Int)),
+            rhs: Box::new(TExpr::Int(1)),
+        },
+    }
+}
+
+fn each_position(array: LocalId, ty: Ty, position: LocalId, body: Vec<TStmt>) -> Vec<TStmt> {
+    vec![
+        TStmt::Let {
+            local: position,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: TExpr::Binary {
+                op: BinOp::Lt,
+                lhs: Box::new(TExpr::Local(position, Ty::Int)),
+                rhs: Box::new(array_count(array, ty)),
+            },
+            body: body.into_iter().chain([step(position)]).collect(),
+        },
+    ]
+}
+
+pub fn equality_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> {
+    let mut cx = synthetic_cx(sigs, &name, Ty::Bool);
     let left = cx.declare(0, "left", ty, false)?;
     let right = cx.declare(0, "right", ty, false)?;
-    let same = cx.equality_of(0, ty, TExpr::Local(left, ty), TExpr::Local(right, ty))?;
-    Ok(TFunc::new(
-        name,
-        2,
-        Ty::Bool,
-        cx.locals,
-        vec![TStmt::Return(Some(same))],
-    ))
+    let body = if let Some(elem) = sigs.array_element(ty) {
+        let position = cx.temp(Ty::Int);
+        let same = cx.equality_of(
+            0,
+            elem,
+            array_get(left, ty, position, elem),
+            array_get(right, ty, position, elem),
+        )?;
+        let differs = TExpr::Binary {
+            op: BinOp::Ne,
+            lhs: Box::new(array_count(left, ty)),
+            rhs: Box::new(array_count(right, ty)),
+        };
+        let mut body = vec![return_if(differs, false)];
+        body.extend(each_position(
+            left,
+            ty,
+            position,
+            vec![return_if(
+                TExpr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(same),
+                },
+                false,
+            )],
+        ));
+        body.push(TStmt::Return(Some(TExpr::Bool(true))));
+        body
+    } else {
+        let same = cx.equality_of(0, ty, TExpr::Local(left, ty), TExpr::Local(right, ty))?;
+        vec![TStmt::Return(Some(same))]
+    };
+    Ok(TFunc::new(name, 2, Ty::Bool, cx.locals, body))
+}
+
+pub fn contains_function(sigs: &Signatures, ty: Ty, name: String) -> CResult<TFunc> {
+    let elem = sigs
+        .array_element(ty)
+        .ok_or_else(|| CheckError::at(0, "internal error: contains needs an array"))?;
+    let mut cx = synthetic_cx(sigs, &name, Ty::Bool);
+    let array = cx.declare(0, "array", ty, false)?;
+    let wanted = cx.declare(0, "wanted", elem, false)?;
+    let position = cx.temp(Ty::Int);
+    let same = cx.equality_of(
+        0,
+        elem,
+        array_get(array, ty, position, elem),
+        TExpr::Local(wanted, elem),
+    )?;
+    let mut body = each_position(array, ty, position, vec![return_if(same, true)]);
+    body.push(TStmt::Return(Some(TExpr::Bool(false))));
+    Ok(TFunc::new(name, 2, Ty::Bool, cx.locals, body))
 }
 
 pub fn boxed_requirement(
@@ -339,6 +440,8 @@ enum Update<'e> {
         value: &'e Expr,
     },
     Append(&'e [Arg]),
+    Insert(&'e [Arg]),
+    RemoveLast(&'e [Arg]),
     Element {
         index: &'e Expr,
         op: Option<BinOp>,
@@ -458,6 +561,11 @@ impl FnCx<'_> {
                 op,
                 args: vec![base],
             });
+        }
+        if let Some(elem) = self.sigs.array_element(base.ty())
+            && matches!(name, "first" | "last")
+        {
+            return self.array_end(base, elem, name == "first");
         }
         if name == "isEmpty" && self.sigs.array_element(base.ty()).is_some() {
             return Ok(TExpr::Binary {
@@ -1749,6 +1857,38 @@ impl FnCx<'_> {
                     ty: target_ty,
                 })
             }
+            Update::Insert(args) => {
+                let elem = self.array_target(line, target_ty)?;
+                let usage = "insert takes a value and 'at:' with a position";
+                let [value, at] = args else {
+                    return Err(CheckError::at(line, usage));
+                };
+                if value.label().is_some() || at.label() != Some("at") {
+                    return Err(CheckError::at(line, usage));
+                }
+                self.expected = Some(elem);
+                let value = self.value(value.value())?;
+                let value = self.coerce(line, elem, value)?;
+                let position = self.int_value(at.value())?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Insert,
+                    elem,
+                    args: vec![current, position, value],
+                    ty: target_ty,
+                })
+            }
+            Update::RemoveLast(args) => {
+                let elem = self.array_target(line, target_ty)?;
+                if !args.is_empty() {
+                    return Err(CheckError::at(line, "removeLast takes no arguments"));
+                }
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::RemoveLast,
+                    elem,
+                    args: vec![current],
+                    ty: target_ty,
+                })
+            }
             Update::Element { index, op, value } => {
                 let elem = self.array_target(line, target_ty)?;
                 let position = self.int_value(index)?;
@@ -1980,6 +2120,16 @@ impl FnCx<'_> {
     ) -> CResult<TExpr> {
         match op {
             None => self.coerce(line, target_ty, rhs),
+            Some(BinOp::Add) if self.sigs.array_element(target_ty).is_some() => {
+                self.expect(line, target_ty, rhs.ty())?;
+                let elem = self.array_target(line, target_ty)?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Concat,
+                    elem,
+                    args: vec![current, rhs],
+                    ty: target_ty,
+                })
+            }
             Some(BinOp::Add) if target_ty == Ty::Str => {
                 self.expect(line, Ty::Str, rhs.ty())?;
                 Ok(TExpr::StrOp {
@@ -2114,6 +2264,88 @@ impl FnCx<'_> {
         });
         self.scopes.pop();
         result
+    }
+
+    fn array_method(
+        &mut self,
+        line: u32,
+        receiver: TExpr,
+        elem: Ty,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        match name {
+            "contains" => {
+                let [arg] = args else {
+                    return Err(CheckError::at(line, "contains takes one unlabeled value"));
+                };
+                if arg.label().is_some() {
+                    return Err(CheckError::at(line, "contains takes one unlabeled value"));
+                }
+                self.expected = Some(elem);
+                let value = self.value(arg.value())?;
+                let value = self.coerce(line, elem, value)?;
+                let ty = receiver.ty();
+                self.equality_of(line, elem, TExpr::Zero(elem), TExpr::Zero(elem))?;
+                Ok(TExpr::Call {
+                    callee: CONTAINS.to_string(),
+                    type_args: vec![ty],
+                    args: vec![receiver, value],
+                    ret: Ty::Bool,
+                })
+            }
+            "append" | "insert" | "removeLast" => Err(CheckError::at(
+                line,
+                format!("'{name}' changes the array: write it as a statement of its own"),
+            )),
+            _ => Err(CheckError::at(
+                line,
+                format!("{} has no method '{name}'", self.name_of(receiver.ty())),
+            )),
+        }
+    }
+
+    fn array_end(&mut self, array: TExpr, elem: Ty, first: bool) -> CResult<TExpr> {
+        let optional = self.sigs.optional_of(elem)?;
+        let ty = array.ty();
+        let held = self.temp(ty);
+        let position = if first {
+            TExpr::Int(0)
+        } else {
+            TExpr::Binary {
+                op: BinOp::Sub,
+                lhs: Box::new(array_count(held, ty)),
+                rhs: Box::new(TExpr::Int(1)),
+            }
+        };
+        Ok(TExpr::Select {
+            cond: Box::new(TExpr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(TExpr::Field {
+                    base: Box::new(TExpr::Bind {
+                        local: held,
+                        init: Box::new(array),
+                    }),
+                    index: ARRAY_COUNT,
+                    ty: Ty::Int,
+                }),
+                rhs: Box::new(TExpr::Int(0)),
+            }),
+            then: Box::new(self.none_of(optional)),
+            otherwise: Box::new(TExpr::StructInit {
+                ty: optional,
+                args: vec![
+                    TExpr::Int(SOME_CASE as i64),
+                    TExpr::ArrayOp {
+                        op: ArrayOp::Get,
+                        elem,
+                        args: vec![TExpr::Local(held, ty), position],
+                        ty: elem,
+                    },
+                ],
+            }),
+            ty: optional,
+        })
     }
 
     fn array_literal(&mut self, line: u32, items: &[Expr], expected: Option<Ty>) -> CResult<TExpr> {
@@ -2404,12 +2636,17 @@ impl FnCx<'_> {
             _ => None,
         };
         if let ExprKind::MemberCall { base, name, args } = expr.kind()
-            && name == "append"
+            && matches!(name.as_str(), "append" | "insert" | "removeLast")
             && self
                 .value(base)
                 .is_ok_and(|v| self.sigs.array_element(v.ty()).is_some())
         {
-            return self.update(expr.line(), base, &Update::Append(args));
+            let update = match name.as_str() {
+                "append" => Update::Append(args),
+                "insert" => Update::Insert(args),
+                _ => Update::RemoveLast(args),
+            };
+            return self.update(expr.line(), base, &update);
         }
         if let Some((base, name, args, explicit)) = member_call
             && self.enum_target(base).is_none()
@@ -2924,6 +3161,7 @@ impl FnCx<'_> {
                 let implicit = |e: &Expr| {
                     matches!(e.kind(), ExprKind::ImplicitMember { .. } | ExprKind::Str(_))
                 };
+                let literal = |e: &Expr| matches!(e.kind(), ExprKind::ArrayLiteral(_));
                 let comparing = matches!(
                     op,
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
@@ -2934,7 +3172,9 @@ impl FnCx<'_> {
                     (self.value(lhs)?, rhs)
                 } else {
                     let lhs = self.value(lhs)?;
-                    if comparing && implicit(rhs) {
+                    if (comparing && implicit(rhs))
+                        || ((comparing || *op == BinOp::Add) && literal(rhs))
+                    {
                         self.expected = Some(lhs.ty());
                     }
                     (lhs, self.value(rhs)?)
@@ -2961,6 +3201,18 @@ impl FnCx<'_> {
                 ) {
                     return self.parameter_operator(line, *op, index, lhs, rhs);
                 }
+                if *op == BinOp::Add
+                    && let Some(elem) = self.sigs.array_element(lhs.ty())
+                {
+                    self.expect(line, lhs.ty(), rhs.ty())?;
+                    let ty = lhs.ty();
+                    return Ok(TExpr::ArrayOp {
+                        op: ArrayOp::Concat,
+                        elem,
+                        args: vec![lhs, rhs],
+                        ty,
+                    });
+                }
                 if *op == BinOp::Add && lhs.ty() == Ty::Str {
                     self.expect(line, Ty::Str, rhs.ty())?;
                     return Ok(TExpr::StrOp {
@@ -2971,6 +3223,11 @@ impl FnCx<'_> {
                 self.operands(line, *op, lhs.ty(), rhs.ty())?;
                 if matches!(op, BinOp::Eq | BinOp::Ne) && lhs.ty().is_struct() {
                     return self.struct_equality(line, *op, lhs, rhs);
+                }
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && self.sigs.array_element(lhs.ty()).is_some()
+                {
+                    return self.array_equality(line, *op, lhs, rhs);
                 }
                 Ok(TExpr::Binary {
                     op: *op,
@@ -3073,6 +3330,9 @@ impl FnCx<'_> {
                     ));
                 }
                 return self.string_method(line, receiver, name, args);
+            }
+            if let Some(elem) = sigs.array_element(ty) {
+                return self.array_method(line, receiver, elem, name, args);
             }
             let requirement_call =
                 matches!(ty, Ty::Param(_)) || sigs.existential_protocol(ty).is_some();
@@ -3917,6 +4177,9 @@ impl FnCx<'_> {
                 rhs: Box::new(rhs),
             }),
             Ty::Param(index) => self.parameter_operator(line, BinOp::Eq, index, lhs, rhs),
+            _ if self.sigs.array_element(ty).is_some() => {
+                self.array_equality(line, BinOp::Eq, lhs, rhs)
+            }
             _ if self.sigs.unwrapped(ty).is_some() => {
                 self.optional_equality(line, BinOp::Eq, lhs, rhs)
             }
@@ -3928,6 +4191,27 @@ impl FnCx<'_> {
                 format!("equality is not supported for {}", self.name_of(other)),
             )),
         }
+    }
+
+    fn array_equality(&mut self, line: u32, op: BinOp, lhs: TExpr, rhs: TExpr) -> CResult<TExpr> {
+        let ty = lhs.ty();
+        if let Some(elem) = self.sigs.array_element(ty) {
+            self.equality_of(line, elem, TExpr::Zero(elem), TExpr::Zero(elem))?;
+        }
+        let equal = TExpr::Call {
+            callee: EQUAL.to_string(),
+            type_args: vec![ty],
+            args: vec![lhs, rhs],
+            ret: Ty::Bool,
+        };
+        Ok(if op == BinOp::Ne {
+            TExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(equal),
+            }
+        } else {
+            equal
+        })
     }
 
     fn optional_equality(
@@ -4013,6 +4297,7 @@ impl FnCx<'_> {
                 self.expect(line, lhs, rhs)?;
                 let comparable =
                     matches!(lhs, Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_))
+                        || self.sigs.array_element(lhs).is_some()
                         || (lhs.is_struct() && self.sigs.enum_of(lhs).is_none());
                 if comparable {
                     Ok(())

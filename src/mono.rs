@@ -3,13 +3,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::BinOp;
-use crate::check::{boxed_requirement, equality_function};
-use crate::sigs::{COMPARABLE, Conformer, EQUATABLE, Signatures};
+use crate::check::{boxed_requirement, contains_function, equality_function};
+use crate::sigs::{COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, Signatures};
 use crate::tir::{Descriptor, TFunc, Witnessed};
 use crate::types::Ty;
 
 const INSTANCE_LIMIT: usize = 2000;
-const EQUAL: &str = "$equal";
 
 fn note_dependency(direct: &RefCell<Vec<usize>>, id: usize) {
     let mut direct = direct.borrow_mut();
@@ -265,7 +264,14 @@ impl<'a> Instantiator<'a> {
             ));
         }
         let sigs = self.sigs;
-        let generic = if callee == EQUAL {
+        let generic = if callee == CONTAINS {
+            Rc::new(
+                args.first()
+                    .map(|ty| contains_function(sigs, *ty, mangled.clone()))
+                    .ok_or_else(|| "internal error: no type for contains".to_string())?
+                    .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == EQUAL {
             Rc::new(
                 args.first()
                     .map(|ty| equality_function(sigs, *ty, mangled.clone()))
