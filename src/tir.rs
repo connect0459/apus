@@ -68,6 +68,7 @@ pub enum ArrayOp {
     RemoveLast,
     Concat,
     Remove,
+    Unique,
 }
 
 impl ArrayOp {
@@ -81,6 +82,7 @@ impl ArrayOp {
             ArrayOp::RemoveLast => 6,
             ArrayOp::Concat => 7,
             ArrayOp::Remove => 8,
+            ArrayOp::Unique => 9,
         }
     }
 

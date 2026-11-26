@@ -5030,7 +5030,6 @@ fn a_generic_function_can_append_to_an_array_of_its_type_parameter() {
 
 #[test]
 fn only_a_variable_or_a_member_can_be_the_array_that_is_changed() {
-    assert!(build_error("func main() { var g = [[1]]\n g[0][0] = 2 }").contains("can be changed"));
     assert!(build_error("func main() { [1][0] = 2 }").contains("can be changed"));
     assert!(build_error("func main() { var a = [1]\n a.append(x: 2) }").contains("append"));
     assert!(build_error("func main() { var a = [1]\n a.append(1, 2) }").contains("append"));
@@ -5217,4 +5216,62 @@ fn remove_at_checks_its_arguments_and_is_a_statement() {
         build_error("func main() { var a = [1]\n let x = a.remove(at: 0) }").contains("statement")
     );
     assert!(build_error("func main() { let a = [1]\n a.remove(at: 0) }").contains("constant"));
+}
+
+#[test]
+fn an_element_of_an_element_can_be_assigned_and_changed() {
+    assert_eq!(
+        main_printing(
+            "var g = [[1, 2], [3]]\ng[0][1] = 20\ng[1][0] += 5\ng[1].append(9)\ng[0].insert(7, at: 0)\ng[0].remove(at: 1)\ng[1].removeLast()\nprint(g[0][0])\nprint(g[0][1])\nprint(g[0].count)\nprint(g[1][0])\nprint(g[1].count)"
+        ),
+        "7\n20\n2\n8\n1\n"
+    );
+}
+
+#[test]
+fn changing_an_element_of_an_element_does_not_touch_a_copy() {
+    assert_eq!(
+        main_printing(
+            "var g = [[1, 2], [3, 4]]\nlet h = g\ng[0][0] = 100\ng[1].append(5)\nprint(g[0][0])\nprint(h[0][0])\nprint(g[1].count)\nprint(h[1].count)\nvar k = g\nk[0][1] = 7\nprint(g[0][1])\nprint(k[0][1])"
+        ),
+        "100\n1\n3\n2\n2\n7\n"
+    );
+}
+
+#[test]
+fn a_row_shared_between_two_arrays_is_copied_when_one_changes() {
+    assert_eq!(
+        main_printing(
+            "let row = [1, 2]\nvar g = [row, row]\ng[0][0] = 9\nprint(g[0][0])\nprint(g[1][0])\nprint(row[0])"
+        ),
+        "9\n1\n1\n"
+    );
+}
+
+#[test]
+fn deeper_and_member_paths_of_elements_can_be_changed() {
+    assert_eq!(
+        run(
+            "class Board {\n  var cells: [[Int]]\n  init() { self.cells = [[0, 0], [0, 0]] }\n  func set(_ r: Int, _ c: Int, _ v: Int) { cells[r][c] = v }\n}\nstruct Bag {\n  var rows: [[String]]\n}\nfunc main() {\n  let b = Board()\n  b.set(1, 0, 5)\n  print(b.cells[1][0])\n  var bag = Bag(rows: [[\"a\"]])\n  bag.rows[0][0] += \"b\"\n  bag.rows[0].append(\"c\")\n  print(bag.rows[0][0] + bag.rows[0][1])\n  var cube = [[[1]]]\n  cube[0][0][0] = 4\n  cube[0][0].append(5)\n  print(cube[0][0][0] + cube[0][0][1])\n}"
+        ),
+        "5\nabc\n9\n"
+    );
+}
+
+#[test]
+fn nested_updates_release_replaced_elements_and_trap_out_of_range() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  var g = [[Box(n: 1)], [Box(n: 2)]]\n  g[0][0] = Box(n: 3)\n  print(0)\n}"
+        ),
+        "1\n0\n3\n2\n"
+    );
+    run_expecting_a_crash("func main() {\n  var g = [[1]]\n  g[0][1] = 2\n}");
+    run_expecting_a_crash("func main() {\n  var g = [[1]]\n  g[1][0] = 2\n}");
+}
+
+#[test]
+fn an_element_of_a_constant_array_cannot_be_changed() {
+    assert!(build_error("func main() { let g = [[1]]\n g[0][0] = 2 }").contains("constant"));
+    assert!(build_error("func main() { var g = [1]\n g[0][0] = 2 }").contains("not an array"));
 }

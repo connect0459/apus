@@ -848,6 +848,7 @@ impl Emitter<'_, '_> {
                 }
                 Ok(array)
             }
+            ArrayOp::Unique => self.unique_array(values[0], elem, 0),
             ArrayOp::Remove => {
                 self.element_address(values[0], values[1], stride);
                 let array = self.unique_array(values[0], elem, 0)?;

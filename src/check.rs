@@ -443,6 +443,11 @@ enum Update<'e> {
     Insert(&'e [Arg]),
     RemoveLast(&'e [Arg]),
     Remove(&'e [Arg]),
+    Unique,
+    Within {
+        index: &'e Expr,
+        inner: &'e Update<'e>,
+    },
     Element {
         index: &'e Expr,
         op: Option<BinOp>,
@@ -1817,12 +1822,36 @@ impl FnCx<'_> {
     }
 
     fn update(&mut self, line: u32, target: &Expr, update: &Update) -> CResult<TStmt> {
+        let mut stmts = self.update_stmts(line, target, update)?;
+        Ok(if stmts.len() == 1 {
+            stmts.remove(0)
+        } else {
+            TStmt::If {
+                cond: TExpr::Bool(true),
+                then_body: stmts,
+                else_body: Vec::new(),
+            }
+        })
+    }
+
+    fn update_stmts(&mut self, line: u32, target: &Expr, update: &Update) -> CResult<Vec<TStmt>> {
         match target.kind() {
-            ExprKind::Ident(name) => self.assign_variable(line, name, update),
-            ExprKind::Member { base, name } => self.assign_member(line, base, name, update),
+            ExprKind::Ident(name) => Ok(vec![self.assign_variable(line, name, update)?]),
+            ExprKind::Member { base, name } => {
+                Ok(vec![self.assign_member(line, base, name, update)?])
+            }
+            ExprKind::Index { base, index } => {
+                let mut stmts = self.update_stmts(line, base, &Update::Unique)?;
+                let within = Update::Within {
+                    index,
+                    inner: update,
+                };
+                stmts.extend(self.update_stmts(line, base, &within)?);
+                Ok(stmts)
+            }
             _ => Err(CheckError::at(
                 line,
-                "only a variable or a member of a variable can be changed",
+                "only a variable, a member or an element can be changed",
             )),
         }
     }
@@ -1875,6 +1904,40 @@ impl FnCx<'_> {
                     op: ArrayOp::Insert,
                     elem,
                     args: vec![current, position, value],
+                    ty: target_ty,
+                })
+            }
+            Update::Unique => {
+                let elem = self.array_target(line, target_ty)?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Unique,
+                    elem,
+                    args: vec![current],
+                    ty: target_ty,
+                })
+            }
+            Update::Within { index, inner } => {
+                let elem = self.array_target(line, target_ty)?;
+                let position = self.int_value(index)?;
+                let held = self.temp(Ty::Int);
+                let element = TExpr::ArrayOp {
+                    op: ArrayOp::Get,
+                    elem,
+                    args: vec![current.clone(), TExpr::Local(held, Ty::Int)],
+                    ty: elem,
+                };
+                let changed = self.updated(line, inner, elem, element)?;
+                Ok(TExpr::ArrayOp {
+                    op: ArrayOp::Set,
+                    elem,
+                    args: vec![
+                        current,
+                        TExpr::Bind {
+                            local: held,
+                            init: Box::new(position),
+                        },
+                        changed,
+                    ],
                     ty: target_ty,
                 })
             }
