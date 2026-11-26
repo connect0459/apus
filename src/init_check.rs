@@ -179,7 +179,8 @@ impl Scan<'_> {
             } => any(then_body) || else_body.as_deref().is_some_and(any),
             StmtKind::While { body, .. }
             | StmtKind::WhileLet { body, .. }
-            | StmtKind::For { body, .. } => any(body),
+            | StmtKind::For { body, .. }
+            | StmtKind::ForPair { body, .. } => any(body),
             StmtKind::Guard { else_body, .. } | StmtKind::GuardLet { else_body, .. } => {
                 any(else_body)
             }
@@ -428,6 +429,20 @@ impl Scan<'_> {
                 self.locals.pop();
                 used
             }
+            StmtKind::ForPair {
+                key,
+                value,
+                iter,
+                body,
+            } => {
+                let mut used = self.expr_uses_self(iter);
+                self.locals.push(HashSet::new());
+                self.declare(key);
+                self.declare(value);
+                used |= self.stmts_use_self(body);
+                self.locals.pop();
+                used
+            }
             StmtKind::Switch { subject, cases } => {
                 let mut used = self.expr_uses_self(subject);
                 for case in cases {
@@ -461,6 +476,9 @@ impl Scan<'_> {
             }
             ExprKind::Cast { expr, .. } => self.expr_uses_self(expr),
             ExprKind::ArrayLiteral(items) => items.iter().any(|e| self.expr_uses_self(e)),
+            ExprKind::DictLiteral(pairs) => pairs
+                .iter()
+                .any(|(k, v)| self.expr_uses_self(k) || self.expr_uses_self(v)),
             ExprKind::Index { base, index } => {
                 self.expr_uses_self(base) || self.expr_uses_self(index)
             }
@@ -513,7 +531,8 @@ fn returns(stmt: &Stmt) -> bool {
         }
         StmtKind::While { body, .. }
         | StmtKind::WhileLet { body, .. }
-        | StmtKind::For { body, .. } => any_returns(body),
+        | StmtKind::For { body, .. }
+        | StmtKind::ForPair { body, .. } => any_returns(body),
         StmtKind::Switch { cases, .. } => cases.iter().any(|c| any_returns(c.body())),
         StmtKind::Labeled { stmt, .. } => returns(stmt),
         StmtKind::Let { .. }

@@ -252,10 +252,17 @@ impl Parser<'_> {
         let mut ty = if self.eat_punct("[") {
             self.enter()?;
             let element = self.type_ref();
+            let value = match &element {
+                Ok(_) if self.eat_punct(":") => Some(self.type_ref()),
+                _ => None,
+            };
             self.leave();
             let element = element?;
             self.expect_punct("]")?;
-            TypeRef::new("Array".to_string(), vec![element])
+            match value {
+                Some(value) => TypeRef::new("Dictionary".to_string(), vec![element, value?]),
+                None => TypeRef::new("Array".to_string(), vec![element]),
+            }
         } else {
             let mut name = self.name()?;
             if self.is_punct(".") && !self.on_new_line_before_dot() {
@@ -821,11 +828,27 @@ impl Parser<'_> {
                 StmtKind::While { cond, body }
             }
         } else if self.eat_keyword("for") {
-            let var = self.name()?;
-            self.expect_keyword("in")?;
-            let iter = self.expr()?;
-            let body = self.block()?;
-            StmtKind::For { var, iter, body }
+            if self.eat_punct("(") {
+                let key = self.name()?;
+                self.expect_punct(",")?;
+                let value = self.name()?;
+                self.expect_punct(")")?;
+                self.expect_keyword("in")?;
+                let iter = self.expr()?;
+                let body = self.block()?;
+                StmtKind::ForPair {
+                    key,
+                    value,
+                    iter,
+                    body,
+                }
+            } else {
+                let var = self.name()?;
+                self.expect_keyword("in")?;
+                let iter = self.expr()?;
+                let body = self.block()?;
+                StmtKind::For { var, iter, body }
+            }
         } else if self.eat_keyword("break") {
             StmtKind::Break(self.jump_label())
         } else if self.eat_keyword("continue") {
@@ -1321,17 +1344,28 @@ impl Parser<'_> {
         Ok(joined.unwrap_or_else(|| Expr::new(line, ExprKind::Str(String::new()))))
     }
 
-    fn array_items(&mut self) -> PResult<Vec<Expr>> {
-        let mut items = Vec::new();
+    fn collection_literal(&mut self, line: u32) -> PResult<Expr> {
         if self.is_punct("]") {
-            return Ok(items);
+            return Ok(Expr::new(line, ExprKind::ArrayLiteral(Vec::new())));
         }
-        loop {
-            items.push(self.expr()?);
-            if !self.eat_punct(",") {
-                return Ok(items);
+        if self.eat_punct(":") {
+            return Ok(Expr::new(line, ExprKind::DictLiteral(Vec::new())));
+        }
+        let first = self.expr()?;
+        if self.eat_punct(":") {
+            let mut pairs = vec![(first, self.expr()?)];
+            while self.eat_punct(",") {
+                let key = self.expr()?;
+                self.expect_punct(":")?;
+                pairs.push((key, self.expr()?));
             }
+            return Ok(Expr::new(line, ExprKind::DictLiteral(pairs)));
         }
+        let mut items = vec![first];
+        while self.eat_punct(",") {
+            items.push(self.expr()?);
+        }
+        Ok(Expr::new(line, ExprKind::ArrayLiteral(items)))
     }
 
     fn primary(&mut self) -> PResult<Expr> {
@@ -1361,11 +1395,11 @@ impl Parser<'_> {
             Some(Token::Punct(p)) if p == "[" => {
                 self.pos += 1;
                 self.enter()?;
-                let items = self.array_items();
+                let literal = self.collection_literal(line);
                 self.leave();
-                let items = items?;
+                let literal = literal?;
                 self.expect_punct("]")?;
-                return Ok(Expr::new(line, ExprKind::ArrayLiteral(items)));
+                return Ok(literal);
             }
             Some(Token::Punct(p)) if p == "(" => {
                 self.pos += 1;
@@ -1420,6 +1454,46 @@ mod tests {
 
     fn int(n: i64) -> Expr {
         ex(ExprKind::Int(n))
+    }
+
+    #[test]
+    fn a_dictionary_literal_lists_key_value_pairs() {
+        assert_eq!(
+            expr("[1: 2, 3: 4]"),
+            ex(ExprKind::DictLiteral(vec![
+                (int(1), int(2)),
+                (int(3), int(4))
+            ]))
+        );
+        assert_eq!(expr("[:]"), ex(ExprKind::DictLiteral(Vec::new())));
+    }
+
+    #[test]
+    fn a_dictionary_type_names_its_key_and_value() {
+        let f = func("func f(a: [String: Int], b: [Int: [Int]]) {\n}");
+        let array = |inner: TypeRef| TypeRef::new("Array".to_string(), vec![inner]);
+        let dict = |k: TypeRef, v: TypeRef| TypeRef::new("Dictionary".to_string(), vec![k, v]);
+        assert_eq!(
+            f.params()[0].ty(),
+            &dict(TypeRef::from("String"), TypeRef::from("Int"))
+        );
+        assert_eq!(
+            f.params()[1].ty(),
+            &dict(TypeRef::from("Int"), array(TypeRef::from("Int")))
+        );
+    }
+
+    #[test]
+    fn a_for_loop_may_name_the_key_and_the_value() {
+        assert_eq!(
+            body("for (k, v) in d { }"),
+            vec![st(StmtKind::ForPair {
+                key: "k".to_string(),
+                value: "v".to_string(),
+                iter: ex(ExprKind::Ident("d".to_string())),
+                body: vec![],
+            })]
+        );
     }
 
     #[test]

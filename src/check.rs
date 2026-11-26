@@ -1950,6 +1950,9 @@ impl FnCx<'_> {
                 Ok(TStmt::While { cond, body })
             }
             StmtKind::For { var, iter, body } => self.for_stmt(line, var, iter, body),
+            StmtKind::ForPair { .. } => {
+                Err(CheckError::at(line, "dictionaries are not supported yet"))
+            }
             StmtKind::Expr(expr) => self.expr_stmt(expr),
             StmtKind::Switch { .. }
             | StmtKind::Labeled { .. }
@@ -3782,6 +3785,9 @@ impl FnCx<'_> {
                 "a range can only be used in a for loop",
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
+            ExprKind::DictLiteral(_) => {
+                Err(CheckError::at(line, "dictionaries are not supported yet"))
+            }
             ExprKind::Index { base, index } => self.subscript(line, base, index),
         }
     }

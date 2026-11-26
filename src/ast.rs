@@ -617,6 +617,12 @@ pub enum StmtKind {
         iter: Expr,
         body: Vec<Stmt>,
     },
+    ForPair {
+        key: String,
+        value: String,
+        iter: Expr,
+        body: Vec<Stmt>,
+    },
     Switch {
         subject: Expr,
         cases: Vec<SwitchCase>,
@@ -720,6 +726,11 @@ fn depth_of(kind: &ExprKind) -> u32 {
         | ExprKind::GenericName { .. } => 0,
         ExprKind::ImplicitMember { args, .. } => args.as_deref().map_or(0, deepest),
         ExprKind::ArrayLiteral(items) => items.iter().map(|e| e.depth).max().unwrap_or(0),
+        ExprKind::DictLiteral(pairs) => pairs
+            .iter()
+            .map(|(k, v)| k.depth.max(v.depth))
+            .max()
+            .unwrap_or(0),
         ExprKind::Index { base, index } => base.depth.max(index.depth),
         ExprKind::Unwrap(expr)
         | ExprKind::Unary { expr, .. }
@@ -769,6 +780,7 @@ impl PartialEq for Expr {
 pub enum ExprKind {
     Nil,
     ArrayLiteral(Vec<Expr>),
+    DictLiteral(Vec<(Expr, Expr)>),
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
