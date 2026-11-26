@@ -1,9 +1,11 @@
 pub mod ast;
 pub mod cache;
+pub mod capture;
 pub mod check;
 pub mod codegen;
 pub mod driver;
 pub mod entry;
+pub mod free;
 pub mod hash;
 pub mod init_check;
 pub mod items;

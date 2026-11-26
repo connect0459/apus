@@ -207,6 +207,9 @@ fn build_on_this_thread(
             }
         }
         let mut provider = |name: &str| -> Result<Rc<TFunc>, String> {
+            if let Some(closure) = sigs.closure(name) {
+                return Ok(closure);
+            }
             if let Some(found) = generic_checked.get(name) {
                 return Ok(Rc::clone(found));
             }

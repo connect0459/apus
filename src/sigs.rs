@@ -1766,6 +1766,12 @@ impl Signatures {
         if let Some(id) = self.instances.borrow().struct_index.get(&key) {
             return Ok(*id);
         }
+        if key.1.iter().any(|ty| self.contains_func(*ty)) {
+            return Err(CheckError::at(
+                line,
+                "a function type can only be the type of a parameter",
+            ));
+        }
         let decl = &self.struct_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
         if decl.name() == ARRAY && key.1.first() == Some(&Ty::Void) {
@@ -2499,6 +2505,40 @@ impl Signatures {
                 .origin_of(ty)
                 .is_some_and(|(_, _, args)| args.iter().any(|a| self.contains_func(*a))),
         }
+    }
+
+    pub fn collect_params(&self, ty: Ty, out: &mut Vec<usize>) {
+        if let Some((params, ret)) = self.func_parts(ty) {
+            for param in params {
+                self.collect_params(param, out);
+            }
+            self.collect_params(ret, out);
+            return;
+        }
+        match ty {
+            Ty::Param(index) => out.push(index),
+            Ty::Assoc(packed) => out.push(Ty::split_assoc(packed).0),
+            _ => {
+                if let Some((_, _, args)) = self.origin_of(ty) {
+                    for arg in args {
+                        self.collect_params(arg, out);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn subst_known(&self, ty: Ty, bound: &[Option<Ty>]) -> Option<Ty> {
+        let mut used = Vec::new();
+        self.collect_params(ty, &mut used);
+        if used
+            .iter()
+            .any(|index| bound.get(*index).copied().flatten().is_none())
+        {
+            return None;
+        }
+        let args: Vec<Ty> = bound.iter().map(|b| b.unwrap_or(Ty::Void)).collect();
+        self.subst(ty, &args, &[], 0).ok()
     }
 
     pub fn has_param(&self, ty: Ty) -> bool {

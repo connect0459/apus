@@ -621,3 +621,26 @@ fn editing_the_deinit_of_a_generic_class_recompiles_only_its_instances() {
     assert!(report.reused() >= 1, "unrelated code must stay cached");
     assert_eq!(project.run(), "40\n98\n");
 }
+
+fn closure_program(amount: i64, other: i64) -> String {
+    format!(
+        "func apply(_ f: (Int) -> Int, _ x: Int) -> Int {{ return f(x) }}\nfunc scaled(_ x: Int) -> Int {{ return apply({{ $0 * {amount} }}, x) }}\nfunc other() -> Int {{ return {other} }}\nfunc main() {{\n  var total = 0\n  let n = apply({{ v in total += v\n return total }}, scaled(2))\n  print(n + other())\n}}\n"
+    )
+}
+
+#[test]
+fn editing_a_closure_body_rebuilds_the_function_that_holds_it_and_nothing_else() {
+    let project = Project::new();
+    let first = project.build(&closure_program(3, 10));
+    assert!(first.linked());
+    assert_eq!(project.run(), "16\n");
+    let again = project.build(&closure_program(3, 10));
+    assert!(again.was_skipped());
+    let edited = project.build(&closure_program(5, 10));
+    assert!(edited.compiled() > 0);
+    assert!(edited.reused() > 0);
+    assert_eq!(project.run(), "20\n");
+    let untouched = project.build(&closure_program(5, 11));
+    assert_eq!(project.run(), "21\n");
+    assert!(untouched.reused() > 0);
+}

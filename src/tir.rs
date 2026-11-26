@@ -256,7 +256,7 @@ pub const DESC_METHODS: usize = 2;
 pub const UNOWNED_SLOT: usize = 3;
 pub const HEADER_SLOTS: usize = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalId(usize);
 
 impl LocalId {
@@ -326,6 +326,10 @@ impl TFunc {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.param_count
     }
 
     pub fn param_types(&self) -> &[Ty] {
@@ -600,7 +604,13 @@ pub enum Witnessed {
     Slot(usize),
 }
 
+pub trait LocalHook {
+    fn expr(&mut self, expr: &TExpr) -> Option<TExpr>;
+    fn stmt(&mut self, stmt: &TStmt) -> Option<TStmt>;
+}
+
 struct Rewriter<'a, E> {
+    hook: Option<&'a mut dyn LocalHook>,
     ty: TyMap<'a, E>,
     call: CallMap<'a, E>,
     witness: WitnessMap<'a, E>,
@@ -619,6 +629,7 @@ impl TFunc {
         describe: DescribeMap<'_, E>,
     ) -> Result<TFunc, E> {
         let mut rewriter = Rewriter {
+            hook: None,
             ty,
             call,
             witness,
@@ -636,12 +647,44 @@ impl TFunc {
     }
 }
 
+impl TFunc {
+    pub fn rewrite_locals(
+        &self,
+        hook: &mut dyn LocalHook,
+        locals: Vec<Ty>,
+        prologue: Vec<TStmt>,
+    ) -> TFunc {
+        let mut keep_ty = |t: Ty| Ok::<Ty, std::convert::Infallible>(t);
+        let mut keep_call = |c: String, a: Vec<Ty>| Ok::<_, std::convert::Infallible>((c, a));
+        let mut keep_witness =
+            |_: &str, _: &str, _: Ty| Ok::<_, std::convert::Infallible>(Witnessed::Keep);
+        let mut keep_dispatch = |_: &str, _: &str| Ok::<_, std::convert::Infallible>(None);
+        let mut keep_describe = |_: Ty| Ok::<_, std::convert::Infallible>(None);
+        let mut rewriter = Rewriter {
+            hook: Some(hook),
+            ty: &mut keep_ty,
+            call: &mut keep_call,
+            witness: &mut keep_witness,
+            dispatch: &mut keep_dispatch,
+            describe: &mut keep_describe,
+        };
+        let body = match rewriter.stmts(&self.body) {
+            Ok(body) => body,
+            Err(never) => match never {},
+        };
+        let body = prologue.into_iter().chain(body).collect();
+        TFunc::new(self.name.clone(), self.param_count, self.ret, locals, body)
+    }
+}
+
 impl<E> Rewriter<'_, E> {
     fn stmts(&mut self, stmts: &[TStmt]) -> Result<Vec<TStmt>, E> {
         stmts.iter().map(|s| self.stmt(s)).collect()
     }
 
     fn stmt(&mut self, stmt: &TStmt) -> Result<TStmt, E> {
+        let hooked = self.hook.as_deref_mut().and_then(|h| h.stmt(stmt));
+        let stmt = hooked.as_ref().unwrap_or(stmt);
         Ok(match stmt {
             TStmt::Let { local, init } => TStmt::Let {
                 local: *local,
@@ -803,6 +846,11 @@ impl<E> Rewriter<'_, E> {
     }
 
     fn expr(&mut self, expr: &TExpr) -> Result<TExpr, E> {
+        if matches!(expr, TExpr::Local(..) | TExpr::Capture(..))
+            && let Some(replaced) = self.hook.as_deref_mut().and_then(|h| h.expr(expr))
+        {
+            return Ok(replaced);
+        }
         Ok(match expr {
             TExpr::Int(_) | TExpr::Bool(_) | TExpr::Str(_) | TExpr::Char(_) => expr.clone(),
             TExpr::Local(local, ty) => TExpr::Local(*local, (self.ty)(*ty)?),

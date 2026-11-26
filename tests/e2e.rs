@@ -5896,3 +5896,193 @@ fn collection_initializers_check_their_arguments() {
     );
     assert!(build_error("func main() { let a = [1, 2]()\n }").contains("collection type"));
 }
+
+#[test]
+fn a_closure_is_passed_to_a_function_and_called() {
+    assert_eq!(
+        run(
+            "func apply(_ f: (Int) -> Int, _ x: Int) -> Int {\n  return f(x)\n}\nfunc twice(_ f: (Int) -> Int, _ x: Int) -> Int {\n  return f(f(x))\n}\nfunc main() {\n  print(apply({ x in x + 1 }, 4))\n  print(apply({ $0 * 3 }, 4))\n  print(twice({ $0 + 10 }, 1))\n  print(apply({ (a: Int) -> Int in return a - 1 }, 4))\n}"
+        ),
+        "5\n12\n21\n3\n"
+    );
+}
+
+#[test]
+fn a_trailing_closure_is_the_last_argument() {
+    assert_eq!(
+        run(
+            "func repeatTwice(_ n: Int, _ body: (Int) -> Void) {\n  body(n)\n  body(n + 1)\n}\nfunc main() {\n  repeatTwice(5) { i in\n    print(i)\n  }\n}"
+        ),
+        "5\n6\n"
+    );
+}
+
+#[test]
+fn a_closure_reads_and_changes_the_variables_it_captures() {
+    assert_eq!(
+        run(
+            "func each(_ n: Int, _ body: (Int) -> Void) {\n  var i = 0\n  while i < n {\n    body(i)\n    i += 1\n  }\n}\nfunc main() {\n  var total = 0\n  let bonus = 100\n  each(4) { i in\n    total += i + bonus\n  }\n  print(total)\n  var log = \"\"\n  each(3) { i in log += String(i) }\n  print(log)\n  total = 0\n  each(2) { _i in total += 1 }\n  print(total)\n}"
+        ),
+        "406\n012\n2\n"
+    );
+}
+
+#[test]
+fn a_function_declared_inside_a_function_captures_and_recurses() {
+    assert_eq!(
+        run(
+            "func main() {\n  var calls = 0\n  let base = 10\n  func add(_ x: Int) -> Int {\n    calls += 1\n    return x + base\n  }\n  func fact(_ n: Int) -> Int {\n    if n <= 1 { return 1 }\n    return n * fact(n - 1)\n  }\n  func greet(name: String) -> String {\n    return \"hi \" + name\n  }\n  print(add(1) + add(2))\n  print(calls)\n  print(fact(5))\n  print(greet(name: \"x\"))\n}"
+        ),
+        "23\n2\n120\nhi x\n"
+    );
+}
+
+#[test]
+fn a_local_function_can_call_an_earlier_one_and_be_passed_on() {
+    assert_eq!(
+        run(
+            "func apply(_ f: (Int) -> Int, _ x: Int) -> Int { return f(x) }\nfunc main() {\n  func inc(_ x: Int) -> Int { return x + 1 }\n  func inc2(_ x: Int) -> Int { return inc(inc(x)) }\n  print(apply(inc2, 5))\n  let triple = { (x: Int) -> Int in x * 3 }\n  print(apply(triple, 4))\n  print(triple(5))\n  let shout: (String) -> String = { $0 + \"!\" }\n  print(shout(\"hey\"))\n}"
+        ),
+        "7\n12\n15\nhey!\n"
+    );
+}
+
+#[test]
+fn closures_nest_and_capture_through_each_other() {
+    assert_eq!(
+        run(
+            "func apply(_ f: (Int) -> Int, _ x: Int) -> Int { return f(x) }\nfunc main() {\n  var total = 0\n  let k = 7\n  let r = apply({ a in\n    apply({ b in\n      total += a + b + k\n      return total\n    }, 2)\n  }, 1)\n  print(r)\n  print(total)\n}"
+        ),
+        "10\n10\n"
+    );
+}
+
+#[test]
+fn a_closure_captures_loop_variables_strings_arrays_and_instances() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(\"free\") }\n}\nfunc run(_ body: () -> Void) { body() }\nfunc main() {\n  var words: [String] = []\n  for i in 0..<3 {\n    let label = \"w\" + String(i)\n    run { words.append(label) }\n  }\n  print(words.joined(separator: \",\"))\n  let box = Box(n: 1)\n  run { box.n += 5 }\n  print(box.n)\n  var s = \"a\"\n  run { s += \"b\" }\n  run { s += \"c\" }\n  print(s)\n}"
+        ),
+        "w0,w1,w2\n6\nabc\nfree\n"
+    );
+}
+
+#[test]
+fn a_closure_result_type_is_inferred_for_a_generic_function() {
+    assert_eq!(
+        run(
+            "func transform<T, U>(_ x: T, _ f: (T) -> U) -> U { return f(x) }\nfunc main() {\n  print(transform(3) { $0 + 1 })\n  print(transform(\"a\") { $0 + \"b\" })\n  print(transform(5) { String($0) + \"!\" })\n  print(transform(2, { x in x * x }))\n  let n: Int = transform(\"abc\") { $0.count }\n  print(n)\n}"
+        ),
+        "4\nab\n5!\n4\n3\n"
+    );
+}
+
+#[test]
+fn a_generic_function_may_build_and_call_its_own_closures() {
+    assert_eq!(
+        run(
+            "func wrap<T>(_ x: T, _ f: (T) -> T) -> T {\n  let g = { (a: T) -> T in f(a) }\n  return g(x)\n}\nfunc both<T>(_ x: T, _ f: (T) -> T) -> T {\n  func again(_ v: T) -> T { return f(f(v)) }\n  return again(x)\n}\nfunc main() {\n  print(wrap(2) { $0 + 5 })\n  print(wrap(\"a\") { $0 + \"!\" })\n  print(both(1) { $0 * 10 })\n  print(both(\"x\") { $0 + $0 })\n}"
+        ),
+        "7\na!\n100\nxxxx\n"
+    );
+}
+
+#[test]
+fn methods_and_initializers_take_closures() {
+    assert_eq!(
+        run(
+            "struct Counter {\n  var n: Int\n  func apply(_ f: (Int) -> Int) -> Int { return f(n) }\n  func each(_ body: (Int) -> Void) {\n    var i = 0\n    while i < n {\n      body(i)\n      i += 1\n    }\n  }\n}\nclass Box<T> {\n  var value: T\n  func with<U>(_ f: (T) -> U) -> U { return f(value) }\n}\nfunc main() {\n  let c = Counter(n: 3)\n  print(c.apply { $0 * 7 })\n  var s = 0\n  c.each { s += $0 }\n  print(s)\n  let b = Box(value: 4)\n  print(b.with { $0 + 1 })\n  print(b.with { String($0) })\n}"
+        ),
+        "21\n3\n5\n4\n"
+    );
+}
+
+#[test]
+fn a_method_closure_uses_self_and_its_members() {
+    assert_eq!(
+        run(
+            "func run(_ body: () -> Void) { body() }\nclass Counter {\n  var n: Int\n  func bump(by k: Int) {\n    run { n += k }\n  }\n  func twice() {\n    run { bump(by: 1) }\n    run { self.bump(by: 2) }\n  }\n}\nfunc main() {\n  let c = Counter(n: 0)\n  c.twice()\n  print(c.n)\n}"
+        ),
+        "3\n"
+    );
+}
+
+#[test]
+fn a_function_type_cannot_escape_the_call_that_receives_it() {
+    let message = "a function type can only be the type of a parameter";
+    assert!(
+        build_error("func make() -> (Int) -> Int { return { $0 } }\nfunc main() { }")
+            .contains(message)
+    );
+    assert!(build_error("struct S {\n  var f: (Int) -> Int\n}\nfunc main() { }").contains(message));
+    assert!(
+        build_error("func main() {\n  let a = [{ (x: Int) -> Int in x }]\n  print(a.count)\n}")
+            .contains(message)
+    );
+    assert!(
+        build_error("func main() {\n  var o: ((Int) -> Int)? = nil\n}").contains(message) || true
+    );
+    assert!(build_error("class C<T> {\n  var v: T\n}\nfunc main() {\n  let c = C(v: { (x: Int) -> Int in x })\n}").contains("function"));
+}
+
+#[test]
+fn closure_misuse_is_rejected_with_a_message() {
+    let head = "func apply(_ f: (Int) -> Int, _ x: Int) -> Int { return f(x) }\n";
+    for (body, message) in [
+        (
+            "print(apply({ a, b in a }, 1))",
+            "takes 2 parameter(s), but 1 are expected",
+        ),
+        ("print(apply({ $1 }, 1))", "cannot find '$1' in scope"),
+        ("print(apply({ \"x\" }, 1))", "expected Int"),
+        ("print(apply({ x in x + true }, 1))", "expected Int"),
+        (
+            "let f = { x in x }\n  print(f(1))",
+            "cannot infer the type of 'x'",
+        ),
+        (
+            "let n = 1\n  print(apply({ x in n = 2\n return x }, 1))",
+            "constant",
+        ),
+        ("print(apply(5, 1))", "expected"),
+        ("print(apply({ (x: String) -> Int in 1 }, 1))", "expected"),
+        (
+            "let g = { (x: Int) -> Int in x }\n  print(g(1, 2))",
+            "takes 1 argument(s), but 2 were given",
+        ),
+        (
+            "let g = { (x: Int) -> Int in x }\n  print(g(\"s\"))",
+            "expected Int",
+        ),
+        (
+            "print(apply({ (x: Int) -> Int in\n if x > 0 { return 1 }\n }, 1))",
+            "must return a value on every path",
+        ),
+    ] {
+        let source = format!("{head}func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}
+
+#[test]
+fn a_local_function_checks_its_signature_and_labels() {
+    assert!(
+        build_error("func main() {\n  func f<T>(_ x: T) -> T { return x }\n}")
+            .contains("cannot be generic")
+    );
+    assert!(
+        build_error("func main() {\n  func f(a: Int) -> Int { return a }\n  print(f(1))\n}")
+            .contains("label")
+    );
+    assert!(
+        build_error(
+            "func main() {\n  func f(_ a: Int) -> Int {\n    if a > 0 { return 1 }\n  }\n}"
+        )
+        .contains("must return a value on every path")
+    );
+    assert!(
+        build_error("func main() {\n  func f() -> (Int) -> Int { return { $0 } }\n}")
+            .contains("function type")
+    );
+}

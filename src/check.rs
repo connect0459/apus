@@ -1,8 +1,10 @@
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ast::{
-    Arg, BinOp, CaseLabel, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind, SwitchCase, TypeRef,
-    UnaryOp,
+    Arg, BinOp, CaseLabel, ClosureExpr, Expr, ExprKind, FuncDecl, Pattern, Stmt, StmtKind,
+    SwitchCase, TypeRef, UnaryOp,
 };
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
@@ -40,6 +42,11 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         pending_label: None,
         bounds: sig.bounds().to_vec(),
         name: func.name().to_string(),
+        owner: func.name().to_string(),
+        counter: Rc::new(Cell::new(0)),
+        captured: Vec::new(),
+        environment: Vec::new(),
+        labels: HashMap::new(),
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -98,13 +105,14 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
             ),
         ));
     }
-    Ok(TFunc::new(
+    let typed = TFunc::new(
         func.name().to_string(),
         func.params().len() + usize::from(receiver),
         sig.ret(),
         cx.locals,
         body,
-    ))
+    );
+    Ok(crate::capture::lower(&typed, &cx.captured, &[], sigs))
 }
 
 impl CellSelf {
@@ -238,6 +246,11 @@ fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
         pending_label: None,
         bounds: Vec::new(),
         name: name.to_string(),
+        owner: name.to_string(),
+        counter: Rc::new(Cell::new(0)),
+        captured: Vec::new(),
+        environment: Vec::new(),
+        labels: HashMap::new(),
     }
 }
 
@@ -1189,6 +1202,11 @@ struct FnCx<'a> {
     pending_label: Option<String>,
     bounds: Vec<Vec<String>>,
     name: String,
+    owner: String,
+    counter: Rc<Cell<usize>>,
+    captured: Vec<LocalId>,
+    environment: Vec<(LocalId, usize)>,
+    labels: HashMap<LocalId, Vec<Option<String>>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1215,7 +1233,7 @@ struct CellCall {
     pending: Option<(TStmt, TStmt)>,
 }
 
-impl FnCx<'_> {
+impl<'a> FnCx<'a> {
     fn name_of(&self, ty: Ty) -> String {
         self.sigs.display(ty, &self.scope)
     }
@@ -2523,10 +2541,7 @@ impl FnCx<'_> {
                 iter,
                 body,
             } => self.for_pair(line, key, value, iter, body),
-            StmtKind::LocalFunc(_) => Err(CheckError::at(
-                line,
-                "local functions are not supported yet",
-            )),
+            StmtKind::LocalFunc(func) => self.local_function(line, func),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
             StmtKind::Switch { .. }
             | StmtKind::Labeled { .. }
@@ -3569,6 +3584,342 @@ impl FnCx<'_> {
                 ],
             }),
             ty: optional,
+        })
+    }
+
+    fn child(&self, name: String, ret: Ty) -> FnCx<'a> {
+        FnCx {
+            sigs: self.sigs,
+            scope: self.scope.clone(),
+            expected: None,
+            ret,
+            locals: Vec::new(),
+            scopes: vec![HashMap::new()],
+            init_self: None,
+            cell_self: None,
+            cell_call: CellCall::default(),
+            super_initialized: false,
+            chain_values: Vec::new(),
+            targets: Vec::new(),
+            pending_label: None,
+            bounds: self.bounds.clone(),
+            name,
+            owner: self.owner.clone(),
+            counter: Rc::clone(&self.counter),
+            captured: Vec::new(),
+            environment: Vec::new(),
+            labels: HashMap::new(),
+        }
+    }
+
+    fn generic_identity(&self) -> Vec<Ty> {
+        let count = self
+            .scope
+            .iter()
+            .filter(|(_, ty)| matches!(ty, Ty::Param(_)))
+            .count();
+        if count == 0 {
+            vec![Ty::Int]
+        } else {
+            (0..count).map(Ty::Param).collect()
+        }
+    }
+
+    fn next_closure_name(&self) -> String {
+        let number = self.counter.get();
+        self.counter.set(number + 1);
+        format!("{}.$closure{}", self.owner, number)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lift(
+        &mut self,
+        line: u32,
+        names: &[String],
+        parameters: &[(String, Ty)],
+        ret: Ty,
+        self_name: Option<(&str, Ty)>,
+        body: impl FnOnce(&mut FnCx<'a>) -> CResult<Vec<TStmt>>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let name = self.next_closure_name();
+        let mut cx = self.child(name.clone(), ret);
+        cx.declare(line, "$env", Ty::Int, false)?;
+        for (param, ty) in parameters {
+            cx.declare(line, param, *ty, false)?;
+        }
+        let mut candidates: Vec<String> = names.to_vec();
+        if !candidates.iter().any(|n| n == "self") {
+            candidates.push("self".to_string());
+        }
+        let mut captures = Vec::new();
+        for candidate in &candidates {
+            if parameters.iter().any(|(p, _)| p == candidate) {
+                continue;
+            }
+            if self_name.is_some_and(|(own, _)| own == candidate) {
+                continue;
+            }
+            let Ok(outer) = self.lookup(candidate, line) else {
+                continue;
+            };
+            let inner = cx.declare(line, candidate, outer.ty, outer.mutable)?;
+            cx.environment.push((inner, captures.len()));
+            let already_a_cell = self.environment.iter().any(|(l, _)| *l == outer.local);
+            if !already_a_cell && !self.captured.contains(&outer.local) {
+                self.captured.push(outer.local);
+            }
+            captures.push(TExpr::Capture(outer.local, outer.ty));
+        }
+        let mut prologue = Vec::new();
+        if let Some((own, ty)) = self_name {
+            let local = cx.declare(line, own, ty, false)?;
+            prologue.push(TStmt::Let {
+                local,
+                init: TExpr::Local(LocalId::new(0), ty),
+            });
+        }
+        let mut statements = body(&mut cx)?;
+        statements.splice(0..0, prologue);
+        let param_types: Vec<Ty> = parameters.iter().map(|(_, ty)| *ty).collect();
+        let typed = TFunc::new(
+            name.clone(),
+            1 + parameters.len(),
+            cx.ret,
+            cx.locals.clone(),
+            statements,
+        );
+        let lowered = crate::capture::lower(&typed, &cx.captured, &cx.environment, sigs);
+        sigs.register_closure(name.clone(), Rc::new(lowered));
+        let ty = sigs.func_ty(param_types.clone(), cx.ret);
+        Ok(TExpr::Closure {
+            func: name,
+            type_args: self.generic_identity(),
+            captures,
+            params: param_types,
+            ret: cx.ret,
+            ty,
+        })
+    }
+
+    fn closure_value(
+        &mut self,
+        line: u32,
+        closure: &ClosureExpr,
+        expected_params: Option<Vec<Ty>>,
+        expected_ret: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        if let (Some(list), Some(tys)) = (closure.params(), &expected_params)
+            && list.len() != tys.len()
+        {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "this closure takes {} parameter(s), but {} are expected",
+                    list.len(),
+                    tys.len()
+                ),
+            ));
+        }
+        let mut parameters: Vec<(String, Ty)> = Vec::new();
+        match closure.params() {
+            Some(list) => {
+                for (index, param) in list.iter().enumerate() {
+                    let ty = match param.ty() {
+                        Some(annotation) => sigs.resolve_type(annotation, &self.scope, line)?,
+                        None => expected_params
+                            .as_ref()
+                            .and_then(|tys| tys.get(index).copied())
+                            .ok_or_else(|| {
+                                CheckError::at(
+                                    line,
+                                    format!(
+                                        "cannot infer the type of '{}': write it in the closure",
+                                        param.name()
+                                    ),
+                                )
+                            })?,
+                    };
+                    parameters.push((param.name().to_string(), ty));
+                }
+            }
+            None => {
+                for (index, ty) in expected_params.iter().flatten().enumerate() {
+                    parameters.push((format!("${index}"), *ty));
+                }
+            }
+        }
+        if let Some(tys) = &expected_params
+            && tys.len() != parameters.len()
+        {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "this closure takes {} parameter(s), but {} are expected",
+                    parameters.len(),
+                    tys.len()
+                ),
+            ));
+        }
+        let annotated = match closure.ret() {
+            Some(tr) if tr.name() == "Void" && tr.args().is_empty() => Some(Ty::Void),
+            Some(tr) => Some(sigs.resolve_type(tr, &self.scope, line)?),
+            None => expected_ret,
+        };
+        let names = crate::free::names_in(closure.body());
+        let statements = closure.body();
+        let single = match statements {
+            [only] => match only.kind() {
+                StmtKind::Expr(expr) => Some(expr),
+                _ => None,
+            },
+            _ => None,
+        };
+        let ret = annotated.unwrap_or(Ty::Void);
+        if annotated.is_none() && single.is_none() && !statements.is_empty() {
+            return Err(CheckError::at(
+                line,
+                "cannot infer the result of this closure: write '-> Type' after its parameters",
+            ));
+        }
+        self.lift(line, &names, &parameters, ret, None, move |cx| {
+            let mut body: Vec<TStmt> = Vec::new();
+            if annotated.is_none() {
+                if let Some(expr) = single {
+                    let value = cx.expr(expr)?;
+                    if value.ty() == Ty::Void {
+                        body.push(TStmt::Eval(value));
+                    } else {
+                        cx.ret = value.ty();
+                        body.push(TStmt::Return(Some(value)));
+                    }
+                }
+                return Ok(body);
+            }
+            let returns_value = ret != Ty::Void;
+            let last_is_value = returns_value
+                && matches!(statements.last().map(Stmt::kind), Some(StmtKind::Expr(_)));
+            if last_is_value {
+                let (init, last) = statements.split_at(statements.len() - 1);
+                body = cx.block(init)?;
+                if let Some(StmtKind::Expr(expr)) = last.first().map(Stmt::kind) {
+                    cx.expected = Some(ret);
+                    let value = cx.value(expr)?;
+                    let value = cx.coerce(line, ret, value)?;
+                    body.push(TStmt::Return(Some(value)));
+                }
+            } else {
+                body = cx.block(statements)?;
+                if returns_value && !always_returns(statements) {
+                    return Err(CheckError::at(
+                        line,
+                        "this closure must return a value on every path",
+                    ));
+                }
+            }
+            Ok(body)
+        })
+    }
+
+    fn local_function(&mut self, line: u32, func: &FuncDecl) -> CResult<TStmt> {
+        let sigs = self.sigs;
+        if !func.generics().is_empty() {
+            return Err(CheckError::at(
+                line,
+                "a function declared inside another function cannot be generic yet",
+            ));
+        }
+        let mut parameters = Vec::new();
+        let mut labels = Vec::new();
+        for param in func.params() {
+            let ty = sigs.resolve_type(param.ty(), &self.scope, line)?;
+            parameters.push((param.name().to_string(), ty));
+            labels.push(param.label().map(str::to_string));
+        }
+        let ret = match func.ret() {
+            Some(tr) if tr.name() == "Void" && tr.args().is_empty() => Ty::Void,
+            Some(tr) => sigs.resolve_type(tr, &self.scope, line)?,
+            None => Ty::Void,
+        };
+        if sigs.contains_func(ret) {
+            return Err(CheckError::at(
+                line,
+                "a function type can only be the type of a parameter",
+            ));
+        }
+        let own_ty = sigs.func_ty(parameters.iter().map(|(_, ty)| *ty).collect(), ret);
+        let names = crate::free::names_in(func.body());
+        let body = func.body();
+        let closure = self.lift(
+            line,
+            &names,
+            &parameters,
+            ret,
+            Some((func.name(), own_ty)),
+            |cx| {
+                let statements = cx.block(body)?;
+                if ret != Ty::Void && !always_returns(body) {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "function '{}' must return a value on every path",
+                            func.name()
+                        ),
+                    ));
+                }
+                Ok(statements)
+            },
+        )?;
+        let local = self.declare(line, func.name(), own_ty, false)?;
+        self.labels.insert(local, labels);
+        Ok(TStmt::Let {
+            local,
+            init: closure,
+        })
+    }
+
+    fn call_value(
+        &mut self,
+        line: u32,
+        callee: &str,
+        binding: Binding,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let Some((params, ret)) = sigs.func_parts(binding.ty) else {
+            return Err(CheckError::at(
+                line,
+                format!("'{callee}' is not a function"),
+            ));
+        };
+        if args.len() != params.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{callee}' takes {} argument(s), but {} were given",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let labels = self.labels.get(&binding.local).cloned();
+        let mut checked = Vec::with_capacity(args.len());
+        for (index, (arg, param)) in args.iter().zip(&params).enumerate() {
+            let wanted = labels
+                .as_ref()
+                .and_then(|l| l.get(index).cloned())
+                .unwrap_or(None);
+            self.expect_label(line, arg, wanted.as_deref())?;
+            self.expected = Some(*param);
+            let value = self.value(arg.value())?;
+            checked.push(self.coerce(line, *param, value)?);
+        }
+        Ok(TExpr::CallValue {
+            func: Box::new(TExpr::Local(binding.local, binding.ty)),
+            args: checked,
+            params,
+            ret,
         })
     }
 
@@ -5147,7 +5498,14 @@ impl FnCx<'_> {
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
             ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
-            ExprKind::Closure(_) => Err(CheckError::at(line, "closures are not supported yet")),
+            ExprKind::Closure(closure) => {
+                let parts = expected.and_then(|ty| self.sigs.func_parts(ty));
+                let (params, ret) = match parts {
+                    Some((params, ret)) => (Some(params), Some(ret)),
+                    None => (None, None),
+                };
+                self.closure_value(line, closure, params, ret)
+            }
             ExprKind::TypeCall { ty, args } => {
                 self.collection_init(line, ty.name(), Some(ty.args()), args, expected)
             }
@@ -5262,14 +5620,7 @@ impl FnCx<'_> {
                 ),
             ));
         }
-        let mut checked = vec![receiver];
-        for (arg, param) in args.iter().zip(params) {
-            self.expect_label(line, arg, param.label())?;
-            if !sigs.has_param(param.ty()) {
-                self.expected = Some(param.ty());
-            }
-            checked.push(self.value(arg.value())?);
-        }
+        let checked = self.check_values(line, sig, params, args, vec![receiver])?;
         let explicit = match explicit {
             Some(given) => {
                 let mut all = sigs.type_arguments(lookup_ty);
@@ -6229,6 +6580,11 @@ impl FnCx<'_> {
         if matches!(callee, ARRAY | DICTIONARY | SET) {
             return self.collection_init(line, callee, explicit, args, expected);
         }
+        if let Ok(binding) = self.lookup(callee, line)
+            && self.sigs.func_parts(binding.ty).is_some()
+        {
+            return self.call_value(line, callee, binding, args);
+        }
         if callee == "String" {
             return self.string_conversion(line, args);
         }
@@ -6267,7 +6623,6 @@ impl FnCx<'_> {
         sig: &FuncSig,
         args: &[Arg],
     ) -> CResult<Vec<TExpr>> {
-        let sigs = self.sigs;
         if args.len() != sig.params().len() {
             return Err(CheckError::at(
                 line,
@@ -6278,15 +6633,63 @@ impl FnCx<'_> {
                 ),
             ));
         }
-        let mut checked = Vec::with_capacity(args.len());
-        for (arg, param) in args.iter().zip(sig.params()) {
+        self.check_values(line, sig, sig.params(), args, Vec::new())
+    }
+
+    fn check_values(
+        &mut self,
+        line: u32,
+        sig: &FuncSig,
+        params: &[ParamSig],
+        args: &[Arg],
+        prefix: Vec<TExpr>,
+    ) -> CResult<Vec<TExpr>> {
+        let sigs = self.sigs;
+        let mut checked: Vec<Option<TExpr>> = prefix.into_iter().map(Some).collect();
+        let offset = checked.len();
+        let mut deferred = Vec::new();
+        for (index, (arg, param)) in args.iter().zip(params).enumerate() {
             self.expect_label(line, arg, param.label())?;
+            let closure_param = sigs.func_parts(param.ty()).is_some() && sigs.has_param(param.ty());
+            if closure_param && matches!(arg.value().kind(), ExprKind::Closure(_)) {
+                deferred.push(index);
+                checked.push(None);
+                continue;
+            }
             if !sigs.has_param(param.ty()) {
                 self.expected = Some(param.ty());
             }
-            checked.push(self.value(arg.value())?);
+            checked.push(Some(self.value(arg.value())?));
         }
-        Ok(checked)
+        if !deferred.is_empty() {
+            let patterns: Vec<Ty> = sig.params().iter().map(ParamSig::ty).collect();
+            let mut bound: Vec<Option<Ty>> = vec![None; sig.generics().len()];
+            for (pattern, value) in patterns.iter().zip(&checked) {
+                if let Some(value) = value {
+                    let mut attempt = bound.clone();
+                    if sigs.unify(*pattern, value.ty(), &mut attempt) {
+                        bound = attempt;
+                    }
+                }
+            }
+            for index in deferred {
+                let ExprKind::Closure(closure) = args[index].value().kind() else {
+                    continue;
+                };
+                let pattern = params[index].ty();
+                let Some((pattern_params, pattern_ret)) = sigs.func_parts(pattern) else {
+                    continue;
+                };
+                let known: Option<Vec<Ty>> = pattern_params
+                    .iter()
+                    .map(|p| sigs.subst_known(*p, &bound))
+                    .collect();
+                let ret = sigs.subst_known(pattern_ret, &bound);
+                let value = self.closure_value(line, closure, known, ret)?;
+                checked[offset + index] = Some(value);
+            }
+        }
+        Ok(checked.into_iter().flatten().collect())
     }
 
     fn init_call(
