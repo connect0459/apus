@@ -51,6 +51,7 @@ impl Encoder<'_> {
             Ty::Char => self.tag(10),
             Ty::Void => self.tag(4),
             Ty::Enum(_) => self.tag(6),
+            Ty::Func(_) => self.tag(11),
             Ty::Param(index) => {
                 self.tag(7);
                 self.usize(index);
@@ -303,6 +304,54 @@ impl Encoder<'_> {
                 self.tag(59);
                 self.expr(object);
                 self.expr(class);
+            }
+            TExpr::Closure {
+                func,
+                captures,
+                params,
+                ret,
+                ..
+            } => {
+                self.tag(64);
+                self.str(func);
+                self.usize(captures.len());
+                for capture in captures {
+                    self.expr(capture);
+                }
+                self.usize(params.len());
+                for param in params {
+                    self.ty(*param);
+                }
+                self.ty(*ret);
+            }
+            TExpr::CallValue {
+                func,
+                args,
+                params,
+                ret,
+            } => {
+                self.tag(65);
+                self.expr(func);
+                self.usize(args.len());
+                for arg in args {
+                    self.expr(arg);
+                }
+                self.usize(params.len());
+                for param in params {
+                    self.ty(*param);
+                }
+                self.ty(*ret);
+            }
+            TExpr::EnvCell { env, index, ty } => {
+                self.tag(66);
+                self.expr(env);
+                self.usize(*index);
+                self.ty(*ty);
+            }
+            TExpr::Capture(local, ty) => {
+                self.tag(67);
+                self.local(*local);
+                self.ty(*ty);
             }
             TExpr::HashMix { acc, value } => {
                 self.tag(63);

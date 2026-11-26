@@ -494,6 +494,26 @@ pub enum TExpr {
         acc: Box<TExpr>,
         value: Box<TExpr>,
     },
+    Closure {
+        func: String,
+        type_args: Vec<Ty>,
+        captures: Vec<TExpr>,
+        params: Vec<Ty>,
+        ret: Ty,
+        ty: Ty,
+    },
+    CallValue {
+        func: Box<TExpr>,
+        args: Vec<TExpr>,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    EnvCell {
+        env: Box<TExpr>,
+        index: usize,
+        ty: Ty,
+    },
+    Capture(LocalId, Ty),
     Witness {
         protocol: String,
         method: String,
@@ -550,6 +570,8 @@ impl TExpr {
             TExpr::Bind { init, .. } => init.ty(),
             TExpr::Then { value, .. } => value.ty(),
             TExpr::HashMix { .. } => Ty::Int,
+            TExpr::Closure { ty, .. } | TExpr::EnvCell { ty, .. } | TExpr::Capture(_, ty) => *ty,
+            TExpr::CallValue { ret, .. } => *ret,
             TExpr::DictOp { ty, .. } => *ty,
             TExpr::FuncAddr(_) | TExpr::ClassDesc(_) | TExpr::Descriptor(_) => Ty::Int,
             TExpr::InstanceOf { .. } => Ty::Bool,
@@ -908,6 +930,57 @@ impl<E> Rewriter<'_, E> {
                 base: Box::new(self.expr(base)?),
                 ty: (self.ty)(*ty)?,
             },
+            TExpr::Closure {
+                func,
+                type_args,
+                captures,
+                params,
+                ret,
+                ty,
+            } => {
+                let type_args = type_args
+                    .iter()
+                    .map(|t| (self.ty)(*t))
+                    .collect::<Result<Vec<_>, E>>()?;
+                let (func, type_args) = (self.call)(func.clone(), type_args)?;
+                TExpr::Closure {
+                    func,
+                    type_args,
+                    captures: captures
+                        .iter()
+                        .map(|c| self.expr(c))
+                        .collect::<Result<Vec<_>, E>>()?,
+                    params: params
+                        .iter()
+                        .map(|t| (self.ty)(*t))
+                        .collect::<Result<Vec<_>, E>>()?,
+                    ret: (self.ty)(*ret)?,
+                    ty: (self.ty)(*ty)?,
+                }
+            }
+            TExpr::CallValue {
+                func,
+                args,
+                params,
+                ret,
+            } => TExpr::CallValue {
+                func: Box::new(self.expr(func)?),
+                args: args
+                    .iter()
+                    .map(|a| self.expr(a))
+                    .collect::<Result<Vec<_>, E>>()?,
+                params: params
+                    .iter()
+                    .map(|t| (self.ty)(*t))
+                    .collect::<Result<Vec<_>, E>>()?,
+                ret: (self.ty)(*ret)?,
+            },
+            TExpr::EnvCell { env, index, ty } => TExpr::EnvCell {
+                env: Box::new(self.expr(env)?),
+                index: *index,
+                ty: (self.ty)(*ty)?,
+            },
+            TExpr::Capture(local, ty) => TExpr::Capture(*local, (self.ty)(*ty)?),
             TExpr::HashMix { acc, value } => TExpr::HashMix {
                 acc: Box::new(self.expr(acc)?),
                 value: Box::new(self.expr(value)?),

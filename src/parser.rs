@@ -129,6 +129,7 @@ fn parse_with(tokens: &[Spanned], header_only: bool) -> PResult<Decl> {
         header_only,
         nesting: 0,
         depth: 0,
+        no_trailing: false,
     };
     let decl = parser.decl()?;
     match parser.tokens.get(parser.pos) {
@@ -146,6 +147,7 @@ struct Parser<'a> {
     header_only: bool,
     nesting: usize,
     depth: usize,
+    no_trailing: bool,
 }
 
 impl Parser<'_> {
@@ -272,7 +274,27 @@ impl Parser<'_> {
         !self.on_same_line()
     }
 
+    fn function_type(&mut self) -> PResult<TypeRef> {
+        self.expect_punct("(")?;
+        self.enter()?;
+        let mut parts = Vec::new();
+        while !self.is_punct(")") {
+            if !parts.is_empty() {
+                self.expect_punct(",")?;
+            }
+            parts.push(self.type_ref()?);
+        }
+        self.leave();
+        self.expect_punct(")")?;
+        self.expect_punct("->")?;
+        parts.push(self.type_ref()?);
+        Ok(TypeRef::new("->".to_string(), parts))
+    }
+
     fn type_ref(&mut self) -> PResult<TypeRef> {
+        if self.is_punct("(") {
+            return self.function_type();
+        }
         let mut ty = if self.eat_punct("[") {
             self.enter()?;
             let element = self.type_ref();
@@ -673,7 +695,7 @@ impl Parser<'_> {
     }
 
     fn switch_kind(&mut self) -> PResult<StmtKind> {
-        let subject = self.expr()?;
+        let subject = self.header_expr()?;
         self.expect_punct("{")?;
         let mut cases = Vec::new();
         let outer = self.depth;
@@ -786,6 +808,10 @@ impl Parser<'_> {
 
     fn block_statements(&mut self) -> PResult<Vec<Stmt>> {
         self.expect_punct("{")?;
+        self.statements_until_close()
+    }
+
+    fn statements_until_close(&mut self) -> PResult<Vec<Stmt>> {
         let mut stmts = Vec::new();
         loop {
             while self.eat_punct(";") {}
@@ -815,7 +841,9 @@ impl Parser<'_> {
 
     fn stmt(&mut self) -> PResult<Stmt> {
         let line = self.line();
-        let kind = if self.is_keyword("var") || self.is_keyword("let") {
+        let kind = if self.eat_keyword("func") {
+            StmtKind::LocalFunc(Box::new(self.func_decl(line)?))
+        } else if self.is_keyword("var") || self.is_keyword("let") {
             self.let_kind()?
         } else if self.eat_keyword("if") {
             self.if_kind()?
@@ -832,7 +860,7 @@ impl Parser<'_> {
                     else_body,
                 }
             } else {
-                let cond = self.expr()?;
+                let cond = self.header_expr()?;
                 self.expect_keyword("else")?;
                 let else_body = self.block()?;
                 StmtKind::Guard { cond, else_body }
@@ -847,7 +875,7 @@ impl Parser<'_> {
                     body,
                 }
             } else {
-                let cond = self.expr()?;
+                let cond = self.header_expr()?;
                 let body = self.block()?;
                 StmtKind::While { cond, body }
             }
@@ -858,7 +886,7 @@ impl Parser<'_> {
                 let value = self.name()?;
                 self.expect_punct(")")?;
                 self.expect_keyword("in")?;
-                let iter = self.expr()?;
+                let iter = self.header_expr()?;
                 let body = self.block()?;
                 StmtKind::ForPair {
                     key,
@@ -869,7 +897,7 @@ impl Parser<'_> {
             } else {
                 let var = self.name()?;
                 self.expect_keyword("in")?;
-                let iter = self.expr()?;
+                let iter = self.header_expr()?;
                 let body = self.block()?;
                 StmtKind::For { var, iter, body }
             }
@@ -946,14 +974,14 @@ impl Parser<'_> {
         };
         let name = self.name()?;
         self.expect_punct("=")?;
-        Ok(Some((name, mutable, self.expr()?)))
+        Ok(Some((name, mutable, self.header_expr()?)))
     }
 
     fn if_kind(&mut self) -> PResult<StmtKind> {
         let binding = self.optional_binding()?;
         let cond = match &binding {
             Some(_) => None,
-            None => Some(self.expr()?),
+            None => Some(self.header_expr()?),
         };
         let then_body = self.block()?;
         let else_body = if self.eat_keyword("else") {
@@ -1276,6 +1304,39 @@ impl Parser<'_> {
                     },
                 );
                 self.check_depth(expr.depth())?;
+            } else if self.is_punct("{") && !self.no_trailing && self.trailing_target(&expr) {
+                let closure = self.closure_expr(self.line())?;
+                let arg = Arg::new(None, closure);
+                expr = match expr.into_kind() {
+                    ExprKind::Member { base, name } => Expr::new(
+                        line,
+                        ExprKind::MemberCall {
+                            base,
+                            name,
+                            args: vec![arg],
+                        },
+                    ),
+                    ExprKind::Ident(callee) => Expr::new(
+                        line,
+                        ExprKind::Call {
+                            callee,
+                            args: vec![arg],
+                        },
+                    ),
+                    ExprKind::Call { callee, mut args } => {
+                        args.push(arg);
+                        Expr::new(line, ExprKind::Call { callee, args })
+                    }
+                    ExprKind::MemberCall {
+                        base,
+                        name,
+                        mut args,
+                    } => {
+                        args.push(arg);
+                        Expr::new(line, ExprKind::MemberCall { base, name, args })
+                    }
+                    other => Expr::new(line, other),
+                };
             } else if self.is_punct("(") {
                 let args = self.args()?;
                 if matches!(
@@ -1313,6 +1374,16 @@ impl Parser<'_> {
         Ok(expr)
     }
 
+    fn trailing_target(&self, expr: &Expr) -> bool {
+        matches!(
+            expr.kind(),
+            ExprKind::Member { .. }
+                | ExprKind::Ident(_)
+                | ExprKind::Call { .. }
+                | ExprKind::MemberCall { .. }
+        ) && self.on_same_line()
+    }
+
     fn generic_name_args(&mut self) -> Option<Vec<TypeRef>> {
         if !self.is_punct("<") {
             return None;
@@ -1328,9 +1399,83 @@ impl Parser<'_> {
         parsed
     }
 
+    fn closure_signature(&mut self) -> Option<(Vec<ClosureParam>, Option<TypeRef>)> {
+        let start = self.pos;
+        let parsed = self.try_closure_signature();
+        if parsed.is_none() {
+            self.pos = start;
+        }
+        parsed
+    }
+
+    fn try_closure_signature(&mut self) -> Option<(Vec<ClosureParam>, Option<TypeRef>)> {
+        let mut params = Vec::new();
+        let mut ret = None;
+        if self.eat_punct("(") {
+            while !self.is_punct(")") {
+                if !params.is_empty() && !self.eat_punct(",") {
+                    return None;
+                }
+                let name = self.peek_name()?.to_string();
+                self.pos += 1;
+                let ty = if self.eat_punct(":") {
+                    Some(self.type_ref().ok()?)
+                } else {
+                    None
+                };
+                params.push(ClosureParam::new(name, ty));
+            }
+            self.pos += 1;
+            if self.eat_punct("->") {
+                ret = Some(self.type_ref().ok()?);
+            }
+        } else {
+            loop {
+                let name = self.peek_name()?.to_string();
+                self.pos += 1;
+                params.push(ClosureParam::new(name, None));
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+        }
+        self.eat_keyword("in").then_some((params, ret))
+    }
+
+    fn closure_expr(&mut self, line: u32) -> PResult<Expr> {
+        self.expect_punct("{")?;
+        let signature = self.closure_signature();
+        self.enter()?;
+        self.depth += 1;
+        self.check_depth(0)?;
+        let before = std::mem::replace(&mut self.no_trailing, false);
+        let body = self.statements_until_close();
+        self.no_trailing = before;
+        self.depth -= 1;
+        self.leave();
+        let body = body?;
+        let (params, ret) = match signature {
+            Some((params, ret)) => (Some(params), ret),
+            None => (None, None),
+        };
+        Ok(Expr::new(
+            line,
+            ExprKind::Closure(Box::new(ClosureExpr::new(params, ret, body))),
+        ))
+    }
+
+    fn header_expr(&mut self) -> PResult<Expr> {
+        let before = std::mem::replace(&mut self.no_trailing, true);
+        let expr = self.expr();
+        self.no_trailing = before;
+        expr
+    }
+
     fn args(&mut self) -> PResult<Vec<Arg>> {
         self.enter()?;
+        let before = std::mem::replace(&mut self.no_trailing, false);
         let args = self.argument_list();
+        self.no_trailing = before;
         self.leave();
         args
     }
@@ -1370,6 +1515,7 @@ impl Parser<'_> {
                         header_only: self.header_only,
                         nesting: self.nesting,
                         depth: self.depth,
+                        no_trailing: false,
                     };
                     let value = inner.expr();
                     self.leave();
@@ -1452,6 +1598,15 @@ impl Parser<'_> {
                 self.pos += 1;
                 return self.interpolation(line, &pieces);
             }
+            Some(Token::Punct(p)) if p == "{" => return self.closure_expr(line),
+            Some(Token::Punct(p)) if p == "$" => {
+                if let Some(Token::Int(n)) = self.peek_at(1) {
+                    let name = format!("${n}");
+                    self.pos += 2;
+                    return Ok(Expr::new(line, ExprKind::Ident(name)));
+                }
+                return self.fail("expected an expression");
+            }
             Some(Token::Punct(p)) if p == "[" => {
                 self.pos += 1;
                 self.enter()?;
@@ -1514,6 +1669,108 @@ mod tests {
 
     fn int(n: i64) -> Expr {
         ex(ExprKind::Int(n))
+    }
+
+    fn closure_of(expression: &Expr) -> &ClosureExpr {
+        match expression.kind() {
+            ExprKind::Closure(closure) => closure,
+            other => panic!("expected a closure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_closure_lists_its_parameters_before_in() {
+        let e = expr("{ a, b in a + b }");
+        let closure = closure_of(&e);
+        let names: Vec<&str> = closure
+            .params()
+            .map(|p| p.iter().map(ClosureParam::name).collect())
+            .unwrap_or_default();
+        assert_eq!(names, vec!["a", "b"]);
+        assert_eq!(closure.body().len(), 1);
+    }
+
+    #[test]
+    fn a_closure_may_annotate_its_parameters_and_result() {
+        let e = expr("{ (a: Int, b: Int) -> Int in a + b }");
+        let closure = closure_of(&e);
+        let params = closure.params().unwrap();
+        assert_eq!(params[0].ty(), Some(&TypeRef::from("Int")));
+        assert_eq!(closure.ret(), Some(&TypeRef::from("Int")));
+    }
+
+    #[test]
+    fn a_closure_without_in_has_no_parameter_list_and_dollar_names_are_identifiers() {
+        let e = expr("{ $0 + $1 }");
+        let closure = closure_of(&e);
+        assert!(closure.params().is_none());
+        assert_eq!(
+            closure.body()[0].kind(),
+            &StmtKind::Expr(ex(ExprKind::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(ex(ExprKind::Ident("$0".to_string()))),
+                rhs: Box::new(ex(ExprKind::Ident("$1".to_string()))),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_closure_after_a_call_or_a_member_is_its_last_argument() {
+        match expr("xs.map { $0 }").kind() {
+            ExprKind::MemberCall { name, args, .. } => {
+                assert_eq!(name, "map");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        match expr("apply(1) { $0 }").kind() {
+            ExprKind::Call { callee, args } => {
+                assert_eq!(callee, "apply");
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+        match expr("run { }").kind() {
+            ExprKind::Call { args, .. } => assert_eq!(args.len(), 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_brace_after_a_condition_opens_the_body_and_not_a_closure() {
+        let stmts = body(
+            "if ready { go() }\nwhile ready { stop() }\nfor x in xs { use(x) }\nguard ready else { return }",
+        );
+        assert_eq!(stmts.len(), 4);
+        assert!(matches!(stmts[0].kind(), StmtKind::If { .. }));
+        assert!(matches!(stmts[2].kind(), StmtKind::For { .. }));
+    }
+
+    #[test]
+    fn a_function_type_names_its_parameters_and_result() {
+        let f = func("func f(a: (Int, String) -> Bool, b: () -> Void) {\n}");
+        assert_eq!(
+            f.params()[0].ty(),
+            &TypeRef::new(
+                "->".to_string(),
+                vec![
+                    TypeRef::from("Int"),
+                    TypeRef::from("String"),
+                    TypeRef::from("Bool")
+                ]
+            )
+        );
+        assert_eq!(
+            f.params()[1].ty(),
+            &TypeRef::new("->".to_string(), vec![TypeRef::from("Void")])
+        );
+    }
+
+    #[test]
+    fn a_function_may_be_declared_inside_a_body() {
+        let stmts = body("func add(_ a: Int) -> Int { return a + 1 }\nlet x = add(2)");
+        assert!(matches!(stmts[0].kind(), StmtKind::LocalFunc(_)));
+        assert_eq!(stmts.len(), 2);
     }
 
     #[test]

@@ -313,7 +313,7 @@ fn entry_reloc(
 
 fn clif_type(ty: Ty) -> Option<Type> {
     match ty {
-        Ty::Int | Ty::Str | Ty::Char | Ty::Struct(_) | Ty::Class(_) | Ty::Enum(_) => {
+        Ty::Int | Ty::Str | Ty::Char | Ty::Struct(_) | Ty::Class(_) | Ty::Enum(_) | Ty::Func(_) => {
             Some(types::I64)
         }
         Ty::Bool => Some(types::I8),
@@ -2620,6 +2620,76 @@ impl Emitter<'_, '_> {
                 args,
                 ..
             } => self.dict_op(*op, *key, *value, hash, equal, args)?,
+            TExpr::Closure {
+                func,
+                captures,
+                params,
+                ret,
+                ..
+            } => {
+                let values = captures
+                    .iter()
+                    .map(|c| self.value(c))
+                    .collect::<GResult<Vec<_>>>()?;
+                let words = u32::try_from(values.len() + 1)?;
+                let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    words * FIELD_SIZE,
+                    3,
+                ));
+                let env = self.builder.ins().stack_addr(types::I64, slot, 0);
+                let mut with_env = vec![Ty::Int];
+                with_env.extend(params.iter().copied());
+                let sig = signature(self.call_conv, &with_env, *ret);
+                let func_ref = self.import_func(&symbol(func), sig, true);
+                let code = self.builder.ins().func_addr(types::I64, func_ref);
+                let flags = MemFlagsData::trusted();
+                self.builder.ins().store(flags, code, env, 0);
+                for (index, value) in values.into_iter().enumerate() {
+                    self.builder
+                        .ins()
+                        .store(flags, value, env, field_offset(index + 1));
+                }
+                env
+            }
+            TExpr::CallValue {
+                func,
+                args,
+                params,
+                ret,
+            } => {
+                let mut with_env = vec![Ty::Int];
+                with_env.extend(params.iter().copied());
+                let sig = signature(self.call_conv, &with_env, *ret);
+                let env = self.value(func)?;
+                let result_slot = if ret.is_struct() {
+                    Some(self.alloc_struct(*ret)?)
+                } else {
+                    None
+                };
+                let mut values: Vec<Value> = result_slot.into_iter().collect();
+                values.push(env);
+                for arg in args {
+                    values.push(self.value(arg)?);
+                }
+                let flags = MemFlagsData::trusted();
+                let code = self.builder.ins().load(types::I64, flags, env, 0);
+                let signature = self.builder.import_signature(sig);
+                let call = self.builder.ins().call_indirect(signature, code, &values);
+                return Ok(result_slot.or_else(|| self.builder.inst_results(call).first().copied()));
+            }
+            TExpr::EnvCell { env, index, .. } => {
+                let env = self.value(env)?;
+                self.builder.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    env,
+                    field_offset(index + 1),
+                )
+            }
+            TExpr::Capture(..) => {
+                return Err(CodegenError::from("a captured variable was not lowered"));
+            }
             TExpr::HashMix { acc, value } => {
                 let acc = self.value(acc)?;
                 let value = self.value(value)?;

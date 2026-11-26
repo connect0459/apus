@@ -363,6 +363,7 @@ impl Scan<'_> {
             }
             StmtKind::Return(value) => value.as_ref().is_some_and(|e| self.expr_uses_self(e)),
             StmtKind::Break(_) | StmtKind::Continue(_) => false,
+            StmtKind::LocalFunc(_) => true,
             StmtKind::Labeled { stmt, .. } => self.stmt_uses_self(stmt),
             StmtKind::If {
                 cond,
@@ -506,6 +507,7 @@ impl Scan<'_> {
                 self.scope.methods.contains(&callee.as_str())
                     || args.iter().any(|a| self.expr_uses_self(a.value()))
             }
+            ExprKind::Closure(_) => true,
             ExprKind::TypeCall { args, .. } => args.iter().any(|a| self.expr_uses_self(a.value())),
             ExprKind::GenericCall { args, .. } => {
                 args.iter().any(|a| self.expr_uses_self(a.value()))
@@ -545,6 +547,7 @@ fn returns(stmt: &Stmt) -> bool {
         | StmtKind::ForPair { body, .. } => any_returns(body),
         StmtKind::Switch { cases, .. } => cases.iter().any(|c| any_returns(c.body())),
         StmtKind::Labeled { stmt, .. } => returns(stmt),
+        StmtKind::LocalFunc(_) => false,
         StmtKind::Let { .. }
         | StmtKind::Assign { .. }
         | StmtKind::Break(_)

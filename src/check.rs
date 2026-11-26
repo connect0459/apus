@@ -2523,6 +2523,10 @@ impl FnCx<'_> {
                 iter,
                 body,
             } => self.for_pair(line, key, value, iter, body),
+            StmtKind::LocalFunc(_) => Err(CheckError::at(
+                line,
+                "local functions are not supported yet",
+            )),
             StmtKind::Expr(expr) => self.expr_stmt(expr),
             StmtKind::Switch { .. }
             | StmtKind::Labeled { .. }
@@ -5143,6 +5147,7 @@ impl FnCx<'_> {
             )),
             ExprKind::ArrayLiteral(items) => self.array_literal(line, items, expected),
             ExprKind::DictLiteral(pairs) => self.dict_literal(line, pairs, expected),
+            ExprKind::Closure(_) => Err(CheckError::at(line, "closures are not supported yet")),
             ExprKind::TypeCall { ty, args } => {
                 self.collection_init(line, ty.name(), Some(ty.args()), args, expected)
             }

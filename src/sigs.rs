@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::ast::{
     Decl, EnumCaseDecl, EnumDecl, Field, FuncDecl, ProtocolDecl, StructDecl, TypeRef,
 };
-use crate::tir::{TExpr, TStruct};
+use crate::tir::{TExpr, TFunc, TStruct};
 use crate::types::{EnumId, StructId, Ty};
 
 pub const PRINT: &str = "print";
@@ -412,6 +412,7 @@ enum Origin {
     EnumLayout(EnumId),
     EnumCell(EnumId),
     Existential(String),
+    VariableCell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -435,6 +436,10 @@ struct Instances {
     cell_owner: HashMap<StructId, EnumId>,
     cell_index: HashMap<EnumId, StructId>,
     existentials: HashMap<String, StructId>,
+    funcs: Vec<(Vec<Ty>, Ty)>,
+    func_index: HashMap<(Vec<Ty>, Ty), usize>,
+    cells: HashMap<Ty, StructId>,
+    closures: HashMap<String, Rc<TFunc>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1349,6 +1354,12 @@ impl Signatures {
             (Some(ty), _) => self.resolve_type(ty, &scope, func.line())?,
             (None, _) => Ty::Void,
         };
+        if self.contains_func(ret) {
+            return Err(CheckError::at(
+                func.line(),
+                "a function type can only be the type of a parameter",
+            ));
+        }
         let sig = FuncSig {
             generics,
             bounds,
@@ -1655,6 +1666,21 @@ impl Signatures {
     pub fn resolve_type(&self, tr: &TypeRef, scope: &Scope, line: u32) -> CResult<Ty> {
         let name = tr.name();
         let args_given = !tr.args().is_empty();
+        if name == "->" {
+            let Some((ret, params)) = tr.args().split_last() else {
+                return Err(CheckError::at(line, "a function type needs a result type"));
+            };
+            let params = params
+                .iter()
+                .map(|p| self.resolve_type(p, scope, line))
+                .collect::<CResult<Vec<_>>>()?;
+            let ret = if ret.name() == "Void" && ret.args().is_empty() {
+                Ty::Void
+            } else {
+                self.resolve_type(ret, scope, line)?
+            };
+            return Ok(self.func_ty(params, ret));
+        }
         if let Some((_, ty)) = scope.iter().find(|(n, _)| n == name) {
             return self.reject_args(args_given, name, line).map(|()| *ty);
         }
@@ -1707,10 +1733,18 @@ impl Signatures {
                 ),
             ));
         }
-        tr.args()
+        let resolved = tr
+            .args()
             .iter()
             .map(|arg| self.resolve_type(arg, scope, line))
-            .collect()
+            .collect::<CResult<Vec<_>>>()?;
+        if resolved.iter().any(|ty| self.contains_func(*ty)) {
+            return Err(CheckError::at(
+                line,
+                "a function type can only be the type of a parameter",
+            ));
+        }
+        Ok(resolved)
     }
 
     pub fn instance_name(&self, base: &str, args: &[Ty], scope: &Scope) -> String {
@@ -1841,6 +1875,12 @@ impl Signatures {
         }
         for field in decl.fields() {
             let ty = self.resolve_type(field.ty(), &own_scope, at)?;
+            if self.contains_func(ty) {
+                return Err(CheckError::at(
+                    at,
+                    "a function type can only be the type of a parameter",
+                ));
+            }
             if fields.iter().any(|f| f.name == field.name()) {
                 return Err(CheckError::at(
                     at,
@@ -2321,6 +2361,10 @@ impl Signatures {
         if let Some(inner) = self.unwrapped(ty) {
             return format!("{}?", self.display(inner, scope));
         }
+        if let Some((params, ret)) = self.func_parts(ty) {
+            let shown: Vec<String> = params.iter().map(|p| self.display(*p, scope)).collect();
+            return format!("({}) -> {}", shown.join(", "), self.display(ret, scope));
+        }
         if let Some(element) = self.array_element(ty) {
             return format!("[{}]", self.display(element, scope));
         }
@@ -2361,6 +2405,7 @@ impl Signatures {
             Ty::Enum(id) => self
                 .enum_sig(id)
                 .map_or_else(String::new, |e| e.name.clone()),
+            Ty::Func(_) => "function".to_string(),
         }
     }
 
@@ -2373,7 +2418,7 @@ impl Signatures {
                     let (def, args) = instances.enum_origin.get(owner.index())?;
                     Some((Kind::Enum, *def, args.clone()))
                 }
-                Origin::Existential(_) => None,
+                Origin::Existential(_) | Origin::VariableCell => None,
             },
             Ty::Enum(id) => {
                 let (def, args) = instances.enum_origin.get(id.index())?;
@@ -2383,7 +2428,83 @@ impl Signatures {
         }
     }
 
+    pub fn cell_of(&self, ty: Ty) -> Ty {
+        let mut instances = self.instances.borrow_mut();
+        if let Some(cell) = instances.cells.get(&ty) {
+            return Ty::Struct(*cell);
+        }
+        let cell = StructId::new(instances.structs.len());
+        let name = format!("$Cell<{}>", cell.index());
+        instances.structs.push(Rc::new(StructSig {
+            name,
+            fields: vec![FieldSig {
+                name: "value".to_string(),
+                ty,
+                mutable: true,
+                unowned: false,
+                weak: false,
+            }],
+        }));
+        instances.struct_origin.push(Origin::VariableCell);
+        instances.cells.insert(ty, cell);
+        Ty::Struct(cell)
+    }
+
+    pub fn cell_value(&self, cell: Ty) -> Option<Ty> {
+        let Ty::Struct(id) = cell else { return None };
+        let instances = self.instances.borrow();
+        if !matches!(
+            instances.struct_origin.get(id.index()),
+            Some(Origin::VariableCell)
+        ) {
+            return None;
+        }
+        instances
+            .structs
+            .get(id.index())?
+            .fields
+            .first()
+            .map(|f| f.ty)
+    }
+
+    pub fn register_closure(&self, name: String, body: Rc<TFunc>) {
+        self.instances.borrow_mut().closures.insert(name, body);
+    }
+
+    pub fn closure(&self, name: &str) -> Option<Rc<TFunc>> {
+        self.instances.borrow().closures.get(name).cloned()
+    }
+
+    pub fn func_ty(&self, params: Vec<Ty>, ret: Ty) -> Ty {
+        let mut instances = self.instances.borrow_mut();
+        let key = (params, ret);
+        if let Some(index) = instances.func_index.get(&key) {
+            return Ty::Func(*index);
+        }
+        let index = instances.funcs.len();
+        instances.funcs.push(key.clone());
+        instances.func_index.insert(key, index);
+        Ty::Func(index)
+    }
+
+    pub fn func_parts(&self, ty: Ty) -> Option<(Vec<Ty>, Ty)> {
+        let Ty::Func(index) = ty else { return None };
+        self.instances.borrow().funcs.get(index).cloned()
+    }
+
+    pub fn contains_func(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::Func(_) => true,
+            _ => self
+                .origin_of(ty)
+                .is_some_and(|(_, _, args)| args.iter().any(|a| self.contains_func(*a))),
+        }
+    }
+
     pub fn has_param(&self, ty: Ty) -> bool {
+        if let Some((params, ret)) = self.func_parts(ty) {
+            return params.iter().any(|p| self.has_param(*p)) || self.has_param(ret);
+        }
         match ty {
             Ty::Param(_) | Ty::Assoc(_) => true,
             _ => self
@@ -2405,6 +2526,16 @@ impl Signatures {
                 Some(Some(existing)) => *existing == actual,
                 None => false,
             };
+        }
+        if let (Some((pattern_params, pattern_ret)), Some((actual_params, actual_ret))) =
+            (self.func_parts(pattern), self.func_parts(actual))
+        {
+            return pattern_params.len() == actual_params.len()
+                && pattern_params
+                    .iter()
+                    .zip(&actual_params)
+                    .all(|(p, a)| self.unify(*p, *a, bound))
+                && self.unify(pattern_ret, actual_ret, bound);
         }
         if pattern.is_class()
             && let Some((_, pattern_def, _)) = self.origin_of(pattern)
@@ -2466,6 +2597,14 @@ impl Signatures {
                 .get(index)
                 .copied()
                 .ok_or_else(|| CheckError::at(line, "internal error: unbound type parameter"));
+        }
+        if let Some((params, ret)) = self.func_parts(ty) {
+            let params = params
+                .iter()
+                .map(|p| self.subst(*p, args, scope, line))
+                .collect::<CResult<Vec<_>>>()?;
+            let ret = self.subst(ret, args, scope, line)?;
+            return Ok(self.func_ty(params, ret));
         }
         let Some((kind, def, inner)) = self.origin_of(ty) else {
             return Ok(ty);

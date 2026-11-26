@@ -623,6 +623,7 @@ impl Pass<'_> {
                 | TExpr::LoadWeak(_)
                 | TExpr::Select { .. }
                 | TExpr::Then { .. }
+                | TExpr::CallValue { .. }
         ) || matches!(expr, TExpr::StrOp { op, .. } if op.allocates())
             || matches!(expr, TExpr::ArrayOp { op, .. } if op.allocates())
             || matches!(expr, TExpr::DictOp { op, .. } if op.allocates())
@@ -678,6 +679,38 @@ impl Pass<'_> {
                 op: *op,
                 args: self.borrowed_all(args),
             },
+            TExpr::Closure {
+                func,
+                type_args,
+                captures,
+                params,
+                ret,
+                ty,
+            } => TExpr::Closure {
+                func: func.clone(),
+                type_args: type_args.clone(),
+                captures: self.borrowed_all(captures),
+                params: params.clone(),
+                ret: *ret,
+                ty: *ty,
+            },
+            TExpr::CallValue {
+                func,
+                args,
+                params,
+                ret,
+            } => TExpr::CallValue {
+                func: Box::new(self.borrowed(func)),
+                args: self.borrowed_all(args),
+                params: params.clone(),
+                ret: *ret,
+            },
+            TExpr::EnvCell { env, index, ty } => TExpr::EnvCell {
+                env: Box::new(self.borrowed(env)),
+                index: *index,
+                ty: *ty,
+            },
+            TExpr::Capture(local, ty) => TExpr::Capture(*local, *ty),
             TExpr::HashMix { acc, value } => TExpr::HashMix {
                 acc: Box::new(self.borrowed(acc)),
                 value: Box::new(self.borrowed(value)),

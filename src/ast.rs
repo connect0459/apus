@@ -623,6 +623,7 @@ pub enum StmtKind {
         iter: Expr,
         body: Vec<Stmt>,
     },
+    LocalFunc(Box<FuncDecl>),
     Switch {
         subject: Expr,
         cases: Vec<SwitchCase>,
@@ -718,6 +719,7 @@ fn depth_of(kind: &ExprKind) -> u32 {
     let deepest = |args: &[Arg]| args.iter().map(|a| a.value().depth).max().unwrap_or(0);
     1 + match kind {
         ExprKind::Nil
+        | ExprKind::Closure(_)
         | ExprKind::ChainValue
         | ExprKind::Int(_)
         | ExprKind::Bool(_)
@@ -780,6 +782,51 @@ impl Expr {
 impl PartialEq for Expr {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosureParam {
+    name: String,
+    ty: Option<TypeRef>,
+}
+
+impl ClosureParam {
+    pub fn new(name: String, ty: Option<TypeRef>) -> Self {
+        Self { name, ty }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn ty(&self) -> Option<&TypeRef> {
+        self.ty.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosureExpr {
+    params: Option<Vec<ClosureParam>>,
+    ret: Option<TypeRef>,
+    body: Vec<Stmt>,
+}
+
+impl ClosureExpr {
+    pub fn new(params: Option<Vec<ClosureParam>>, ret: Option<TypeRef>, body: Vec<Stmt>) -> Self {
+        Self { params, ret, body }
+    }
+
+    pub fn params(&self) -> Option<&[ClosureParam]> {
+        self.params.as_deref()
+    }
+
+    pub fn ret(&self) -> Option<&TypeRef> {
+        self.ret.as_ref()
+    }
+
+    pub fn body(&self) -> &[Stmt] {
+        &self.body
     }
 }
 
@@ -867,6 +914,7 @@ pub enum ExprKind {
         ty: TypeRef,
         args: Vec<Arg>,
     },
+    Closure(Box<ClosureExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
