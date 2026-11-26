@@ -5344,3 +5344,68 @@ fn the_taking_members_check_their_arguments() {
     );
     assert!(build_error("func main() { let a = [1]\n a.removeAll() }").contains("constant"));
 }
+
+#[test]
+fn a_member_of_a_struct_element_can_be_assigned() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var y: Int\n}\nfunc main() {\n  var ps = [P(x: 1, y: 2), P(x: 3, y: 4)]\n  ps[0].x = 10\n  ps[1].y += 5\n  ps[1].x *= 2\n  print(ps[0].x)\n  print(ps[0].y)\n  print(ps[1].x)\n  print(ps[1].y)\n}"
+        ),
+        "10\n2\n6\n9\n"
+    );
+}
+
+#[test]
+fn assigning_a_member_of_an_element_does_not_touch_a_copy() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nfunc main() {\n  var ps = [P(x: 1), P(x: 2)]\n  let copy = ps\n  ps[0].x = 9\n  print(ps[0].x)\n  print(copy[0].x)\n  var other = ps\n  other[1].x = 7\n  print(ps[1].x)\n  print(other[1].x)\n}"
+        ),
+        "9\n1\n2\n7\n"
+    );
+}
+
+#[test]
+fn members_of_members_arrays_and_classes_under_an_element_can_be_changed() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nstruct Inner {\n  var v: Int\n}\nstruct Outer {\n  var inner: Inner\n  var items: [Int]\n  var box: Box\n  var name: String\n}\nfunc main() {\n  var os = [Outer(inner: Inner(v: 1), items: [1], box: Box(n: 1), name: \"a\")]\n  os[0].inner.v = 5\n  os[0].items.append(2)\n  os[0].items[0] = 8\n  os[0].name += \"b\"\n  os[0].box = Box(n: 2)\n  os[0].box.n = 3\n  print(os[0].inner.v)\n  print(os[0].items[0] + os[0].items[1])\n  print(os[0].name)\n  print(os[0].box.n)\n}"
+        ),
+        "1\n5\n10\nab\n3\n3\n"
+    );
+}
+
+#[test]
+fn a_member_of_an_element_of_a_nested_array_and_of_a_class_element_can_be_assigned() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nclass C {\n  var n: Int\n}\nfunc main() {\n  var g = [[P(x: 1)], [P(x: 2)]]\n  let h = g\n  g[1][0].x = 20\n  print(g[1][0].x)\n  print(h[1][0].x)\n  let cs = [C(n: 1)]\n  cs[0].n = 4\n  print(cs[0].n)\n}"
+        ),
+        "20\n2\n4\n"
+    );
+}
+
+#[test]
+fn assigning_a_member_of_a_struct_element_traps_out_of_range_and_checks_constants() {
+    run_expecting_a_crash(
+        "struct P {\n  var x: Int\n}\nfunc main() {\n  var ps = [P(x: 1)]\n  ps[1].x = 2\n}",
+    );
+    assert!(
+        build_error(
+            "struct P {\n  var x: Int\n}\nfunc main() {\n  let ps = [P(x: 1)]\n  ps[0].x = 2\n}"
+        )
+        .contains("constant")
+    );
+    assert!(
+        build_error(
+            "struct P {\n  let x: Int\n}\nfunc main() {\n  var ps = [P(x: 1)]\n  ps[0].x = 2\n}"
+        )
+        .contains("constant")
+    );
+    assert!(
+        build_error(
+            "struct P {\n  var x: Int\n}\nfunc main() {\n  var ps = [P(x: 1)]\n  ps[0].z = 2\n}"
+        )
+        .contains("no member")
+    );
+}

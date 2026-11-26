@@ -1839,7 +1839,9 @@ impl FnCx<'_> {
         match target.kind() {
             ExprKind::Ident(name) => Ok(vec![self.assign_variable(line, name, update)?]),
             ExprKind::Member { base, name } => {
-                Ok(vec![self.assign_member(line, base, name, update)?])
+                let mut stmts = self.element_prefix(line, base)?;
+                stmts.push(self.assign_member(line, base, name, update)?);
+                Ok(stmts)
             }
             ExprKind::Index { base, index } => {
                 let mut stmts = self.update_stmts(line, base, &Update::Unique)?;
@@ -1854,6 +1856,21 @@ impl FnCx<'_> {
                 line,
                 "only a variable, a member or an element can be changed",
             )),
+        }
+    }
+
+    fn element_prefix(&mut self, line: u32, expr: &Expr) -> CResult<Vec<TStmt>> {
+        match expr.kind() {
+            ExprKind::Member { base, .. } => self.element_prefix(line, base),
+            ExprKind::Index { base, .. } => {
+                let element = self.value(expr)?.ty();
+                if element.is_struct() {
+                    self.update_stmts(line, base, &Update::Unique)
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -2128,6 +2145,22 @@ impl FnCx<'_> {
             ExprKind::Member { base, name } => {
                 let path = self.assignable_path(line, base)?;
                 self.hop(line, path, name)
+            }
+            ExprKind::Index { base, index } => {
+                let array = self.value(base)?;
+                let elem = self.array_target(line, array.ty())?;
+                let position = self.int_value(index)?;
+                Ok(AssignPath {
+                    value: TExpr::ArrayOp {
+                        op: ArrayOp::Get,
+                        elem,
+                        args: vec![array, position],
+                        ty: elem,
+                    },
+                    root: "an array element".to_string(),
+                    root_mutable: true,
+                    crossed_class: elem.is_class(),
+                })
             }
             _ => Err(CheckError::at(
                 line,
