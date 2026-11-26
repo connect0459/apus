@@ -6969,3 +6969,64 @@ fn if_case_is_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn an_if_takes_several_conditions_of_every_kind() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case square(Int)\n}\nfunc describe(_ s: Shape?, _ limit: Int) -> String {\n  if let shape = s, case .circle(let r) = shape, r > limit {\n    return \"big circle \" + String(r)\n  } else if let shape = s, case .square(let w) = shape {\n    return \"square \" + String(w)\n  } else {\n    return \"other\"\n  }\n}\nfunc main() {\n  print(describe(.circle(9), 5))\n  print(describe(.circle(2), 5))\n  print(describe(.square(4), 5))\n  print(describe(nil, 5))\n  let a = 3\n  let b = 4\n  if a > 1, b > 3 { print(\"both\") }\n  if a > 1, b > 9 { print(\"no\") } else { print(\"else ran once\") }\n  let pair = (1, 2)\n  let maybe: Int? = 5\n  if case (1, let y) = pair, let m = maybe, y + m == 7 { print(\"sum \" + String(y + m)) }\n}"
+        ),
+        "big circle 9\nother\nsquare 4\nother\nboth\nelse ran once\nsum 7\n"
+    );
+}
+
+#[test]
+fn a_guard_binds_names_for_the_rest_of_the_scope_from_every_kind_of_condition() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case other\n}\nfunc radius(_ s: Shape, _ extra: Int?) -> Int {\n  guard case .circle(let r) = s, let e = extra, r > 0 else {\n    return -1\n  }\n  return r + e\n}\nfunc corner(_ p: (Int, Int)) -> String {\n  guard case (0, let y) = p else {\n    return \"away\"\n  }\n  return \"y=\" + String(y)\n}\nfunc main() {\n  print(radius(.circle(5), 2))\n  print(radius(.circle(0), 2))\n  print(radius(.other, 2))\n  print(radius(.circle(5), nil))\n  print(corner((0, 7)))\n  print(corner((1, 7)))\n  var total = 0\n  for i in 0..<5 {\n    guard case 0...2 = i, i != 1 else { continue }\n    total += i\n  }\n  print(total)\n}"
+        ),
+        "7\n-1\n-1\n-1\ny=7\naway\n2\n"
+    );
+}
+
+#[test]
+fn a_while_loops_while_every_condition_holds_and_re_evaluates_them() {
+    assert_eq!(
+        run(
+            "enum Step {\n  case go(Int)\n  case stop\n}\nfunc next(_ n: Int) -> Step {\n  if n < 4 { return .go(n + 1) }\n  return .stop\n}\nfunc main() {\n  var n = 0\n  var seen = 0\n  while case .go(let m) = next(n) {\n    n = m\n    seen += 1\n  }\n  print(n)\n  print(seen)\n  var xs = [1, 2, 3, 0, 5]\n  var sum = 0\n  while let first = xs.first, first > 0 {\n    sum += first\n    xs.remove(at: 0)\n  }\n  print(sum)\n  print(xs.count)\n  var i = 0\n  var evens = 0\n  while i < 10, case 0...7 = i {\n    i += 1\n    if i % 2 == 1 { continue }\n    evens += 1\n    if evens == 3 { break }\n  }\n  print(i)\n  print(evens)\n}"
+        ),
+        "4\n4\n6\n2\n6\n3\n"
+    );
+}
+
+#[test]
+fn a_labeled_loop_with_conditions_can_be_left_from_an_inner_loop() {
+    assert_eq!(
+        main_printing(
+            "var found = 0\nouter: while found < 100, case 0...99 = found {\n  var j = 0\n  while j < 5 {\n    j += 1\n    found += 10\n    if found >= 30 { break outer }\n  }\n}\nprint(found)"
+        ),
+        "30\n"
+    );
+}
+
+#[test]
+fn condition_lists_are_checked() {
+    for (body, message) in [
+        ("if 1 { }", "expected Bool"),
+        ("let x = 1\n  if let v = x, v > 0 { }", "needs an optional"),
+        (
+            "let x = 1\n  guard case 1 = x, x > 0 else {\n    print(x)\n  }",
+            "must leave the scope",
+        ),
+        ("while case .none = 5, true { }", "cannot match"),
+        (
+            "let t = (1, 2)\n  guard case (let a, let b) = t, case (0, _), 3 = t else { return }",
+            "expected",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

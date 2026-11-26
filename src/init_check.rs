@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{CaseLabel, Expr, ExprKind, Stmt, StmtKind, TuplePart};
+use crate::ast::{CaseLabel, Condition, Expr, ExprKind, Stmt, StmtKind, TuplePart};
 
 const SELF: &str = "self";
 
@@ -178,6 +178,11 @@ impl Scan<'_> {
                 ..
             }
             | StmtKind::IfCase {
+                then_body,
+                else_body,
+                ..
+            }
+            | StmtKind::IfConds {
                 then_body,
                 else_body,
                 ..
@@ -413,6 +418,34 @@ impl Scan<'_> {
                 self.locals.pop();
                 used
             }
+            StmtKind::IfConds {
+                conditions,
+                then_body,
+                else_body,
+            } => {
+                self.locals.push(HashSet::new());
+                let mut used = self.conditions_use_self(conditions);
+                used |= self.stmts_use_self(then_body);
+                self.locals.pop();
+                if let Some(body) = else_body {
+                    used |= self.block_uses_self(body);
+                }
+                used
+            }
+            StmtKind::WhileConds { conditions, body } => {
+                self.locals.push(HashSet::new());
+                let mut used = self.conditions_use_self(conditions);
+                used |= self.stmts_use_self(body);
+                self.locals.pop();
+                used
+            }
+            StmtKind::GuardConds {
+                conditions,
+                else_body,
+            } => {
+                let used = self.block_uses_self(else_body);
+                used | self.conditions_use_self(conditions)
+            }
             StmtKind::IfCase {
                 label,
                 subject,
@@ -521,6 +554,43 @@ impl Scan<'_> {
         }
     }
 
+    fn conditions_use_self(&mut self, conditions: &[Condition]) -> bool {
+        let mut used = false;
+        for condition in conditions {
+            match condition {
+                Condition::Expr(expr) => used |= self.expr_uses_self(expr),
+                Condition::Let { name, value, .. } => {
+                    used |= self.expr_uses_self(value);
+                    self.declare(name);
+                }
+                Condition::Case { label, subject } => {
+                    used |= self.expr_uses_self(subject);
+                    match label {
+                        CaseLabel::Patterns(patterns) => {
+                            for name in patterns
+                                .iter()
+                                .filter_map(|p| p.bindings())
+                                .flatten()
+                                .flatten()
+                            {
+                                self.declare(name);
+                            }
+                        }
+                        CaseLabel::Tuples(alternatives) => {
+                            for part in alternatives.iter().flatten() {
+                                if let TuplePart::Bind(name) = part {
+                                    self.declare(name);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        used
+    }
+
     fn expr_uses_self(&self, expr: &Expr) -> bool {
         match expr.kind() {
             ExprKind::Ident(name) => name == SELF || self.is_member(name),
@@ -601,10 +671,16 @@ fn returns(stmt: &Stmt) -> bool {
             then_body,
             else_body,
             ..
-        } => any_returns(then_body) || else_body.as_deref().is_some_and(any_returns),
-        StmtKind::Guard { else_body, .. } | StmtKind::GuardLet { else_body, .. } => {
-            any_returns(else_body)
         }
+        | StmtKind::IfConds {
+            then_body,
+            else_body,
+            ..
+        } => any_returns(then_body) || else_body.as_deref().is_some_and(any_returns),
+        StmtKind::Guard { else_body, .. }
+        | StmtKind::GuardLet { else_body, .. }
+        | StmtKind::GuardConds { else_body, .. } => any_returns(else_body),
+        StmtKind::WhileConds { body, .. } => any_returns(body),
         StmtKind::While { body, .. }
         | StmtKind::WhileLet { body, .. }
         | StmtKind::For { body, .. }

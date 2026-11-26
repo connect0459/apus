@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{
-    Arg, BinOp, CaptureKind, CaseLabel, ClosureExpr, Expr, ExprKind, FuncDecl, Pattern, Stmt,
-    StmtKind, SwitchCase, TuplePart, TypeRef, UnaryOp,
+    Arg, BinOp, CaptureKind, CaseLabel, ClosureExpr, Condition, Expr, ExprKind, FuncDecl, Pattern,
+    Stmt, StmtKind, SwitchCase, TuplePart, TypeRef, UnaryOp,
 };
 use crate::capture::EnvKind;
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
@@ -207,6 +207,11 @@ fn always_returns(stmts: &[Stmt]) -> bool {
             ..
         })
         | Some(StmtKind::IfCase {
+            then_body,
+            else_body: Some(else_body),
+            ..
+        })
+        | Some(StmtKind::IfConds {
             then_body,
             else_body: Some(else_body),
             ..
@@ -2198,6 +2203,11 @@ fn exits(stmts: &[Stmt], in_switch: bool, inner_labels: &[String]) -> bool {
             then_body,
             else_body: Some(else_body),
             ..
+        })
+        | Some(StmtKind::IfConds {
+            then_body,
+            else_body: Some(else_body),
+            ..
         }) => {
             exits(then_body, in_switch, inner_labels) && exits(else_body, in_switch, inner_labels)
         }
@@ -2886,6 +2896,28 @@ impl<'a> FnCx<'a> {
 
     fn lower_stmt(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
         match stmt.kind() {
+            StmtKind::IfConds {
+                conditions,
+                then_body,
+                else_body,
+            } => {
+                let lowered =
+                    self.if_conditions(stmt.line(), conditions, then_body, else_body.as_deref())?;
+                out.push(TStmt::If {
+                    cond: TExpr::Bool(true),
+                    then_body: lowered,
+                    else_body: Vec::new(),
+                });
+                Ok(())
+            }
+            StmtKind::WhileConds { conditions, body } => {
+                out.push(self.while_conditions(stmt.line(), conditions, body)?);
+                Ok(())
+            }
+            StmtKind::GuardConds {
+                conditions,
+                else_body,
+            } => self.guard_conditions(stmt.line(), conditions, else_body, out),
             StmtKind::IfCase {
                 label,
                 subject,
@@ -3559,7 +3591,19 @@ impl<'a> FnCx<'a> {
         elements: &[Ty],
         parts: &[LocalId],
     ) -> CResult<(TExpr, Vec<TStmt>)> {
-        let line = case.line();
+        let (condition, mut body) =
+            self.tuple_bindings(case.line(), alternatives, elements, parts)?;
+        body.extend(self.block(case.body())?);
+        Ok((condition, body))
+    }
+
+    fn tuple_bindings(
+        &mut self,
+        line: u32,
+        alternatives: &[Vec<TuplePart>],
+        elements: &[Ty],
+        parts: &[LocalId],
+    ) -> CResult<(TExpr, Vec<TStmt>)> {
         let mut tests: Vec<TExpr> = Vec::new();
         let mut bindings: Vec<(&str, usize)> = Vec::new();
         for alternative in alternatives {
@@ -3614,8 +3658,339 @@ impl<'a> FnCx<'a> {
                 init: TExpr::Local(parts[index], elements[index]),
             });
         }
-        body.extend(self.block(case.body())?);
         Ok((combined.unwrap_or(TExpr::Bool(true)), body))
+    }
+
+    fn case_condition(
+        &mut self,
+        line: u32,
+        label: &CaseLabel,
+        subject: TExpr,
+        out: &mut Vec<TStmt>,
+    ) -> CResult<(TExpr, Vec<TStmt>)> {
+        let ty = subject.ty();
+        match label {
+            CaseLabel::Patterns(patterns) => {
+                let Some(sig) = self.sigs.enum_of(ty) else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("an enum pattern cannot match a {}", self.name_of(ty)),
+                    ));
+                };
+                let held = self.temp(ty);
+                out.push(TStmt::Let {
+                    local: held,
+                    init: subject,
+                });
+                let mut covered = vec![false; sig.cases().len()];
+                let probe = SwitchCase::new(line, label.clone(), Vec::new());
+                let tests = self.case_patterns(&probe, patterns, (&sig, held, ty), &mut covered)?;
+                if tests.is_empty() {
+                    return Err(CheckError::at(line, "a case needs a pattern"));
+                }
+                if tests.iter().all(|(_, prelude)| prelude.is_empty()) {
+                    let mut combined: Option<TExpr> = None;
+                    for (test, _) in tests {
+                        combined = Some(match combined {
+                            None => test,
+                            Some(before) => compare(BinOp::Or, before, test),
+                        });
+                    }
+                    return Ok((combined.unwrap_or(TExpr::Bool(false)), Vec::new()));
+                }
+                let mut tests = tests;
+                if tests.len() != 1 {
+                    return Err(CheckError::at(
+                        line,
+                        "a pattern that binds names must be the only pattern",
+                    ));
+                }
+                let (test, prelude) = tests.remove(0);
+                Ok((test, prelude))
+            }
+            CaseLabel::Tuples(alternatives) => {
+                let Some(elements) = self.sigs.tuple_elements(ty) else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("a tuple pattern cannot match a {}", self.name_of(ty)),
+                    ));
+                };
+                let held = self.temp(ty);
+                out.push(TStmt::Let {
+                    local: held,
+                    init: subject,
+                });
+                let mut parts = Vec::with_capacity(elements.len());
+                for (index, element) in elements.iter().enumerate() {
+                    let local = self.temp(*element);
+                    out.push(TStmt::Let {
+                        local,
+                        init: TExpr::Field {
+                            base: Box::new(TExpr::Local(held, ty)),
+                            index,
+                            ty: *element,
+                        },
+                    });
+                    parts.push(local);
+                }
+                self.tuple_bindings(line, alternatives, &elements, &parts)
+            }
+            CaseLabel::Values(values) => {
+                if !matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Char) {
+                    return Err(CheckError::at(
+                        line,
+                        format!("a value pattern cannot match a {}", self.name_of(ty)),
+                    ));
+                }
+                let held = self.temp(ty);
+                out.push(TStmt::Let {
+                    local: held,
+                    init: subject,
+                });
+                let mut bools = [false, false];
+                let mut combined: Option<TExpr> = None;
+                for value in values {
+                    let test = self.value_test(line, held, ty, value, &mut bools)?;
+                    combined = Some(match combined {
+                        None => test,
+                        Some(before) => compare(BinOp::Or, before, test),
+                    });
+                }
+                Ok((combined.unwrap_or(TExpr::Bool(false)), Vec::new()))
+            }
+            CaseLabel::Default => Err(CheckError::at(line, "'default' is not a pattern here")),
+        }
+    }
+
+    fn conditions(
+        &mut self,
+        line: u32,
+        conditions: &[Condition],
+        inner: &mut dyn FnMut(&mut Self) -> CResult<Vec<TStmt>>,
+    ) -> CResult<Vec<TStmt>> {
+        let Some((first, rest)) = conditions.split_first() else {
+            return inner(self);
+        };
+        match first {
+            Condition::Expr(expr) => {
+                let test = self.condition(expr)?;
+                let then_body = self.conditions(line, rest, inner)?;
+                Ok(vec![TStmt::If {
+                    cond: test,
+                    then_body,
+                    else_body: Vec::new(),
+                }])
+            }
+            Condition::Let {
+                name,
+                mutable,
+                value,
+            } => {
+                let value = self.value(value)?;
+                let optional = value.ty();
+                let payload = self.sigs.unwrapped(optional).ok_or_else(|| {
+                    CheckError::at(
+                        line,
+                        format!(
+                            "'let' in a condition needs an optional, but found {}",
+                            self.name_of(optional)
+                        ),
+                    )
+                })?;
+                let held = self.temp(optional);
+                self.scopes.push(HashMap::new());
+                let body = self
+                    .declare(line, name, payload, *mutable)
+                    .and_then(|local| {
+                        let mut body = vec![TStmt::Let {
+                            local,
+                            init: TExpr::Field {
+                                base: Box::new(TExpr::Local(held, optional)),
+                                index: 1,
+                                ty: payload,
+                            },
+                        }];
+                        body.extend(self.conditions(line, rest, inner)?);
+                        Ok(body)
+                    });
+                self.scopes.pop();
+                let body = body?;
+                Ok(vec![TStmt::If {
+                    cond: TExpr::Bool(true),
+                    then_body: vec![
+                        TStmt::Let {
+                            local: held,
+                            init: value,
+                        },
+                        TStmt::If {
+                            cond: compare(
+                                BinOp::Ne,
+                                TExpr::Field {
+                                    base: Box::new(TExpr::Local(held, optional)),
+                                    index: 0,
+                                    ty: Ty::Int,
+                                },
+                                TExpr::Int(NONE_CASE as i64),
+                            ),
+                            then_body: body,
+                            else_body: Vec::new(),
+                        },
+                    ],
+                    else_body: Vec::new(),
+                }])
+            }
+            Condition::Case { label, subject } => {
+                let subject = self.value(subject)?;
+                let mut prefix = Vec::new();
+                self.scopes.push(HashMap::new());
+                let body = self
+                    .case_condition(line, label, subject, &mut prefix)
+                    .and_then(|(test, binds)| {
+                        let mut body = binds;
+                        body.extend(self.conditions(line, rest, inner)?);
+                        Ok((test, body))
+                    });
+                self.scopes.pop();
+                let (test, body) = body?;
+                prefix.push(TStmt::If {
+                    cond: test,
+                    then_body: body,
+                    else_body: Vec::new(),
+                });
+                Ok(vec![TStmt::If {
+                    cond: TExpr::Bool(true),
+                    then_body: prefix,
+                    else_body: Vec::new(),
+                }])
+            }
+        }
+    }
+
+    fn if_conditions(
+        &mut self,
+        line: u32,
+        conditions: &[Condition],
+        then_body: &[Stmt],
+        else_body: Option<&[Stmt]>,
+    ) -> CResult<Vec<TStmt>> {
+        let matched = else_body.map(|_| self.temp(Ty::Bool));
+        let mut out = Vec::new();
+        if let Some(flag) = matched {
+            out.push(TStmt::Let {
+                local: flag,
+                init: TExpr::Bool(false),
+            });
+        }
+        let chain = self.conditions(line, conditions, &mut |cx| {
+            let mut body = Vec::new();
+            if let Some(flag) = matched {
+                body.push(TStmt::Assign {
+                    local: flag,
+                    value: TExpr::Bool(true),
+                });
+            }
+            body.extend(cx.block(then_body)?);
+            Ok(body)
+        })?;
+        out.extend(chain);
+        if let (Some(flag), Some(stmts)) = (matched, else_body) {
+            let otherwise = self.block(stmts)?;
+            out.push(TStmt::If {
+                cond: TExpr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(local(flag, Ty::Bool)),
+                },
+                then_body: otherwise,
+                else_body: Vec::new(),
+            });
+        }
+        Ok(out)
+    }
+
+    fn while_conditions(
+        &mut self,
+        line: u32,
+        conditions: &[Condition],
+        body: &[Stmt],
+    ) -> CResult<TStmt> {
+        let matched = self.temp(Ty::Bool);
+        let mut stmts = vec![TStmt::Let {
+            local: matched,
+            init: TExpr::Bool(false),
+        }];
+        let label = self.pending_label.take();
+        self.targets.push(Target {
+            label,
+            kind: TargetKind::Loop,
+        });
+        let chain = self.conditions(line, conditions, &mut |cx| {
+            let mut inner = vec![TStmt::Assign {
+                local: matched,
+                value: TExpr::Bool(true),
+            }];
+            inner.extend(cx.block(body)?);
+            Ok(inner)
+        });
+        self.targets.pop();
+        stmts.extend(chain?);
+        stmts.push(TStmt::If {
+            cond: TExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(local(matched, Ty::Bool)),
+            },
+            then_body: vec![TStmt::Break(0)],
+            else_body: Vec::new(),
+        });
+        Ok(TStmt::While {
+            cond: TExpr::Bool(true),
+            body: stmts,
+        })
+    }
+
+    fn guard_conditions(
+        &mut self,
+        line: u32,
+        conditions: &[Condition],
+        else_body: &[Stmt],
+        out: &mut Vec<TStmt>,
+    ) -> CResult<()> {
+        self.require_exit(line, else_body)?;
+        for condition in conditions {
+            match condition {
+                Condition::Expr(expr) => {
+                    let test = self.condition(expr)?;
+                    let leave = self.block(else_body)?;
+                    out.push(TStmt::If {
+                        cond: TExpr::Unary {
+                            op: UnaryOp::Not,
+                            expr: Box::new(test),
+                        },
+                        then_body: leave,
+                        else_body: Vec::new(),
+                    });
+                }
+                Condition::Let {
+                    name,
+                    mutable,
+                    value,
+                } => self.guard_let(line, name, *mutable, value, else_body, out)?,
+                Condition::Case { label, subject } => {
+                    let subject = self.value(subject)?;
+                    let leave = self.block(else_body)?;
+                    let (test, binds) = self.case_condition(line, label, subject, out)?;
+                    out.push(TStmt::If {
+                        cond: TExpr::Unary {
+                            op: UnaryOp::Not,
+                            expr: Box::new(test),
+                        },
+                        then_body: leave,
+                        else_body: Vec::new(),
+                    });
+                    out.extend(binds);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn value_test(
@@ -3897,7 +4272,11 @@ impl<'a> FnCx<'a> {
                 body,
             } => self.for_pair(line, key, value, iter, body),
             StmtKind::LocalFunc(func) => self.local_function(line, func),
-            StmtKind::IfCase { .. } | StmtKind::LetTuple { .. } => Err(CheckError::at(
+            StmtKind::IfCase { .. }
+            | StmtKind::IfConds { .. }
+            | StmtKind::WhileConds { .. }
+            | StmtKind::GuardConds { .. }
+            | StmtKind::LetTuple { .. } => Err(CheckError::at(
                 line,
                 "internal error: a tuple binding is lowered with its block",
             )),

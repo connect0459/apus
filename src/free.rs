@@ -1,4 +1,4 @@
-use crate::ast::{CaseLabel, Expr, ExprKind, Stmt, StmtKind, TuplePart};
+use crate::ast::{CaseLabel, Condition, Expr, ExprKind, Stmt, StmtKind, TuplePart};
 
 pub fn names_in(stmts: &[Stmt]) -> Vec<String> {
     let mut found = Vec::new();
@@ -50,6 +50,26 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
             expression(cond, found);
             statements(then_body, found);
             optional_body(else_body.as_deref(), found);
+        }
+        StmtKind::IfConds {
+            conditions,
+            then_body,
+            else_body,
+        } => {
+            conditions.iter().for_each(|c| condition(c, found));
+            statements(then_body, found);
+            optional_body(else_body.as_deref(), found);
+        }
+        StmtKind::WhileConds { conditions, body } => {
+            conditions.iter().for_each(|c| condition(c, found));
+            statements(body, found);
+        }
+        StmtKind::GuardConds {
+            conditions,
+            else_body,
+        } => {
+            conditions.iter().for_each(|c| condition(c, found));
+            statements(else_body, found);
         }
         StmtKind::IfCase {
             label,
@@ -128,6 +148,26 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
             }
         }
         StmtKind::Expr(expr) => expression(expr, found),
+    }
+}
+
+fn condition(condition: &Condition, found: &mut Vec<String>) {
+    match condition {
+        Condition::Expr(expr) | Condition::Let { value: expr, .. } => expression(expr, found),
+        Condition::Case { label, subject } => {
+            expression(subject, found);
+            match label {
+                CaseLabel::Values(values) => values.iter().for_each(|v| expression(v, found)),
+                CaseLabel::Tuples(alternatives) => {
+                    for part in alternatives.iter().flatten() {
+                        if let TuplePart::Value(value) = part {
+                            expression(value, found);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 

@@ -916,34 +916,54 @@ impl Parser<'_> {
         } else if self.eat_keyword("switch") {
             self.switch_kind()?
         } else if self.eat_keyword("guard") {
-            if let Some((name, mutable, value)) = self.optional_binding()? {
-                self.expect_keyword("else")?;
-                let else_body = self.block()?;
-                StmtKind::GuardLet {
+            let mut conditions = self.condition_list()?;
+            self.expect_keyword("else")?;
+            let else_body = self.block()?;
+            match (conditions.len(), conditions.pop()) {
+                (1, Some(Condition::Expr(cond))) => StmtKind::Guard { cond, else_body },
+                (
+                    1,
+                    Some(Condition::Let {
+                        name,
+                        mutable,
+                        value,
+                    }),
+                ) => StmtKind::GuardLet {
                     name,
                     mutable,
                     value,
                     else_body,
+                },
+                (_, last) => {
+                    conditions.extend(last);
+                    StmtKind::GuardConds {
+                        conditions,
+                        else_body,
+                    }
                 }
-            } else {
-                let cond = self.header_expr()?;
-                self.expect_keyword("else")?;
-                let else_body = self.block()?;
-                StmtKind::Guard { cond, else_body }
             }
         } else if self.eat_keyword("while") {
-            if let Some((name, mutable, value)) = self.optional_binding()? {
-                let body = self.block()?;
-                StmtKind::WhileLet {
+            let mut conditions = self.condition_list()?;
+            let body = self.block()?;
+            match (conditions.len(), conditions.pop()) {
+                (1, Some(Condition::Expr(cond))) => StmtKind::While { cond, body },
+                (
+                    1,
+                    Some(Condition::Let {
+                        name,
+                        mutable,
+                        value,
+                    }),
+                ) => StmtKind::WhileLet {
                     name,
                     mutable,
                     value,
                     body,
+                },
+                (_, last) => {
+                    conditions.extend(last);
+                    StmtKind::WhileConds { conditions, body }
                 }
-            } else {
-                let cond = self.header_expr()?;
-                let body = self.block()?;
-                StmtKind::While { cond, body }
             }
         } else if self.eat_keyword("for") {
             if self.eat_punct("(") {
@@ -1055,19 +1075,6 @@ impl Parser<'_> {
         })
     }
 
-    fn optional_binding(&mut self) -> PResult<Option<(String, bool, Expr)>> {
-        let mutable = if self.eat_keyword("let") {
-            false
-        } else if self.eat_keyword("var") {
-            true
-        } else {
-            return Ok(None);
-        };
-        let name = self.name()?;
-        self.expect_punct("=")?;
-        Ok(Some((name, mutable, self.header_expr()?)))
-    }
-
     fn case_label(&mut self) -> PResult<CaseLabel> {
         Ok(if self.is_punct("(") {
             let mut alternatives = vec![self.tuple_pattern()?];
@@ -1090,23 +1097,38 @@ impl Parser<'_> {
         })
     }
 
-    fn if_kind(&mut self) -> PResult<StmtKind> {
-        let matching = if self.eat_keyword("case") {
+    fn condition(&mut self) -> PResult<Condition> {
+        if self.eat_keyword("case") {
             let label = self.case_label()?;
             self.expect_punct("=")?;
-            Some((label, self.header_expr()?))
-        } else {
-            None
-        };
-        let binding = if matching.is_some() {
-            None
-        } else {
-            self.optional_binding()?
-        };
-        let cond = match (&binding, &matching) {
-            (None, None) => Some(self.header_expr()?),
-            _ => None,
-        };
+            let subject = self.header_expr()?;
+            return Ok(Condition::Case { label, subject });
+        }
+        if self.is_keyword("let") || self.is_keyword("var") {
+            let mutable = self.is_keyword("var");
+            self.pos += 1;
+            let name = self.name()?;
+            self.expect_punct("=")?;
+            let value = self.header_expr()?;
+            return Ok(Condition::Let {
+                name,
+                mutable,
+                value,
+            });
+        }
+        Ok(Condition::Expr(self.header_expr()?))
+    }
+
+    fn condition_list(&mut self) -> PResult<Vec<Condition>> {
+        let mut list = vec![self.condition()?];
+        while self.eat_punct(",") {
+            list.push(self.condition()?);
+        }
+        Ok(list)
+    }
+
+    fn if_kind(&mut self) -> PResult<StmtKind> {
+        let mut conditions = self.condition_list()?;
         let then_body = self.block()?;
         let else_body = if self.eat_keyword("else") {
             let line = self.line();
@@ -1122,28 +1144,40 @@ impl Parser<'_> {
         } else {
             None
         };
-        if let Some((label, subject)) = matching {
-            return Ok(StmtKind::IfCase {
-                label,
-                subject,
+        Ok(match (conditions.len(), conditions.pop()) {
+            (1, Some(Condition::Expr(cond))) => StmtKind::If {
+                cond,
                 then_body,
                 else_body,
-            });
-        }
-        Ok(match (binding, cond) {
-            (Some((name, mutable, value)), _) => StmtKind::IfLet {
+            },
+            (
+                1,
+                Some(Condition::Let {
+                    name,
+                    mutable,
+                    value,
+                }),
+            ) => StmtKind::IfLet {
                 name,
                 mutable,
                 value,
                 then_body,
                 else_body,
             },
-            (None, Some(cond)) => StmtKind::If {
-                cond,
+            (1, Some(Condition::Case { label, subject })) => StmtKind::IfCase {
+                label,
+                subject,
                 then_body,
                 else_body,
             },
-            (None, None) => return self.fail("expected a condition"),
+            (_, last) => {
+                conditions.extend(last);
+                StmtKind::IfConds {
+                    conditions,
+                    then_body,
+                    else_body,
+                }
+            }
         })
     }
 
@@ -1949,6 +1983,35 @@ mod tests {
             ExprKind::Closure(closure) => closure,
             other => panic!("expected a closure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_condition_list_mixes_expressions_bindings_and_patterns() {
+        match body("if let a = x, case .some(let b) = y, a > b { }")[0].kind() {
+            StmtKind::IfConds { conditions, .. } => {
+                assert!(matches!(conditions[0], Condition::Let { .. }));
+                assert!(matches!(conditions[1], Condition::Case { .. }));
+                assert!(matches!(conditions[2], Condition::Expr(_)));
+            }
+            other => panic!("expected a condition list, got {other:?}"),
+        }
+        assert!(matches!(
+            body("guard case .a = x else { return }")[0].kind(),
+            StmtKind::GuardConds { .. }
+        ));
+        assert!(matches!(
+            body("while case .a = x, n > 0 { }")[0].kind(),
+            StmtKind::WhileConds { .. }
+        ));
+        assert!(matches!(
+            body("if a, b { }")[0].kind(),
+            StmtKind::IfConds { .. }
+        ));
+        assert!(matches!(body("if a { }")[0].kind(), StmtKind::If { .. }));
+        assert!(matches!(
+            body("guard let a = x else { return }")[0].kind(),
+            StmtKind::GuardLet { .. }
+        ));
     }
 
     #[test]

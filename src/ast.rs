@@ -604,6 +604,19 @@ pub enum StmtKind {
         cond: Expr,
         body: Vec<Stmt>,
     },
+    IfConds {
+        conditions: Vec<Condition>,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+    },
+    WhileConds {
+        conditions: Vec<Condition>,
+        body: Vec<Stmt>,
+    },
+    GuardConds {
+        conditions: Vec<Condition>,
+        else_body: Vec<Stmt>,
+    },
     IfCase {
         label: CaseLabel,
         subject: Expr,
@@ -673,6 +686,20 @@ impl SwitchCase {
     pub fn body(&self) -> &[Stmt] {
         &self.body
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Condition {
+    Expr(Expr),
+    Let {
+        name: String,
+        mutable: bool,
+        value: Expr,
+    },
+    Case {
+        label: CaseLabel,
+        subject: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
