@@ -5666,3 +5666,59 @@ fn the_dictionary_and_set_forms_reject_misuse() {
         build_error("func main() { let a = [1]\n print(a[0, default: 1]) }").contains("default")
     );
 }
+
+#[test]
+fn appending_through_a_default_creates_and_extends_the_entry_in_place() {
+    assert_eq!(
+        main_printing(
+            "var groups: [String: [Int]] = [:]\ngroups[\"a\", default: []].append(1)\ngroups[\"b\", default: []].append(2)\ngroups[\"a\", default: []].append(3)\nprint(groups.count)\nprint(groups[\"a\"]?.count ?? 0)\nprint((groups[\"a\"] ?? [])[1])\nprint((groups[\"b\"] ?? [])[0])\nvar words: [Int: [String]] = [:]\nfor w in [\"x\", \"yy\", \"z\", \"ww\", \"v\"] {\n  words[w.count, default: []].append(w)\n}\nprint(words[1]?.joined(separator: \",\") ?? \"\")\nprint(words[2]?.joined(separator: \",\") ?? \"\")"
+        ),
+        "2\n2\n3\n2\nx,z,v\nyy,ww\n"
+    );
+}
+
+#[test]
+fn changing_through_a_default_does_not_touch_a_copy() {
+    assert_eq!(
+        main_printing(
+            "var a: [String: [Int]] = [\"k\": [1]]\nlet b = a\na[\"k\", default: []].append(2)\na[\"n\", default: []].append(9)\nprint(a[\"k\"]?.count ?? 0)\nprint(b[\"k\"]?.count ?? 0)\nprint(a.count)\nprint(b.count)\nlet row = a[\"k\"] ?? []\na[\"k\", default: []].append(3)\nprint(row.count)"
+        ),
+        "2\n1\n2\n1\n2\n"
+    );
+}
+
+#[test]
+fn other_updates_work_through_a_default_and_on_members() {
+    assert_eq!(
+        run(
+            "class Board {\n  var rows: [Int: [Int]]\n  init() { self.rows = [:] }\n  func add(_ r: Int, _ v: Int) { rows[r, default: []].append(v) }\n}\nstruct Index {\n  var lists: [String: [String]]\n}\nfunc main() {\n  var d: [String: [Int]] = [:]\n  d[\"a\", default: [0, 0]][1] = 5\n  d[\"a\", default: []].insert(7, at: 0)\n  d[\"a\", default: []].removeLast()\n  print(d[\"a\"]?.count ?? 0)\n  print((d[\"a\"] ?? [])[0])\n  d[\"a\", default: []].removeAll()\n  print(d[\"a\"]?.count ?? -1)\n  var i = Index(lists: [:])\n  i.lists[\"x\", default: []].append(\"p\")\n  i.lists[\"x\", default: []].append(\"q\")\n  print(i.lists[\"x\"]?.count ?? 0)\n  let b = Board()\n  b.add(1, 10)\n  b.add(1, 20)\n  print(b.rows[1]?.count ?? 0)\n  var nested: [Int: [String: [Int]]] = [:]\n  nested[1, default: [:]][\"k\", default: []].append(4)\n  print((nested[1] ?? [:])[\"k\"]?.count ?? 0)\n}"
+        ),
+        "2\n7\n0\n2\n2\n1\n"
+    );
+}
+
+#[test]
+fn appending_through_a_default_does_not_copy_the_entry_each_time() {
+    let source = "func main() {\n  var d: [Int: [Int]] = [:]\n  var i = 0\n  while i < 100000 {\n    d[i % 3, default: []].append(i)\n    i += 1\n  }\n  print(d[0]?.count ?? 0)\n  print(d.count)\n}";
+    assert_eq!(run(source), "33334\n3\n");
+}
+
+#[test]
+fn a_default_update_checks_its_dictionary_and_constants() {
+    assert!(
+        build_error("func main() { let d: [Int: [Int]] = [:]\n d[1, default: []].append(2) }")
+            .contains("constant")
+    );
+    assert!(
+        build_error("func main() { var d: [Int: [Int]] = [:]\n d[1, default: [\"x\"]].append(2) }")
+            .contains("expected Int")
+    );
+    assert!(
+        build_error("func main() { var d: [Int: [Int]] = [:]\n d[1, default: []].append(\"x\") }")
+            .contains("expected Int")
+    );
+    assert!(
+        build_error("func main() { var a = [[1]]\n a[0, default: []].append(2) }")
+            .contains("default")
+    );
+}

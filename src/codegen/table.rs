@@ -481,6 +481,7 @@ impl Emitter<'_, '_> {
         dict: Value,
         key: Value,
         value: Option<Value>,
+        overwrite: bool,
     ) -> GResult<Value> {
         let flags = MemFlagsData::trusted();
         let key = self.detach(key, shape.key)?;
@@ -503,9 +504,15 @@ impl Emitter<'_, '_> {
         self.builder.switch_to_block(replace);
         let entries = self.tload(table, DICT_ENTRIES);
         let entry = self.entry_address(shape, entries, found);
-        self.release_part(entry, Self::value_offset(shape), shape.value)?;
-        if let Some(value) = value {
-            self.put_element(entry, Self::value_offset(shape), value, shape.value)?;
+        if overwrite {
+            self.release_part(entry, Self::value_offset(shape), shape.value)?;
+            if let Some(value) = value {
+                self.put_element(entry, Self::value_offset(shape), value, shape.value)?;
+            }
+        } else if let Some(value) = value
+            && self.counted(shape.value)?
+        {
+            self.release(value, shape.value)?;
         }
         self.release(key, shape.key)?;
         self.builder.ins().jump(done, &[]);
@@ -613,9 +620,18 @@ impl Emitter<'_, '_> {
                 let digest = self.table_hash(&shape, values[1])?;
                 self.table_find(&shape, values[0], values[1], digest)
             }
-            DictOp::Set => {
+            DictOp::Set | DictOp::Ensure => {
                 let stored = values.get(2).copied();
-                self.table_set(&shape, values[0], values[1], stored)
+                self.table_set(&shape, values[0], values[1], stored, op == DictOp::Set)
+            }
+            DictOp::Store => {
+                let stored = self.detach(values[2], shape.value)?;
+                let entries = self.tload(values[0], DICT_ENTRIES);
+                let entry = self.entry_address(&shape, entries, values[1]);
+                self.release_part(entry, Self::value_offset(&shape), shape.value)?;
+                self.put_element(entry, Self::value_offset(&shape), stored, shape.value)?;
+                self.retain_reference(values[0])?;
+                Ok(values[0])
             }
             DictOp::Remove => self.table_remove(&shape, values[0], values[1]),
             DictOp::Key | DictOp::Value | DictOp::Live => {

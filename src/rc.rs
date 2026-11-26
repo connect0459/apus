@@ -692,9 +692,14 @@ impl Pass<'_> {
                 ty,
             } => {
                 let args = match op {
-                    DictOp::Set => {
+                    DictOp::Set | DictOp::Ensure => {
                         let mut rewritten = vec![self.borrowed(&args[0])];
                         rewritten.extend(args[1..].iter().map(|a| self.owned_value(a)));
+                        rewritten
+                    }
+                    DictOp::Store => {
+                        let mut rewritten = self.borrowed_all(&args[..2]);
+                        rewritten.push(self.owned_value(&args[2]));
                         rewritten
                     }
                     _ => self.borrowed_all(args),

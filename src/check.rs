@@ -805,6 +805,11 @@ enum Update<'e> {
     },
     SetInsert(&'e [Arg]),
     SetRemove(&'e [Arg]),
+    Default {
+        key: &'e Expr,
+        default: &'e Expr,
+        inner: &'e Update<'e>,
+    },
     Within {
         index: &'e Expr,
         inner: &'e Update<'e>,
@@ -2261,6 +2266,19 @@ impl FnCx<'_> {
                 stmts.push(self.assign_member(line, base, name, update)?);
                 Ok(stmts)
             }
+            ExprKind::IndexDefault {
+                base,
+                index,
+                default,
+            } => self.update_stmts(
+                line,
+                base,
+                &Update::Default {
+                    key: index,
+                    default,
+                    inner: update,
+                },
+            ),
             ExprKind::Index { base, index } => {
                 let mut stmts = self.update_stmts(line, base, &Update::Unique)?;
                 let within = Update::Within {
@@ -2428,6 +2446,77 @@ impl FnCx<'_> {
                     key,
                     stored,
                     vec![current, key_arg, new_value],
+                    target_ty,
+                ))
+            }
+            Update::Default {
+                key: key_expr,
+                default,
+                inner,
+            } => {
+                let Some((key, stored)) = self
+                    .sigs
+                    .table_parts(target_ty)
+                    .filter(|_| !self.sigs.is_set(target_ty))
+                else {
+                    return Err(CheckError::at(
+                        line,
+                        format!("{} is not a dictionary", self.name_of(target_ty)),
+                    ));
+                };
+                self.expected = Some(key);
+                let wanted = self.value(key_expr)?;
+                let wanted = self.coerce(line, key, wanted)?;
+                self.expected = Some(stored);
+                let fallback = self.value(default)?;
+                let fallback = self.coerce(line, stored, fallback)?;
+                let held = self.temp(target_ty);
+                let key_local = self.temp(key);
+                let at = self.temp(Ty::Int);
+                let ensured = table_op(
+                    DictOp::Ensure,
+                    key,
+                    stored,
+                    vec![
+                        current,
+                        TExpr::Bind {
+                            local: key_local,
+                            init: Box::new(wanted),
+                        },
+                        fallback,
+                    ],
+                    target_ty,
+                );
+                let position = table_op(
+                    DictOp::Find,
+                    key,
+                    stored,
+                    vec![local(held, target_ty), local(key_local, key)],
+                    Ty::Int,
+                );
+                let present = table_op(
+                    DictOp::Value,
+                    key,
+                    stored,
+                    vec![local(held, target_ty), local(at, Ty::Int)],
+                    stored,
+                );
+                let changed = self.updated(line, inner, stored, present)?;
+                Ok(table_op(
+                    DictOp::Store,
+                    key,
+                    stored,
+                    vec![
+                        TExpr::Bind {
+                            local: held,
+                            init: Box::new(ensured),
+                        },
+                        TExpr::Bind {
+                            local: at,
+                            init: Box::new(position),
+                        },
+                        changed,
+                    ],
                     target_ty,
                 ))
             }

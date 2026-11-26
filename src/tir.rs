@@ -99,6 +99,8 @@ pub enum DictOp {
     Key,
     Value,
     Live,
+    Ensure,
+    Store,
 }
 
 impl DictOp {
@@ -110,11 +112,16 @@ impl DictOp {
             DictOp::Key => 4,
             DictOp::Value => 5,
             DictOp::Live => 6,
+            DictOp::Ensure => 7,
+            DictOp::Store => 8,
         }
     }
 
     pub fn allocates(self) -> bool {
-        matches!(self, DictOp::Set | DictOp::Remove)
+        matches!(
+            self,
+            DictOp::Set | DictOp::Remove | DictOp::Ensure | DictOp::Store
+        )
     }
 }
 
