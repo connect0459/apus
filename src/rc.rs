@@ -606,6 +606,7 @@ impl Pass<'_> {
                 | TExpr::RetainWeak(_)
                 | TExpr::LoadWeak(_)
                 | TExpr::Select { .. }
+                | TExpr::Then { .. }
         ) || matches!(expr, TExpr::StrOp { op, .. } if op.allocates())
             || matches!(expr, TExpr::ArrayOp { op, .. } if op.allocates())
     }
@@ -660,6 +661,13 @@ impl Pass<'_> {
                 op: *op,
                 args: self.borrowed_all(args),
             },
+            TExpr::Then { value, after } => {
+                let value = self.owned_value(value);
+                TExpr::Then {
+                    value: Box::new(value),
+                    after: self.block(after),
+                }
+            }
             TExpr::ArrayOp { op, elem, args, ty } => {
                 let args = match op {
                     ArrayOp::Buffer => self.owned_all(args),

@@ -444,6 +444,7 @@ enum Update<'e> {
     RemoveLast(&'e [Arg]),
     Remove(&'e [Arg]),
     Unique,
+    RemoveAll(&'e [Arg]),
     Within {
         index: &'e Expr,
         inner: &'e Update<'e>,
@@ -1907,6 +1908,21 @@ impl FnCx<'_> {
                     ty: target_ty,
                 })
             }
+            Update::RemoveAll(args) => {
+                let elem = self.array_target(line, target_ty)?;
+                if !args.is_empty() {
+                    return Err(CheckError::at(line, "removeAll takes no arguments"));
+                }
+                let buffer = TExpr::ArrayOp {
+                    op: ArrayOp::Buffer,
+                    elem,
+                    args: Vec::new(),
+                    ty: Ty::Int,
+                };
+                Ok(self
+                    .sigs
+                    .construct(target_ty, vec![TExpr::Int(0), TExpr::Int(0), buffer]))
+            }
             Update::Unique => {
                 let elem = self.array_target(line, target_ty)?;
                 Ok(TExpr::ArrayOp {
@@ -2350,6 +2366,7 @@ impl FnCx<'_> {
     fn array_method(
         &mut self,
         line: u32,
+        base: &Expr,
         receiver: TExpr,
         elem: Ty,
         name: &str,
@@ -2375,7 +2392,10 @@ impl FnCx<'_> {
                     ret: Ty::Bool,
                 })
             }
-            "append" | "insert" | "remove" | "removeLast" => Err(CheckError::at(
+            "removeLast" | "popLast" | "remove" => {
+                self.array_taking(line, base, receiver, elem, name, args)
+            }
+            "append" | "insert" | "removeAll" => Err(CheckError::at(
                 line,
                 format!("'{name}' changes the array: write it as a statement of its own"),
             )),
@@ -2383,6 +2403,110 @@ impl FnCx<'_> {
                 line,
                 format!("{} has no method '{name}'", self.name_of(receiver.ty())),
             )),
+        }
+    }
+
+    fn array_taking(
+        &mut self,
+        line: u32,
+        base: &Expr,
+        receiver: TExpr,
+        elem: Ty,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let ty = receiver.ty();
+        let get = |array: TExpr, position: TExpr| TExpr::ArrayOp {
+            op: ArrayOp::Get,
+            elem,
+            args: vec![array, position],
+            ty: elem,
+        };
+        match name {
+            "remove" => {
+                let usage = "remove takes 'at:' with a position";
+                let [at] = args else {
+                    return Err(CheckError::at(line, usage));
+                };
+                if at.label() != Some("at") {
+                    return Err(CheckError::at(line, usage));
+                }
+                let position = self.int_value(at.value())?;
+                let held = self.temp(Ty::Int);
+                let value = get(
+                    receiver,
+                    TExpr::Bind {
+                        local: held,
+                        init: Box::new(position),
+                    },
+                );
+                let after = self.update_stmts(line, base, &Update::Remove(args))?;
+                Ok(TExpr::Then {
+                    value: Box::new(value),
+                    after,
+                })
+            }
+            _ => {
+                if !args.is_empty() {
+                    return Err(CheckError::at(line, format!("{name} takes no arguments")));
+                }
+                let held = self.temp(ty);
+                let last = TExpr::Binary {
+                    op: BinOp::Sub,
+                    lhs: Box::new(array_count(held, ty)),
+                    rhs: Box::new(TExpr::Int(1)),
+                };
+                let bound = TExpr::Bind {
+                    local: held,
+                    init: Box::new(receiver),
+                };
+                let removal = self.update_stmts(line, base, &Update::RemoveLast(args))?;
+                if name == "removeLast" {
+                    return Ok(TExpr::Then {
+                        value: Box::new(get(bound, last)),
+                        after: removal,
+                    });
+                }
+                let optional = self.sigs.optional_of(elem)?;
+                let empty = TExpr::Binary {
+                    op: BinOp::Eq,
+                    lhs: Box::new(TExpr::Field {
+                        base: Box::new(bound),
+                        index: ARRAY_COUNT,
+                        ty: Ty::Int,
+                    }),
+                    rhs: Box::new(TExpr::Int(0)),
+                };
+                let value = TExpr::Select {
+                    cond: Box::new(empty),
+                    then: Box::new(self.none_of(optional)),
+                    otherwise: Box::new(TExpr::StructInit {
+                        ty: optional,
+                        args: vec![
+                            TExpr::Int(SOME_CASE as i64),
+                            get(TExpr::Local(held, ty), last),
+                        ],
+                    }),
+                    ty: optional,
+                };
+                let present = TExpr::Binary {
+                    op: BinOp::Ne,
+                    lhs: Box::new(TExpr::Field {
+                        base: Box::new(self.value(base)?),
+                        index: ARRAY_COUNT,
+                        ty: Ty::Int,
+                    }),
+                    rhs: Box::new(TExpr::Int(0)),
+                };
+                Ok(TExpr::Then {
+                    value: Box::new(value),
+                    after: vec![TStmt::If {
+                        cond: present,
+                        then_body: removal,
+                        else_body: Vec::new(),
+                    }],
+                })
+            }
         }
     }
 
@@ -2717,7 +2841,10 @@ impl FnCx<'_> {
             _ => None,
         };
         if let ExprKind::MemberCall { base, name, args } = expr.kind()
-            && matches!(name.as_str(), "append" | "insert" | "remove" | "removeLast")
+            && matches!(
+                name.as_str(),
+                "append" | "insert" | "remove" | "removeLast" | "removeAll"
+            )
             && self
                 .value(base)
                 .is_ok_and(|v| self.sigs.array_element(v.ty()).is_some())
@@ -2726,6 +2853,7 @@ impl FnCx<'_> {
                 "append" => Update::Append(args),
                 "insert" => Update::Insert(args),
                 "remove" => Update::Remove(args),
+                "removeAll" => Update::RemoveAll(args),
                 _ => Update::RemoveLast(args),
             };
             return self.update(expr.line(), base, &update);
@@ -3414,7 +3542,7 @@ impl FnCx<'_> {
                 return self.string_method(line, receiver, name, args);
             }
             if let Some(elem) = sigs.array_element(ty) {
-                return self.array_method(line, receiver, elem, name, args);
+                return self.array_method(line, base, receiver, elem, name, args);
             }
             let requirement_call =
                 matches!(ty, Ty::Param(_)) || sigs.existential_protocol(ty).is_some();

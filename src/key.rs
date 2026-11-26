@@ -298,6 +298,14 @@ impl Encoder<'_> {
                 self.expr(object);
                 self.expr(class);
             }
+            TExpr::Then { value, after } => {
+                self.tag(61);
+                self.expr(value);
+                self.usize(after.len());
+                for stmt in after {
+                    self.stmt(stmt);
+                }
+            }
             TExpr::ArrayOp { op, elem, args, ty } => {
                 self.tag(60);
                 self.tag(op.code());

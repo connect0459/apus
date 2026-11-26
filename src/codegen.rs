@@ -2524,6 +2524,12 @@ impl Emitter<'_, '_> {
         let value = match expr {
             TExpr::StrOp { op, args } => self.string_op(*op, args)?,
             TExpr::ArrayOp { op, elem, args, .. } => self.array_op(*op, *elem, args)?,
+            TExpr::Then { value, after } => {
+                let result = self.value(value)?;
+                let result = self.detach(result, value.ty())?;
+                self.stmts(after)?;
+                result
+            }
             TExpr::Witness { .. } | TExpr::Dispatch { .. } => {
                 return Err(CodegenError::from(
                     "a protocol requirement was not resolved",

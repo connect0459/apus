@@ -5175,8 +5175,9 @@ fn the_new_array_members_reject_misuse() {
         build_error("func main() { let a = [1]\n print(a.contains(x: 1)) }").contains("contains")
     );
     assert!(
-        build_error("func main() { var a = [1]\n let b = a.removeLast() }").contains("statement")
+        build_error("func main() { let a = [1]\n let b = a.removeLast() }").contains("constant")
     );
+    assert!(build_error("func main() { var a = [1]\n let b = a.append(1) }").contains("statement"));
     assert!(build_error("func main() { var a = [1]\n a.removeLast(1) }").contains("removeLast"));
     assert!(build_error("func main() { var a = [1]\n a.insert(1) }").contains("insert"));
     assert!(build_error("func main() { var a = [1]\n a.insert(1, 0) }").contains("insert"));
@@ -5213,7 +5214,7 @@ fn remove_at_checks_its_arguments_and_is_a_statement() {
     assert!(build_error("func main() { var a = [1]\n a.remove(0) }").contains("remove"));
     assert!(build_error("func main() { var a = [1]\n a.remove(at: 0, 1) }").contains("remove"));
     assert!(
-        build_error("func main() { var a = [1]\n let x = a.remove(at: 0) }").contains("statement")
+        build_error("func main() { let a = [1]\n let x = a.remove(at: 0) }").contains("constant")
     );
     assert!(build_error("func main() { let a = [1]\n a.remove(at: 0) }").contains("constant"));
 }
@@ -5274,4 +5275,72 @@ fn nested_updates_release_replaced_elements_and_trap_out_of_range() {
 fn an_element_of_a_constant_array_cannot_be_changed() {
     assert!(build_error("func main() { let g = [[1]]\n g[0][0] = 2 }").contains("constant"));
     assert!(build_error("func main() { var g = [1]\n g[0][0] = 2 }").contains("not an array"));
+}
+
+#[test]
+fn remove_last_and_remove_at_produce_the_removed_element() {
+    assert_eq!(
+        main_printing(
+            "var a = [10, 20, 30, 40]\nlet b = a\nlet last = a.removeLast()\nlet mid = a.remove(at: 1)\nprint(last)\nprint(mid)\nprint(a.count)\nprint(b.count)\nprint(a.removeLast() + a.removeLast())\nprint(a.isEmpty)"
+        ),
+        "40\n20\n2\n4\n40\ntrue\n"
+    );
+}
+
+#[test]
+fn a_removed_element_keeps_its_instance_alive_until_it_is_dropped() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nstruct H {\n  var box: Box\n  var tag: Int\n}\nfunc main() {\n  var bs = [Box(n: 1), Box(n: 2)]\n  let taken = bs.removeLast()\n  print(0)\n  print(taken.n)\n  var hs = [H(box: Box(n: 3), tag: 3), H(box: Box(n: 4), tag: 4)]\n  let h = hs.remove(at: 0)\n  print(h.tag)\n  print(hs[0].tag)\n  var ss = [\"a\", \"b\"]\n  print(ss.removeLast() + ss.removeLast())\n}"
+        ),
+        "0\n2\n3\n4\nba\n3\n4\n2\n1\n"
+    );
+}
+
+#[test]
+fn pop_last_returns_nil_for_an_empty_array_and_drains_in_a_loop() {
+    assert_eq!(
+        main_printing(
+            "var a = [1, 2, 3]\nvar order = 0\nwhile let x = a.popLast() {\n  order = order * 10 + x\n}\nprint(order)\nprint(a.popLast() == nil)\nvar s = [\"p\"]\nif let v = s.popLast() { print(v) }\nprint(s.count)\nvar e: [Int] = []\ne.popLast()\nprint(e.count)"
+        ),
+        "321\ntrue\np\n0\n0\n"
+    );
+}
+
+#[test]
+fn taking_from_an_empty_array_traps_and_a_shared_array_is_not_changed() {
+    run_expecting_a_crash(
+        "func main() {\n  var a: [Int] = []\n  let x = a.removeLast()\n  print(x)\n}",
+    );
+    run_expecting_a_crash("func main() {\n  var a = [1]\n  let x = a.remove(at: 1)\n  print(x)\n}");
+    assert_eq!(
+        main_printing(
+            "var g = [[1, 2], [3, 4]]\nlet h = g\nlet row = g[0].removeLast()\nlet gone = g.remove(at: 1)\nprint(row)\nprint(gone[1])\nprint(g.count)\nprint(g[0].count)\nprint(h[0].count)\nprint(h.count)"
+        ),
+        "2\n4\n1\n1\n2\n2\n"
+    );
+}
+
+#[test]
+fn remove_all_empties_an_array_without_touching_a_copy() {
+    assert_eq!(
+        run(
+            "class Box {\n  var n: Int\n  deinit { print(n) }\n}\nfunc main() {\n  var a = [1, 2, 3]\n  let b = a\n  a.removeAll()\n  print(a.count)\n  print(b.count)\n  a.append(9)\n  print(a[0])\n  var bs = [Box(n: 1)]\n  bs.removeAll()\n  print(0)\n  var g = [[1], [2]]\n  g[0].removeAll()\n  print(g[0].count + g[1].count)\n}"
+        ),
+        "0\n3\n9\n1\n0\n1\n"
+    );
+}
+
+#[test]
+fn the_taking_members_check_their_arguments() {
+    assert!(build_error("func main() { var a = [1]\n let x = a.popLast(1) }").contains("popLast"));
+    assert!(
+        build_error("func main() { var a = [1]\n let x = a.removeLast(1) }").contains("removeLast")
+    );
+    assert!(build_error("func main() { var a = [1]\n let x = a.remove(0) }").contains("remove"));
+    assert!(build_error("func main() { var a = [1]\n a.removeAll(1) }").contains("removeAll"));
+    assert!(
+        build_error("func main() { var a = [1]\n let x = a.removeAll() }").contains("statement")
+    );
+    assert!(build_error("func main() { let a = [1]\n a.removeAll() }").contains("constant"));
 }

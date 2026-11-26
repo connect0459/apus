@@ -420,6 +420,10 @@ pub enum TExpr {
         args: Vec<TExpr>,
         ty: Ty,
     },
+    Then {
+        value: Box<TExpr>,
+        after: Vec<TStmt>,
+    },
     Witness {
         protocol: String,
         method: String,
@@ -474,6 +478,7 @@ impl TExpr {
             | TExpr::RetainWeak(inner)
             | TExpr::LoadWeak(inner) => inner.ty(),
             TExpr::Bind { init, .. } => init.ty(),
+            TExpr::Then { value, .. } => value.ty(),
             TExpr::FuncAddr(_) | TExpr::ClassDesc(_) | TExpr::Descriptor(_) => Ty::Int,
             TExpr::InstanceOf { .. } => Ty::Bool,
             TExpr::StrOp { op, .. } => op.result(),
@@ -825,6 +830,10 @@ impl<E> Rewriter<'_, E> {
             TExpr::Unwrap { base, ty } => TExpr::Unwrap {
                 base: Box::new(self.expr(base)?),
                 ty: (self.ty)(*ty)?,
+            },
+            TExpr::Then { value, after } => TExpr::Then {
+                value: Box::new(self.expr(value)?),
+                after: self.stmts(after)?,
             },
             TExpr::ArrayOp { op, elem, args, ty } => TExpr::ArrayOp {
                 op: *op,
