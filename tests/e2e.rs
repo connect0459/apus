@@ -7897,3 +7897,13 @@ fn extensions_are_checked() {
         assert!(build_error(source).contains(message), "{source}");
     }
 }
+
+#[test]
+fn a_ternary_may_start_its_branches_on_new_lines() {
+    assert_eq!(
+        main_printing(
+            "let n = 15\nlet word = n % 15 == 0\n  ? \"fizzbuzz\"\n  : n % 5 == 0\n    ? \"buzz\"\n    : \"other\"\nprint(word)\nlet pick = n > 3 ? 1\n  : 2\nprint(pick)"
+        ),
+        "fizzbuzz\n1\n"
+    );
+}

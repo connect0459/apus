@@ -1452,7 +1452,7 @@ impl Parser<'_> {
 
     fn ternary(&mut self) -> PResult<Expr> {
         let cond = self.binary(LEVEL_OR)?;
-        if !(self.on_same_line() && self.is_punct(TERNARY)) {
+        if !self.is_punct(TERNARY) {
             return Ok(cond);
         }
         self.pos += 1;
