@@ -96,6 +96,11 @@ pub fn compile(funcs: &[TFunc], structs: &[TStruct]) -> GResult<Vec<u8>> {
     backend.assemble(&entries)
 }
 
+pub const LIBC_IMPORTS: [&str; 12] = [
+    "printf", "puts", "malloc", "realloc", "memmove", "free", "fflush", "write", "memcpy",
+    "memcmp", "memmem", "snprintf",
+];
+
 pub struct Backend {
     isa: Arc<dyn TargetIsa>,
 }
@@ -195,10 +200,7 @@ impl Backend {
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
         let mut data: HashMap<String, DataId> = HashMap::new();
         let placeholder = module.make_signature();
-        for name in [
-            "printf", "puts", "malloc", "realloc", "memmove", "free", "fflush", "write", "memcpy",
-            "memcmp", "memmem", "snprintf",
-        ] {
+        for name in LIBC_IMPORTS {
             let id = module.declare_function(name, Linkage::Import, &placeholder)?;
             funcs.insert(name.to_string(), id);
         }

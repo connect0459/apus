@@ -644,3 +644,14 @@ fn editing_a_closure_body_rebuilds_the_function_that_holds_it_and_nothing_else()
     assert_eq!(project.run(), "21\n");
     assert!(untouched.reused() > 0);
 }
+
+#[test]
+fn the_minimal_system_library_stub_links_a_working_program() {
+    let project = Project::new();
+    project.build_with(
+        &program(&values()),
+        &BuildOptions::default().with_linker(Linker::LdStub),
+    );
+    assert_eq!(project.run(), "21\n");
+    assert!(project.cache_dir().join("libSystem.tbd").exists());
+}

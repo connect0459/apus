@@ -2,12 +2,16 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::codegen::LIBC_IMPORTS;
+
 const MINIMUM_MACOS: &str = "11.0";
 const SDK_FILE: &str = "sdk";
+const STUB_FILE: &str = "libSystem.tbd";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Linker {
     Ld,
+    LdStub,
     Cc,
 }
 
@@ -40,7 +44,9 @@ pub fn link(
     std::fs::write(&object_path, object).map_err(|e| LinkError::new(e.to_string()))?;
     let result = match linker {
         Linker::Cc => link_with_cc(&object_path, output),
-        Linker::Ld => link_with_ld(&object_path, output, cache_dir)
+        Linker::LdStub => link_with_ld(&object_path, output, cache_dir, Library::Stub),
+        Linker::Ld => link_with_ld(&object_path, output, cache_dir, Library::Stub)
+            .or_else(|_| link_with_ld(&object_path, output, cache_dir, Library::System))
             .or_else(|_| link_with_cc(&object_path, output)),
     };
     let _ = std::fs::remove_file(&object_path);
@@ -63,9 +69,21 @@ fn link_with_cc(object: &Path, output: &Path) -> Result<(), LinkError> {
     }
 }
 
-fn link_with_ld(object: &Path, output: &Path, cache_dir: &Path) -> Result<(), LinkError> {
+#[derive(Clone, Copy)]
+enum Library {
+    Stub,
+    System,
+}
+
+fn link_with_ld(
+    object: &Path,
+    output: &Path,
+    cache_dir: &Path,
+    library: Library,
+) -> Result<(), LinkError> {
     let sdk = sdk_for(cache_dir).ok_or_else(|| LinkError::new("cannot locate the macOS SDK"))?;
-    let result = Command::new("ld")
+    let mut command = Command::new("ld");
+    command
         .args([
             "-arch",
             "arm64",
@@ -73,10 +91,16 @@ fn link_with_ld(object: &Path, output: &Path, cache_dir: &Path) -> Result<(), Li
             "macos",
             MINIMUM_MACOS,
         ])
-        .arg(&sdk.version)
-        .arg("-syslibroot")
-        .arg(&sdk.path)
-        .args(["-lSystem"])
+        .arg(&sdk.version);
+    match library {
+        Library::Stub => {
+            command.arg(write_stub(cache_dir)?);
+        }
+        Library::System => {
+            command.arg("-syslibroot").arg(&sdk.path).args(["-lSystem"]);
+        }
+    }
+    let result = command
         .arg(object)
         .arg("-o")
         .arg(output)
@@ -89,6 +113,26 @@ fn link_with_ld(object: &Path, output: &Path, cache_dir: &Path) -> Result<(), Li
             String::from_utf8_lossy(&result.stderr).into_owned(),
         ))
     }
+}
+
+fn stub_text() -> String {
+    let symbols: Vec<String> = LIBC_IMPORTS.iter().map(|name| format!("_{name}")).collect();
+    format!(
+        "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1356\nexports:\n  - targets: [ arm64-macos ]\n    symbols: [ {} ]\n...\n",
+        symbols.join(", ")
+    )
+}
+
+fn write_stub(cache_dir: &Path) -> Result<PathBuf, LinkError> {
+    let path = cache_dir.join(STUB_FILE);
+    let text = stub_text();
+    if std::fs::read_to_string(&path).is_ok_and(|current| current == text) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(cache_dir)
+        .and_then(|()| std::fs::write(&path, text))
+        .map_err(|e| LinkError::new(e.to_string()))?;
+    Ok(path)
 }
 
 struct Sdk {
@@ -131,4 +175,18 @@ fn xcrun(flag: &str) -> Option<String> {
     }
     let text = String::from_utf8(output.stdout).ok()?.trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stub_exports_every_libc_function_that_the_object_imports() {
+        let text = stub_text();
+        for name in LIBC_IMPORTS {
+            assert!(text.contains(&format!("_{name},")) || text.contains(&format!("_{name} ]")));
+        }
+        assert!(text.contains("install-name: '/usr/lib/libSystem.B.dylib'"));
+    }
 }
