@@ -7554,3 +7554,13 @@ fn a_parameter_may_have_no_name() {
         "9\n"
     );
 }
+
+#[test]
+fn access_modifiers_and_inline_attributes_are_accepted_and_ignored() {
+    assert_eq!(
+        run(
+            "public struct S {\n  private(set) var x: Int\n  public func f() -> Int {\n    return x\n  }\n}\n@inline(never)\nfunc g() -> Int {\n  return 2\n}\npublic final class C {\n  internal var n: Int\n  fileprivate func h() -> Int {\n    return n\n  }\n}\n@_eagerMove class D {\n  var m: Int\n}\nfunc take(_ f: @escaping () -> Int) -> Int {\n  return f()\n}\nprint(S(x: 1).f() + g() + C(n: 4).h() + D(m: 8).m + take({ 16 }))"
+        ),
+        "31\n"
+    );
+}

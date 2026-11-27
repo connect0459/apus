@@ -82,7 +82,159 @@ impl SplitError {
     }
 }
 
+const ACCESS_MODIFIERS: [&str; 7] = [
+    "public",
+    "private",
+    "internal",
+    "fileprivate",
+    "open",
+    "package",
+    "final",
+];
+
+const IGNORED_ATTRIBUTES: [&str; 13] = [
+    "inline",
+    "inlinable",
+    "usableFromInline",
+    "discardableResult",
+    "escaping",
+    "frozen",
+    "_eagerMove",
+    "_optimize",
+    "_transparent",
+    "_alwaysEmitIntoClient",
+    "_semantics",
+    "_effects",
+    "_noAllocation",
+];
+
+const ATTRIBUTES_WITH_ARGUMENTS: [&str; 4] = ["inline", "_optimize", "_semantics", "_effects"];
+
+const DECLARATION_WORDS: [&str; 22] = [
+    "func",
+    "var",
+    "let",
+    "struct",
+    "class",
+    "enum",
+    "protocol",
+    "init",
+    "deinit",
+    "typealias",
+    "extension",
+    "mutating",
+    "override",
+    "static",
+    "subscript",
+    "lazy",
+    "weak",
+    "unowned",
+    "required",
+    "convenience",
+    "indirect",
+    "associatedtype",
+];
+
+fn is_word(token: &Token, words: &[&str]) -> bool {
+    matches!(token, Token::Ident(w) if words.contains(&w.as_str()))
+}
+
+fn starts_declaration(tokens: &[Spanned], at: usize) -> bool {
+    at == 0
+        || tokens[at - 1].line() != tokens[at].line()
+        || matches!(tokens[at - 1].token(), Token::Punct(p) if p == "{" || p == "}" || p == ";")
+}
+
+fn skip_access_modifiers(tokens: &[Spanned], mut at: usize) -> usize {
+    while at < tokens.len() && is_word(tokens[at].token(), &ACCESS_MODIFIERS) {
+        at += 1;
+        let setter = [
+            Token::Punct("(".into()),
+            Token::Ident("set".into()),
+            Token::Punct(")".into()),
+        ];
+        if tokens.len() >= at + 3
+            && tokens[at..at + 3]
+                .iter()
+                .zip(&setter)
+                .all(|(t, expected)| t.token() == expected)
+        {
+            at += 3;
+        }
+    }
+    at
+}
+
+fn skip_attribute(tokens: &[Spanned], at: usize) -> Option<usize> {
+    let Token::Ident(word) = tokens[at].token() else {
+        return None;
+    };
+    let name = word.strip_prefix('@')?;
+    if !IGNORED_ATTRIBUTES.contains(&name) {
+        return None;
+    }
+    let mut end = at + 1;
+    let same_line = |end: usize| {
+        tokens
+            .get(end)
+            .is_some_and(|t| t.line() == tokens[at].line())
+    };
+    if ATTRIBUTES_WITH_ARGUMENTS.contains(&name)
+        && same_line(end)
+        && matches!(tokens[end].token(), Token::Punct(p) if p == "(")
+    {
+        let mut depth = 0usize;
+        while end < tokens.len() {
+            match tokens[end].token() {
+                Token::Punct(p) if p == "(" => depth += 1,
+                Token::Punct(p) if p == ")" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+    }
+    Some(end)
+}
+
+fn without_modifiers(tokens: &[Spanned]) -> Vec<Spanned> {
+    let mut kept = Vec::with_capacity(tokens.len());
+    let mut at = 0;
+    let mut after_attribute = false;
+    while at < tokens.len() {
+        if let Some(end) = skip_attribute(tokens, at) {
+            at = end;
+            after_attribute = true;
+            continue;
+        }
+        let starts = after_attribute || starts_declaration(tokens, at);
+        after_attribute = false;
+        if starts && is_word(tokens[at].token(), &ACCESS_MODIFIERS) {
+            let mut after = skip_access_modifiers(tokens, at);
+            while let Some(end) = skip_attribute(tokens, after) {
+                after = end;
+            }
+            if tokens
+                .get(after)
+                .is_some_and(|t| is_word(t.token(), &DECLARATION_WORDS))
+            {
+                at = after;
+                continue;
+            }
+        }
+        kept.push(tokens[at].clone());
+        at += 1;
+    }
+    kept
+}
+
 pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
+    let tokens = &without_modifiers(tokens)[..];
     let mut items = Vec::new();
     let mut top_level: Vec<Spanned> = Vec::new();
     let mut i = 0;
@@ -802,5 +954,38 @@ mod tests {
         let two = items("func f() { }\nprint(2)");
         assert_ne!(signature_digest(&one), signature_digest(&two));
         assert_eq!(one[0].hash(), two[0].hash());
+    }
+
+    #[test]
+    fn access_modifiers_and_ignorable_attributes_before_a_declaration_are_dropped() {
+        let plain = items("struct S { var x: Int\n func f() { } }\nfunc g() { }");
+        let noisy = items(
+            "@inline(never)\npublic struct S {\n  private(set) var x: Int\n  public final func f() { }\n}\n@_eagerMove internal func g() { }",
+        );
+        let hashes = |found: &[Item]| found.iter().map(Item::hash).collect::<Vec<_>>();
+        assert_eq!(hashes(&plain), hashes(&noisy));
+    }
+
+    #[test]
+    fn a_modifier_word_used_as_a_name_is_kept() {
+        let found = items("var open = 1\nopen = 2");
+        let main = found.iter().find(|i| i.is_top_level()).unwrap();
+        let words = main
+            .tokens()
+            .iter()
+            .filter(|t| matches!(t.token(), Token::Ident(w) if w == "open"))
+            .count();
+        assert_eq!(words, 2);
+    }
+
+    #[test]
+    fn an_attribute_with_a_meaning_is_not_dropped() {
+        let found = items("func f(_ g: @autoclosure () -> Int) { }");
+        assert!(
+            found[0]
+                .tokens()
+                .iter()
+                .any(|t| matches!(t.token(), Token::Ident(w) if w == "@autoclosure"))
+        );
     }
 }

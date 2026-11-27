@@ -1,6 +1,8 @@
 # test/Interpreter tests that apus passes (swiftlang/swift fb5b4b0a9); bench/swift_tests.py --write-baseline
 break_continue.swift
 conversions.swift
+destructors.swift
 hello_func.swift
 hello_toplevel.swift
+interpolation.swift
 object.swift
