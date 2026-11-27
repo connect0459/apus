@@ -269,6 +269,8 @@ pub struct ProtocolDecl {
     name: String,
     requirements: Vec<FuncDecl>,
     associated: Vec<String>,
+    inherited: Vec<String>,
+    class_only: bool,
 }
 
 impl ProtocolDecl {
@@ -278,7 +280,23 @@ impl ProtocolDecl {
             name,
             requirements,
             associated: Vec::new(),
+            inherited: Vec::new(),
+            class_only: false,
         }
+    }
+
+    pub fn with_inherited(mut self, inherited: Vec<String>, class_only: bool) -> Self {
+        self.inherited = inherited;
+        self.class_only = class_only;
+        self
+    }
+
+    pub fn inherited(&self) -> &[String] {
+        &self.inherited
+    }
+
+    pub fn is_class_only(&self) -> bool {
+        self.class_only
     }
 
     pub fn with_associated(mut self, associated: Vec<String>) -> Self {

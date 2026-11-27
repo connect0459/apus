@@ -228,6 +228,8 @@ pub struct ProtocolSig {
     name: String,
     requirements: Vec<Requirement>,
     associated: Vec<String>,
+    inherits: Vec<String>,
+    class_only: bool,
 }
 
 impl ProtocolSig {
@@ -267,6 +269,8 @@ fn standard_protocols() -> HashMap<String, ProtocolSig> {
         name: EQUATABLE.to_string(),
         requirements: vec![operator_requirement("==")],
         associated: Vec::new(),
+        inherits: Vec::new(),
+        class_only: false,
     };
     let comparable = ProtocolSig {
         name: COMPARABLE.to_string(),
@@ -275,6 +279,8 @@ fn standard_protocols() -> HashMap<String, ProtocolSig> {
             .map(|op| operator_requirement(op))
             .collect(),
         associated: Vec::new(),
+        inherits: Vec::new(),
+        class_only: false,
     };
     [equatable, comparable]
         .into_iter()
@@ -617,6 +623,7 @@ impl Signatures {
             }
         }
         sigs.instantiate_boxes()?;
+        sigs.validate_inheritance(&protocol_decls)?;
         for decl in protocol_decls {
             sigs.resolve_protocol(decl)?;
         }
@@ -681,6 +688,8 @@ impl Signatures {
             name: decl.name().to_string(),
             requirements: Vec::new(),
             associated: decl.associated().to_vec(),
+            inherits: decl.inherited().to_vec(),
+            class_only: decl.is_class_only(),
         };
         if self
             .protocols
@@ -707,6 +716,59 @@ impl Signatures {
         } else {
             Err(CheckError::at(line, format!("unknown protocol '{name}'")))
         }
+    }
+
+    fn validate_inheritance(&self, decls: &[&ProtocolDecl]) -> CResult<()> {
+        for decl in decls {
+            for name in decl.inherited() {
+                self.require_protocol(name, decl.line())?;
+            }
+        }
+        for decl in decls {
+            let mut seen: Vec<&str> = Vec::new();
+            let mut stack: Vec<&str> = decl.inherited().iter().map(String::as_str).collect();
+            while let Some(name) = stack.pop() {
+                if name == decl.name() {
+                    return Err(CheckError::at(
+                        decl.line(),
+                        format!(
+                            "protocol '{}' inherits from itself (an inheritance cycle)",
+                            decl.name()
+                        ),
+                    ));
+                }
+                if seen.contains(&name) {
+                    continue;
+                }
+                seen.push(name);
+                if let Some(parent) = self.protocols.get(name) {
+                    stack.extend(parent.inherits.iter().map(String::as_str));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn protocol_closure<'s>(&'s self, names: &'s [String]) -> Vec<&'s str> {
+        let mut found: Vec<&str> = Vec::new();
+        let mut stack: Vec<&str> = names.iter().rev().map(String::as_str).collect();
+        while let Some(name) = stack.pop() {
+            if found.contains(&name) {
+                continue;
+            }
+            found.push(name);
+            if let Some(protocol) = self.protocols.get(name) {
+                stack.extend(protocol.inherits.iter().rev().map(String::as_str));
+            }
+        }
+        found
+    }
+
+    pub fn expanded_bound(&self, names: &[String]) -> Vec<String> {
+        self.protocol_closure(names)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     fn validate_protocol_names(&self) -> CResult<()> {
@@ -782,6 +844,8 @@ impl Signatures {
                 name: decl.name().to_string(),
                 requirements,
                 associated: decl.associated().to_vec(),
+                inherits: decl.inherited().to_vec(),
+                class_only: decl.is_class_only(),
             },
         );
         Ok(())
@@ -909,7 +973,7 @@ impl Signatures {
                     Kind::Struct => self.struct_defs[def].conformances(),
                     Kind::Enum => self.enum_defs[def].conformances(),
                 };
-                names.extend(declared.iter().map(String::as_str));
+                names.extend(self.protocol_closure(declared));
             }
             current = self.superclass(t);
         }
@@ -1213,8 +1277,16 @@ impl Signatures {
         generic: bool,
         line: u32,
     ) -> CResult<()> {
-        for protocol in conformances {
-            match protocol.as_str() {
+        for protocol in self.protocol_closure(conformances) {
+            if self.protocols.get(protocol).is_some_and(|p| p.class_only) && !ty.is_class() {
+                return Err(CheckError::at(
+                    line,
+                    format!(
+                        "'{name}' cannot conform to '{protocol}': only a class can conform to a class-only protocol"
+                    ),
+                ));
+            }
+            match protocol {
                 COMPARABLE => {
                     return Err(CheckError::at(
                         line,
@@ -1341,12 +1413,12 @@ impl Signatures {
         if let Some(def) = self.struct_def_ids.get(owner) {
             let decl = &self.struct_defs[*def];
             (0..decl.generics().len())
-                .map(|i| decl.bound(i).to_vec())
+                .map(|i| self.expanded_bound(decl.bound(i)))
                 .collect()
         } else if let Some(def) = self.enum_def_ids.get(owner) {
             let decl = &self.enum_defs[*def];
             (0..decl.generics().len())
-                .map(|i| decl.bound(i).to_vec())
+                .map(|i| self.expanded_bound(decl.bound(i)))
                 .collect()
         } else {
             Vec::new()
@@ -1437,7 +1509,7 @@ impl Signatures {
             for name in func.bound(index) {
                 self.require_protocol(name, func.line())?;
             }
-            bounds.push(func.bound(index).to_vec());
+            bounds.push(self.expanded_bound(func.bound(index)));
         }
         let scope = self.member_scope(func.owner(), &generics, &bounds, func.line())?;
         let receiver = owner_ty.filter(|_| !func.is_init());
@@ -1903,7 +1975,7 @@ impl Signatures {
             return Err(CheckError::at(line, "a dictionary cannot hold Void"));
         }
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
-            .map(|i| decl.bound(i).to_vec())
+            .map(|i| self.expanded_bound(decl.bound(i)))
             .collect();
         self.check_type_bounds(&bounds, &key.1, decl.name(), line)?;
         if !self
@@ -1966,7 +2038,7 @@ impl Signatures {
         line: u32,
     ) -> CResult<(Vec<FieldSig>, Option<StructId>)> {
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
-            .map(|i| decl.bound(i).to_vec())
+            .map(|i| self.expanded_bound(decl.bound(i)))
             .collect();
         let own_scope = self.type_scope(decl.generics(), &bounds, args);
         let at = if line == 0 { decl.line() } else { line };
@@ -2159,7 +2231,7 @@ impl Signatures {
         let decl = &self.enum_defs[def];
         let name = self.instance_name(decl.name(), &key.1, scope);
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
-            .map(|i| decl.bound(i).to_vec())
+            .map(|i| self.expanded_bound(decl.bound(i)))
             .collect();
         self.check_type_bounds(&bounds, &key.1, decl.name(), line)?;
         if !self.instances.borrow_mut().enum_pending.insert(key.clone()) {
@@ -2284,7 +2356,7 @@ impl Signatures {
         line: u32,
     ) -> CResult<Vec<CaseSig>> {
         let bounds: Vec<Vec<String>> = (0..decl.generics().len())
-            .map(|i| decl.bound(i).to_vec())
+            .map(|i| self.expanded_bound(decl.bound(i)))
             .collect();
         let own_scope = self.type_scope(decl.generics(), &bounds, args);
         let at = if line == 0 { decl.line() } else { line };

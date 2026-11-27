@@ -7071,7 +7071,7 @@ impl<'a> FnCx<'a> {
         let mut generics = outer.clone();
         generics.extend(func.generics().iter().cloned());
         let mut bounds: Vec<Vec<String>> = vec![Vec::new(); count];
-        bounds.extend((0..func.generics().len()).map(|i| func.bound(i).to_vec()));
+        bounds.extend((0..func.generics().len()).map(|i| sigs.expanded_bound(func.bound(i))));
         let sig = FuncSig::new(generics.clone(), bounds, params, ret);
         if args.len() != sig.params().len() {
             return Err(CheckError::at(
@@ -10388,9 +10388,11 @@ impl<'a> FnCx<'a> {
         args: &[Arg],
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
-        let requirement = sigs
-            .protocol(protocol)
-            .and_then(|p| p.requirement(name))
+        let own = [protocol.to_string()];
+        let (protocol, requirement) = sigs
+            .protocol_closure(&own)
+            .into_iter()
+            .find_map(|owner| Some((owner, sigs.protocol(owner)?.requirement(name)?)))
             .ok_or_else(|| {
                 CheckError::at(
                     line,

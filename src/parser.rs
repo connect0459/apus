@@ -425,6 +425,36 @@ impl Parser<'_> {
         Ok((names, bounds))
     }
 
+    fn where_clause(&mut self, generics: &[String], bounds: &mut Vec<Vec<String>>) -> PResult<()> {
+        if !self.eat_keyword("where") {
+            return Ok(());
+        }
+        bounds.resize(generics.len(), Vec::new());
+        loop {
+            let name = self.name()?;
+            if self.is_punct(".") {
+                return self.fail("a requirement on an associated type is not supported yet");
+            }
+            if self.is_punct("==") {
+                return self.fail("a same-type requirement is not supported yet");
+            }
+            self.expect_punct(":")?;
+            let mut protocols = vec![self.name()?];
+            while self.eat_punct("&") {
+                protocols.push(self.name()?);
+            }
+            let Some(index) = generics.iter().position(|g| *g == name) else {
+                return self.fail(&format!(
+                    "'{name}' is not a type parameter of this declaration"
+                ));
+            };
+            bounds[index].extend(protocols);
+            if !self.eat_punct(",") {
+                return Ok(());
+            }
+        }
+    }
+
     fn type_alias(&mut self) -> PResult<(String, TypeRef)> {
         let name = self.name()?;
         self.expect_punct("=")?;
@@ -456,6 +486,20 @@ impl Parser<'_> {
 
     fn protocol_decl(&mut self, line: u32) -> PResult<ProtocolDecl> {
         let name = self.name()?;
+        let mut inherited = Vec::new();
+        let mut class_only = false;
+        if self.eat_punct(":") {
+            loop {
+                if self.eat_keyword("class") || self.eat_keyword("AnyObject") {
+                    class_only = true;
+                } else {
+                    inherited.push(self.name()?);
+                }
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+        }
         self.expect_punct("{")?;
         let mut requirements = Vec::new();
         let mut associated: Vec<String> = Vec::new();
@@ -484,7 +528,9 @@ impl Parser<'_> {
             });
             self.end_of_statement()?;
         }
-        Ok(ProtocolDecl::new(line, name, requirements).with_associated(associated))
+        Ok(ProtocolDecl::new(line, name, requirements)
+            .with_associated(associated)
+            .with_inherited(inherited, class_only))
     }
 
     fn requirement(&mut self, line: u32) -> PResult<FuncDecl> {
@@ -553,6 +599,8 @@ impl Parser<'_> {
         } else {
             None
         };
+        let mut bounds = bounds;
+        self.where_clause(&generics, &mut bounds)?;
         let body = if self.header_only {
             self.pos = self.tokens.len();
             Vec::new()
@@ -631,12 +679,13 @@ impl Parser<'_> {
 
     fn struct_decl(&mut self, line: u32, class: bool) -> PResult<StructDecl> {
         let name = self.name()?;
-        let (generics, bounds) = self.generic_params()?;
+        let (generics, mut bounds) = self.generic_params()?;
         let (superclass, inherited) = if class {
             self.class_inheritance()?
         } else {
             (None, self.conformance_list()?)
         };
+        self.where_clause(&generics, &mut bounds)?;
         self.expect_punct("{")?;
         let mut fields = Vec::new();
         let mut aliases = Vec::new();
@@ -732,8 +781,9 @@ impl Parser<'_> {
 
     fn enum_decl(&mut self, line: u32) -> PResult<EnumDecl> {
         let name = self.name()?;
-        let (generics, bounds) = self.generic_params()?;
+        let (generics, mut bounds) = self.generic_params()?;
         let conformances = self.conformance_list()?;
+        self.where_clause(&generics, &mut bounds)?;
         self.expect_punct("{")?;
         let mut cases = Vec::new();
         let mut aliases = Vec::new();

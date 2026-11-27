@@ -7721,3 +7721,99 @@ fn inout_arguments_and_parameters_are_checked() {
         assert!(build_error(source).contains(message), "{source}");
     }
 }
+
+#[test]
+fn a_protocol_may_inherit_from_other_protocols() {
+    assert_eq!(
+        run(
+            "protocol Named {\n  func name() -> String\n}\nprotocol Aged {\n  func age() -> Int\n}\nprotocol Person: Named, Aged {\n  func greet() -> String\n}\nstruct Ann: Person {\n  func name() -> String {\n    return \"ann\"\n  }\n  func age() -> Int {\n    return 30\n  }\n  func greet() -> String {\n    return \"hi \" + name()\n  }\n}\nfunc describe<T: Person>(_ p: T) -> String {\n  return p.name() + String(p.age()) + p.greet()\n}\nfunc onlyName<T: Named>(_ p: T) -> String {\n  return p.name()\n}\nfunc viaPerson<T: Person>(_ p: T) -> String {\n  return onlyName(p)\n}\nprint(describe(Ann()))\nprint(viaPerson(Ann()))\nprint(onlyName(Ann()))"
+        ),
+        "ann30hi ann\nann\nann\n"
+    );
+}
+
+#[test]
+fn a_type_that_conforms_to_a_protocol_must_implement_what_it_inherits() {
+    let source = "protocol A {\n  func a() -> Int\n}\nprotocol B: A {\n  func b() -> Int\n}\nstruct S: B {\n  func b() -> Int {\n    return 1\n  }\n}\nfunc main() {\n}";
+    assert!(build_error(source).contains("'a'"));
+}
+
+#[test]
+fn inheritance_through_several_levels_and_a_diamond_is_followed() {
+    assert_eq!(
+        run(
+            "protocol Base {\n  func base() -> Int\n}\nprotocol Left: Base {\n  func left() -> Int\n}\nprotocol Right: Base {\n  func right() -> Int\n}\nprotocol Both: Left, Right {\n}\nstruct S: Both {\n  func base() -> Int {\n    return 1\n  }\n  func left() -> Int {\n    return 10\n  }\n  func right() -> Int {\n    return 100\n  }\n}\nfunc total<T: Base>(_ t: T) -> Int {\n  return t.base()\n}\nfunc all<T: Both>(_ t: T) -> Int {\n  return t.base() + t.left() + t.right() + total(t)\n}\nprint(all(S()))"
+        ),
+        "112\n"
+    );
+}
+
+#[test]
+fn a_class_only_protocol_is_accepted_for_classes_only() {
+    assert_eq!(
+        run(
+            "protocol Counter: class {\n  func bump() -> Int\n}\nprotocol Anyobj: AnyObject {\n  func tag() -> Int\n}\nclass C: Counter, Anyobj {\n  var n: Int\n  func bump() -> Int {\n    n += 1\n    return n\n  }\n  func tag() -> Int {\n    return 7\n  }\n}\nfunc use<T: Counter>(_ c: T) -> Int {\n  return c.bump() + c.bump()\n}\nprint(use(C(n: 0)) + C(n: 0).tag())"
+        ),
+        "10\n"
+    );
+    let source = "protocol Counter: class {\n  func bump() -> Int\n}\nstruct S: Counter {\n  func bump() -> Int {\n    return 1\n  }\n}\nfunc main() {\n}";
+    assert!(build_error(source).contains("class"));
+}
+
+#[test]
+fn protocol_inheritance_is_checked_for_unknown_names_and_cycles() {
+    for (source, message) in [
+        ("protocol A: Missing {\n}\nfunc main() {\n}", "Missing"),
+        (
+            "protocol A: B {\n}\nprotocol B: A {\n}\nfunc main() {\n}",
+            "cycle",
+        ),
+        ("protocol A: A {\n}\nfunc main() {\n}", "cycle"),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}
+
+#[test]
+fn a_where_clause_adds_conformance_requirements_to_type_parameters() {
+    assert_eq!(
+        run(
+            "protocol Named {\n  func name() -> String\n}\nprotocol Aged {\n  func age() -> Int\n}\nstruct Ann: Named, Aged {\n  func name() -> String {\n    return \"ann\"\n  }\n  func age() -> Int {\n    return 3\n  }\n}\nfunc show<T, U>(_ a: T, _ b: U) -> String where T: Named, U: Named & Aged {\n  return a.name() + b.name() + String(b.age())\n}\nstruct Pair<A, B> where A: Named, B: Aged {\n  var a: A\n  var b: B\n  func both() -> String {\n    return a.name() + String(b.age())\n  }\n}\nprint(show(Ann(), Ann()))\nprint(Pair(a: Ann(), b: Ann()).both())"
+        ),
+        "annann3\nann3\n"
+    );
+}
+
+#[test]
+fn where_clauses_are_checked() {
+    for (source, message) in [
+        (
+            "protocol P {\n}\nfunc f<T>(_ t: T) where T: P {\n}\nstruct S {\n}\nfunc main() {\n  f(S())\n}",
+            "does not conform",
+        ),
+        (
+            "func f<T>(_ t: T) where U: Equatable {\n}\nfunc main() {\n}",
+            "'U'",
+        ),
+        (
+            "func f<T, U>(_ t: T, _ u: U) where T == U {\n}\nfunc main() {\n}",
+            "same-type",
+        ),
+        (
+            "func f<T: Sequence>(_ t: T) where T.Element: Equatable {\n}\nfunc main() {\n}",
+            "not supported",
+        ),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}
+
+#[test]
+fn a_value_of_an_inheriting_protocol_calls_the_requirements_it_inherits() {
+    assert_eq!(
+        run(
+            "protocol Named {\n  func name() -> String\n}\nprotocol Person: Named {\n  func age() -> Int\n}\nprotocol Source {\n  associatedtype Item\n  func first() -> Item\n}\nprotocol Eq2: Equatable {\n  func tag() -> Int\n}\nstruct Ann: Person, Source, Eq2 {\n  typealias Item = Int\n  var x: Int\n  func name() -> String {\n    return \"ann\"\n  }\n  func age() -> Int {\n    return 3\n  }\n  func first() -> Int {\n    return 9\n  }\n  func tag() -> Int {\n    return x\n  }\n}\nstruct Bob: Named {\n  func name() -> String {\n    return \"bob\"\n  }\n}\nfunc same<T: Eq2>(_ a: T, _ b: T) -> Bool {\n  return a == b\n}\nfunc item<T: Source>(_ t: T) -> T.Item {\n  return t.first()\n}\nlet p: Person = Ann(x: 1)\nlet n: Named = Bob()\nprint(p.name() + String(p.age()) + n.name())\nprint(same(Ann(x: 1), Ann(x: 1)))\nprint(item(Ann(x: 1)))"
+        ),
+        "ann3bob\ntrue\n9\n"
+    );
+}
