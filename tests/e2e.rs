@@ -7524,3 +7524,13 @@ fn a_function_named_main_is_an_ordinary_function_next_to_top_level_statements() 
         "top\nhelper\nend\n"
     );
 }
+
+#[test]
+fn void_may_be_written_as_the_result_type_of_any_function() {
+    assert_eq!(
+        run(
+            "protocol Greeter {\n  func greet() -> Void\n}\nstruct S: Greeter {\n  func greet() -> Void {\n    print(3)\n  }\n}\nfunc f() -> Void {\n  print(1)\n}\nfunc g(_ h: () -> Void) -> Void {\n  h()\n}\nf()\ng({ print(2) })\nS().greet()"
+        ),
+        "1\n2\n3\n"
+    );
+}

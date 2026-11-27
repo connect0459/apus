@@ -750,10 +750,7 @@ impl Signatures {
                     ty: self.resolve_type(param.ty(), &scope, requirement.line())?,
                 });
             }
-            let ret = match requirement.ret() {
-                Some(ty) => self.resolve_type(ty, &scope, requirement.line())?,
-                None => Ty::Void,
-            };
+            let ret = self.resolve_result(requirement.ret(), &scope, requirement.line())?;
             requirements.push(Requirement {
                 name: requirement.name().to_string(),
                 params,
@@ -1442,8 +1439,7 @@ impl Signatures {
         }
         let ret = match (func.ret(), owner_ty) {
             (_, Some(ty)) if func.is_init() => ty,
-            (Some(ty), _) => self.resolve_type(ty, &scope, func.line())?,
-            (None, _) => Ty::Void,
+            (ty, _) => self.resolve_result(ty, &scope, func.line())?,
         };
         let sig = FuncSig {
             generics,
@@ -1746,6 +1742,14 @@ impl Signatures {
             Kind::Struct => self.struct_defs[def].name().to_string(),
             Kind::Enum => self.enum_defs[def].name().to_string(),
         })
+    }
+
+    pub fn resolve_result(&self, ret: Option<&TypeRef>, scope: &Scope, line: u32) -> CResult<Ty> {
+        match ret {
+            Some(tr) if tr.name() == "Void" && tr.args().is_empty() => Ok(Ty::Void),
+            Some(tr) => self.resolve_type(tr, scope, line),
+            None => Ok(Ty::Void),
+        }
     }
 
     pub fn resolve_type(&self, tr: &TypeRef, scope: &Scope, line: u32) -> CResult<Ty> {
