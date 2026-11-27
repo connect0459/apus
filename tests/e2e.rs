@@ -7030,3 +7030,35 @@ fn condition_lists_are_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_let_before_the_pattern_binds_every_payload_name_in_a_switch_an_if_and_a_guard() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case rect(width: Int, height: Int)\n  case dot\n}\nfunc area(_ s: Shape) -> Int {\n  switch s {\n  case let .circle(r): return r * r\n  case let .rect(w, h): return w * h\n  case .dot: return 0\n  }\n}\nfunc radius(_ s: Shape) -> Int {\n  guard case let .circle(r) = s else { return -1 }\n  return r\n}\nfunc main() {\n  print(area(.circle(3)))\n  print(area(.rect(width: 2, height: 5)))\n  print(area(.dot))\n  print(radius(.circle(4)))\n  print(radius(.dot))\n  let o: Int? = 8\n  if case let .some(v) = o, v > 1 { print(v) }\n  switch Shape.rect(width: 1, height: 2) {\n  case let .rect(w, _): print(w)\n  default: print(0)\n  }\n  let b: Shape = .circle(6)\n  switch b {\n  case let .circle(r), .rect(width: let r, height: _): print(r)\n  default: print(0)\n  }\n}"
+        ),
+        "9\n10\n0\n4\n-1\n8\n1\n6\n"
+    );
+}
+
+#[test]
+fn a_let_before_the_pattern_is_checked_like_a_let_in_it() {
+    for (body, message) in [
+        (
+            "let o: Int? = 1\n  switch o {\n  case let .some(v), .none: print(v)\n  }",
+            "must bind the same names",
+        ),
+        (
+            "let o: Int? = 1\n  if case let .some(let v) = o { print(v) }",
+            "expected",
+        ),
+        (
+            "let o: Int? = 1\n  if case let .some(v, w) = o { print(v) }",
+            "carries 1 value",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

@@ -790,25 +790,7 @@ impl Parser<'_> {
         let label = if self.eat_keyword("default") {
             CaseLabel::Default
         } else if self.eat_keyword("case") {
-            if self.is_punct("(") {
-                let mut alternatives = vec![self.tuple_pattern()?];
-                while self.eat_punct(",") {
-                    alternatives.push(self.tuple_pattern()?);
-                }
-                CaseLabel::Tuples(alternatives)
-            } else if self.at_value_pattern() {
-                let mut values = vec![self.range()?];
-                while self.eat_punct(",") {
-                    values.push(self.range()?);
-                }
-                CaseLabel::Values(values)
-            } else {
-                let mut patterns = vec![self.pattern()?];
-                while self.eat_punct(",") {
-                    patterns.push(self.pattern()?);
-                }
-                CaseLabel::Patterns(patterns)
-            }
+            self.case_label()?
         } else {
             return self.fail("expected 'case' or 'default' in a switch body");
         };
@@ -827,7 +809,7 @@ impl Parser<'_> {
         }
     }
 
-    fn pattern(&mut self) -> PResult<Pattern> {
+    fn pattern(&mut self, shared_let: bool) -> PResult<Pattern> {
         let type_name = if self.is_punct(".") {
             None
         } else {
@@ -840,7 +822,7 @@ impl Parser<'_> {
             let mut bindings = Vec::new();
             loop {
                 labels.push(self.payload_label()?);
-                bindings.push(self.binding()?);
+                bindings.push(self.binding(shared_let)?);
                 if !self.eat_punct(",") {
                     break;
                 }
@@ -853,12 +835,14 @@ impl Parser<'_> {
         Ok(Pattern::new(type_name, case, bindings).with_labels(labels))
     }
 
-    fn binding(&mut self) -> PResult<Option<String>> {
+    fn binding(&mut self, shared_let: bool) -> PResult<Option<String>> {
         if matches!(self.peek(), Some(Token::Ident(s)) if s == "_") {
             self.pos += 1;
             return Ok(None);
         }
-        self.expect_keyword("let")?;
+        if !shared_let {
+            self.expect_keyword("let")?;
+        }
         self.name().map(Some)
     }
 
@@ -1089,9 +1073,10 @@ impl Parser<'_> {
             }
             CaseLabel::Values(values)
         } else {
-            let mut patterns = vec![self.pattern()?];
+            let shared_let = self.eat_keyword("let");
+            let mut patterns = vec![self.pattern(shared_let)?];
             while self.eat_punct(",") {
-                patterns.push(self.pattern()?);
+                patterns.push(self.pattern(false)?);
             }
             CaseLabel::Patterns(patterns)
         })
