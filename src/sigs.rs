@@ -2571,6 +2571,10 @@ impl Signatures {
         Ok(self.struct_ty(def, id))
     }
 
+    pub fn is_instance_of(&self, ty: Ty, base: &str) -> bool {
+        matches!(self.origin_of(ty), Some((Kind::Struct, def, _)) if self.struct_def(base) == Some(def))
+    }
+
     pub fn tuple_elements(&self, ty: Ty) -> Option<Vec<Ty>> {
         match self.origin_of(ty)? {
             (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + MAX_TUPLE - 1).contains(&def) => {

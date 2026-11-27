@@ -55,6 +55,10 @@ const KEYWORDS: [&str; 32] = [
     "false",
 ];
 
+fn is_name(token: &Token) -> bool {
+    matches!(token, Token::Ident(s) if !KEYWORDS.contains(&s.as_str()))
+}
+
 const LEVEL_OR: usize = 0;
 const LEVEL_COALESCE: usize = 3;
 const LEVEL_CAST: usize = 4;
@@ -279,6 +283,13 @@ impl Parser<'_> {
     fn peek_name(&self) -> Option<&str> {
         match self.peek() {
             Some(Token::Ident(s)) if !KEYWORDS.contains(&s.as_str()) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn peek_word(&self) -> Option<&str> {
+        match self.peek() {
+            Some(Token::Ident(s)) => Some(s),
             _ => None,
         }
     }
@@ -591,6 +602,13 @@ impl Parser<'_> {
             Some(Token::Ident(s)) if s == "_" => {
                 self.pos += 1;
                 None
+            }
+            Some(Token::Ident(s))
+                if KEYWORDS.contains(&s.as_str()) && self.peek_at(1).is_some_and(is_name) =>
+            {
+                let label = s.clone();
+                self.pos += 1;
+                Some(label)
             }
             _ => Some(self.name()?),
         };
@@ -1783,10 +1801,11 @@ impl Parser<'_> {
             if !args.is_empty() {
                 self.expect_punct(",")?;
             }
-            let labeled = self.peek_name().is_some()
+            let labeled = self.peek_word().is_some()
                 && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":");
             let label = if labeled {
-                let l = self.name()?;
+                let l = self.peek_word().map(str::to_string).unwrap_or_default();
+                self.pos += 1;
                 self.expect_punct(":")?;
                 Some(l)
             } else {
@@ -3671,5 +3690,18 @@ mod tests {
         assert!(matches!(e.kind(), ExprKind::Binary { .. }));
         let e = expr("a < b && c > (d)");
         assert!(matches!(e.kind(), ExprKind::Binary { .. }));
+    }
+
+    #[test]
+    fn a_keyword_may_label_an_argument_and_a_parameter() {
+        assert_eq!(
+            func("func f(while p: Int) { }").params(),
+            vec![param(Some("while"), "p", "Int")]
+        );
+        let call = expr("xs.prefix(while: f)");
+        let ExprKind::MemberCall { args, .. } = call.kind() else {
+            panic!("expected a method call");
+        };
+        assert_eq!(args[0].label(), Some("while"));
     }
 }

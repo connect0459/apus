@@ -136,7 +136,11 @@ fn build_on_this_thread(
         });
     }
 
-    let tokens = lex(source)?;
+    let mut tokens = lex(source)?;
+    let extra = crate::prelude::extras(&tokens);
+    if !extra.is_empty() {
+        tokens = lex(&format!("{source}\n{extra}"))?;
+    }
     let items = split_items(&tokens)?;
     let digest = signature_digest(&items);
     let memo = ItemMemo::load(&cache_dir).filter(|m| m.is_valid_for(compiler_stamp, digest));

@@ -2512,6 +2512,8 @@ struct AssignPath {
     crossed_class: bool,
 }
 
+const LAZY_SEQUENCE: &str = "LazySequence";
+
 type LocalSignature = (Vec<(String, Ty)>, Vec<Option<String>>, Ty);
 
 #[derive(Clone, Copy)]
@@ -2607,6 +2609,17 @@ impl<'a> FnCx<'a> {
     }
 
     fn field_of(&mut self, line: u32, base: TExpr, name: &str) -> CResult<TExpr> {
+        if self.is_lazy(base.ty()) {
+            let callee = match name {
+                "first" => Some("_lazyFirst"),
+                "count" => Some("_lazyCount"),
+                "isEmpty" => Some("_lazyIsEmpty"),
+                _ => None,
+            };
+            if let Some(callee) = callee {
+                return self.library_call(line, callee, name, vec![base], &[]);
+            }
+        }
         if base.ty() == Ty::Char {
             return self.character_property(line, base, name);
         }
@@ -5832,6 +5845,12 @@ impl<'a> FnCx<'a> {
             if let Some(elem) = self.sigs.array_element(text.ty()) {
                 return self.for_elements(line, var, text, elem, body);
             }
+            if self.is_lazy(text.ty()) {
+                self.scopes.push(HashMap::new());
+                let lowered = self.lazy_for(line, var, text, body);
+                self.scopes.pop();
+                return lowered;
+            }
             if let Some((key, value)) = self.sigs.table_parts(text.ty()) {
                 if !self.sigs.is_set(text.ty()) {
                     return Err(CheckError::at(
@@ -5876,6 +5895,9 @@ impl<'a> FnCx<'a> {
         args: &[Arg],
     ) -> CResult<TExpr> {
         if let Some(call) = self.array_closure_method(line, &receiver, elem, name, args)? {
+            return Ok(call);
+        }
+        if let Some(call) = self.array_library_method(line, &receiver, name, args)? {
             return Ok(call);
         }
         if name == "enumerated" {
@@ -7287,6 +7309,161 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    fn is_lazy(&self, ty: Ty) -> bool {
+        self.sigs.is_instance_of(ty, LAZY_SEQUENCE)
+    }
+
+    fn library_call(
+        &mut self,
+        line: u32,
+        callee: &str,
+        shown: &str,
+        mut leading: Vec<TExpr>,
+        args: &[Arg],
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let sig = sigs
+            .func(callee)
+            .ok_or_else(|| CheckError::at(line, "internal error: the library source is missing"))?;
+        let params = &sig.params()[leading.len()..];
+        let implicit = params.len() == 1 && args.is_empty() && callee.ends_with("DropFirst")
+            || params.len() == 1 && args.is_empty() && callee.ends_with("DropLast");
+        if implicit {
+            leading.push(TExpr::Int(1));
+            return self.finish_call(line, callee, sig, leading, None, None);
+        }
+        if args.len() != params.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{shown}' takes {} argument(s), but {} were given",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let checked = self.check_values(line, sig, params, args, leading)?;
+        self.finish_call(line, callee, sig, checked, None, None)
+    }
+
+    fn array_library_method(
+        &mut self,
+        line: u32,
+        receiver: &TExpr,
+        name: &str,
+        args: &[Arg],
+    ) -> CResult<Option<TExpr>> {
+        let label = args.first().and_then(Arg::label);
+        let callee = match (name, label) {
+            ("prefix", None) => "_arrayPrefix",
+            ("prefix", Some("while")) => "_arrayPrefixWhile",
+            ("suffix", None) => "_arraySuffix",
+            ("dropFirst", None) => "_arrayDropFirst",
+            ("dropLast", None) => "_arrayDropLast",
+            ("reversed", None) => "_arrayReversed",
+            ("drop", Some("while")) => "_arrayDropWhile",
+            _ => return Ok(None),
+        };
+        self.library_call(line, callee, name, vec![receiver.clone()], args)
+            .map(Some)
+    }
+
+    fn lazy_of(&mut self, line: u32, base: &Expr) -> CResult<TExpr> {
+        let source = if matches!(base.kind(), ExprKind::Range { .. }) {
+            self.sequence_array(line, base)?
+        } else {
+            let value = self.value(base)?;
+            match self.array_of_value(line, value.clone())? {
+                Some(array) => array,
+                None => return self.field_of(line, value, "lazy"),
+            }
+        };
+        self.library_call(line, "_lazyArray", "lazy", vec![source], &[])
+    }
+
+    fn array_of_value(&mut self, line: u32, value: TExpr) -> CResult<Option<TExpr>> {
+        let sigs = self.sigs;
+        let ty = value.ty();
+        if sigs.array_element(ty).is_some() {
+            return Ok(Some(value));
+        }
+        if ty == Ty::Str {
+            return Ok(Some(TExpr::Call {
+                callee: CHARACTERS.to_string(),
+                type_args: vec![Ty::Str],
+                args: vec![value],
+                ret: sigs.array_of(Ty::Char, line)?,
+            }));
+        }
+        if let Some((key, entry)) = sigs.table_parts(ty) {
+            let (callee, element) = if sigs.is_set(ty) {
+                (KEYS, key)
+            } else {
+                (ENTRIES, sigs.tuple_of(vec![key, entry], line)?)
+            };
+            return Ok(Some(TExpr::Call {
+                callee: callee.to_string(),
+                type_args: vec![ty],
+                args: vec![value],
+                ret: sigs.array_of(element, line)?,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn lazy_for(&mut self, line: u32, var: &str, sequence: TExpr, body: &[Stmt]) -> CResult<TStmt> {
+        let held = self.declare(line, "$sequence", sequence.ty(), false)?;
+        let iterator = Expr::new(
+            line,
+            ExprKind::MemberCall {
+                base: Box::new(Expr::new(line, ExprKind::Ident("$sequence".to_string()))),
+                name: "make".to_string(),
+                args: Vec::new(),
+            },
+        );
+        let next = Expr::new(
+            line,
+            ExprKind::Apply {
+                func: Box::new(Expr::new(line, ExprKind::Ident("$iterator".to_string()))),
+                args: Vec::new(),
+            },
+        );
+        let rewritten = [
+            Stmt::new(
+                line,
+                StmtKind::Let {
+                    name: "$iterator".to_string(),
+                    mutable: false,
+                    ty: None,
+                    init: Some(iterator),
+                },
+            ),
+            Stmt::new(
+                line,
+                StmtKind::WhileConds {
+                    conditions: vec![Condition::Let {
+                        name: var.to_string(),
+                        mutable: false,
+                        value: next,
+                    }],
+                    body: body.to_vec(),
+                },
+            ),
+        ];
+        let mut lowered = vec![TStmt::Let {
+            local: held,
+            init: sequence,
+        }];
+        for stmt in &rewritten {
+            self.lower_stmt(stmt, &mut lowered)?;
+        }
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: lowered,
+            else_body: Vec::new(),
+        })
+    }
+
     fn sequence_array(&mut self, line: u32, expr: &Expr) -> CResult<TExpr> {
         let sigs = self.sigs;
         let converted = |callee: &str, source: TExpr, element: Ty| -> CResult<TExpr> {
@@ -7690,6 +7867,11 @@ impl<'a> FnCx<'a> {
         contextual: Option<Ty>,
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
+        let source = if self.is_lazy(source.ty()) {
+            self.library_call(line, "_lazyToArray", name, vec![source], &[])?
+        } else {
+            source
+        };
         let ty = source.ty();
         if name == SET {
             if sigs.is_set(ty) {
@@ -8555,6 +8737,16 @@ impl<'a> FnCx<'a> {
                 args: vec![receiver],
             });
         }
+        if args.first().and_then(Arg::label) == Some("while") {
+            let callee = match name {
+                "prefix" => Some("_stringPrefixWhile"),
+                "drop" => Some("_stringDropWhile"),
+                _ => None,
+            };
+            if let Some(callee) = callee {
+                return self.library_call(line, callee, name, vec![receiver], args);
+            }
+        }
         if name == "replacingOccurrences" {
             return self.string_replacement(line, receiver, args);
         }
@@ -9055,6 +9247,7 @@ impl<'a> FnCx<'a> {
                 type_args,
                 args,
             } => self.method_call(line, base, name, args, expected, Some(type_args)),
+            ExprKind::Member { base, name } if name == "lazy" => self.lazy_of(line, base),
             ExprKind::Member { base, name } => {
                 let base = self.value(base)?;
                 self.field_of(line, base, name)
@@ -9181,6 +9374,18 @@ impl<'a> FnCx<'a> {
             }
             (receiver, ty, true)
         };
+        let renamed = if self.is_lazy(lookup_ty) {
+            match (name, args.first().and_then(Arg::label)) {
+                ("prefix", Some("while")) => Some("prefixWhile"),
+                ("drop", Some("while")) => Some("dropWhile"),
+                ("first", Some("where")) => Some("firstWhere"),
+                ("contains", Some("where")) => Some("containsWhere"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let name = renamed.unwrap_or(name);
         let owner = sigs.owner_name(lookup_ty).ok_or_else(|| {
             CheckError::at(
                 line,

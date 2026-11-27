@@ -7305,3 +7305,96 @@ fn a_generic_local_function_checks_the_number_of_arguments() {
         build_error("func main() {\n  func f<T>(_ a: T) -> T { return a }\n  let x = f(1, 2)\n}");
     assert!(error.contains("takes 1 argument(s), but 2 were given"));
 }
+
+#[test]
+fn an_array_takes_prefixes_suffixes_drops_and_reverses_into_new_arrays() {
+    assert_eq!(
+        main_printing(
+            "func show(_ xs: [Int]) {\n  print(xs.map { String($0) }.joined(separator: \",\"))\n}\nlet a = [1, 2, 3, 4, 5]\nshow(a.prefix(2))\nshow(a.suffix(2))\nshow(a.dropFirst())\nshow(a.dropFirst(3))\nshow(a.dropLast())\nshow(a.dropLast(4))\nshow(a.reversed())\nprint(a.prefix(10).count)\nshow(a.prefix(while: { $0 < 3 }))\nshow(a.drop(while: { $0 < 3 }))\nprint([\"a\", \"b\"].reversed().joined(separator: \"\"))\nlet e: [Int] = []\nprint(e.reversed().count)\nprint(a.dropFirst(9).count)"
+        ),
+        "1,2\n4,5\n2,3,4,5\n4,5\n1,2,3,4\n1\n5,4,3,2,1\n5\n1,2\n3,4,5\nba\n0\n0\n"
+    );
+}
+
+#[test]
+fn a_string_takes_a_prefix_or_drops_while_a_condition_holds() {
+    assert_eq!(
+        main_printing(
+            "let s = \"aab1c\"\nprint(s.prefix(while: { $0 != \"1\" }))\nprint(s.drop(while: { $0 == \"a\" }))"
+        ),
+        "aab\nb1c\n"
+    );
+}
+
+#[test]
+fn a_negative_count_to_prefix_traps() {
+    run_expecting_a_crash("func main() {\n  let a = [1, 2]\n  print(a.prefix(-1).count)\n}");
+}
+
+#[test]
+fn a_lazy_sequence_evaluates_only_the_elements_that_a_result_needs() {
+    assert_eq!(
+        main_printing(
+            "func show(_ xs: [Int]) {\n  print(xs.map { String($0) }.joined(separator: \",\"))\n}\nvar seen = 0\nlet doubled = [1, 2, 3, 4, 5, 6].lazy.map { (x: Int) -> Int in\n  seen += 1\n  return x * 2\n}\nlet big = doubled.filter { $0 > 4 }\nprint(seen)\nprint(big.first ?? -1)\nprint(seen)\nshow(Array(big.prefix(2)))\nprint(seen)"
+        ),
+        "0\n6\n3\n6,8\n7\n"
+    );
+}
+
+#[test]
+fn a_lazy_sequence_can_be_restarted_looped_over_and_stopped_early() {
+    assert_eq!(
+        main_printing(
+            "var seen = 0\nlet l = [5, 6, 7, 8].lazy.map { (x: Int) -> Int in\n  seen += 1\n  return x + 1\n}\nfor x in l {\n  if x > 7 { break }\n  print(x)\n}\nprint(seen)\nprint(l.count)\nprint(seen)\nprint(l.isEmpty)\nfor y in l.filter({ $0 % 2 == 0 }) { print(y) }"
+        ),
+        "6\n7\n3\n4\n7\nfalse\n6\n8\n"
+    );
+}
+
+#[test]
+fn lazy_sequences_offer_the_filtering_and_searching_members() {
+    assert_eq!(
+        main_printing(
+            "func show(_ xs: [Int]) {\n  print(xs.map { String($0) }.joined(separator: \",\"))\n}\nlet a = [1, 2, 3, 4, 5, 6]\nprint(a.lazy.prefix(while: { $0 < 4 }).reduce(0, +))\nshow(Array(a.lazy.drop(while: { $0 < 4 })))\nshow(Array(a.lazy.dropFirst(4)))\nshow(Array(a.lazy.compactMap { (x: Int) -> Int? in\n  if x % 2 == 0 { return x * 10 }\n  return nil\n}))\nprint(a.lazy.first(where: { $0 > 3 }) ?? 0)\nprint(a.lazy.contains(where: { $0 == 9 }))\nprint(a.lazy.allSatisfy { $0 > 0 })\nvar total = 0\na.lazy.filter { $0 > 4 }.forEach { total += $0 }\nprint(total)\nshow(Array(a.lazy.enumerated().map { $0.offset * $0.element }.prefix(3)))\nprint(Set(a.lazy.map { $0 % 3 }).count)"
+        ),
+        "6\n4,5,6\n5,6\n20,40,60\n4\nfalse\ntrue\n11\n0,2,6\n3\n"
+    );
+}
+
+#[test]
+fn a_lazy_sequence_can_start_from_a_string_a_set_a_dictionary_or_a_range() {
+    assert_eq!(
+        main_printing(
+            "func show(_ xs: [Int]) {\n  print(xs.map { String($0) }.joined(separator: \",\"))\n}\nprint(Array(\"abc\".lazy.map { String($0) + \"!\" }).joined(separator: \"\"))\nlet s: Set<Int> = [4]\nshow(Array(s.lazy.map { $0 + 1 }))\nlet d = [\"k\": 1]\nshow(Array(d.lazy.map { $0.1 }))\nshow(Array((1...4).lazy.filter { $0 % 2 == 1 }))\nshow(Array((0..<3).lazy.map { $0 * $0 }))"
+        ),
+        "a!b!c!\n5\n1\n1,3\n0,1,4\n"
+    );
+}
+
+#[test]
+fn a_member_named_lazy_still_works_on_a_type_that_declares_it() {
+    assert_eq!(
+        run(
+            "struct Flags {\n  var lazy: Int\n}\nfunc main() {\n  let f = Flags(lazy: 3)\n  print(f.lazy)\n}"
+        ),
+        "3\n"
+    );
+}
+
+#[test]
+fn the_library_members_reject_wrong_arguments() {
+    for (body, message) in [
+        (
+            "let a = [1]\n  let b = a.prefix()",
+            "takes 1 argument(s), but 0 were given",
+        ),
+        ("let b = 5.lazy", "has no members"),
+        (
+            "let a = [1]\n  let b = a.reversed(1)",
+            "takes 0 argument(s), but 1 were given",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        assert!(build_error(&source).contains(message), "{body}");
+    }
+}
