@@ -7534,3 +7534,13 @@ fn void_may_be_written_as_the_result_type_of_any_function() {
         "1\n2\n3\n"
     );
 }
+
+#[test]
+fn string_escapes_include_unicode_scalars_and_integer_literals_have_other_bases() {
+    assert_eq!(
+        main_printing(
+            "print(\"a\\u{41}\\u{e9}b\")\nprint(\"x\\ty\\rz\".count)\nprint(0xFF + 0b101 + 0o17 + 1_000)\nprint(0x7fff_ffff_ffff_ffff == 9223372036854775807)"
+        ),
+        "aAéb\n5\n1275\ntrue\n"
+    );
+}

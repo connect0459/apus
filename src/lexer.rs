@@ -56,6 +56,28 @@ const TWO_CHAR_PUNCTS: [&str; 13] = [
     "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "??",
 ];
 
+fn unicode_escape(chars: &[char], at: usize, line: u32) -> Result<(char, usize), LexError> {
+    let bad = |message: &str| LexError {
+        line,
+        message: message.to_string(),
+    };
+    if chars.get(at) != Some(&'{') {
+        return Err(bad("a unicode escape is written \\u{...}"));
+    }
+    let close = chars[at..]
+        .iter()
+        .position(|c| *c == '}')
+        .map(|offset| at + offset)
+        .ok_or_else(|| bad("unterminated unicode escape"))?;
+    let digits: String = chars[at + 1..close].iter().collect();
+    u32::from_str_radix(&digits, 16)
+        .ok()
+        .filter(|_| !digits.is_empty() && digits.len() <= 8)
+        .and_then(char::from_u32)
+        .map(|scalar| (scalar, close + 1))
+        .ok_or_else(|| bad("invalid unicode escape"))
+}
+
 fn skip_code(chars: &[char], mut at: usize) -> Option<usize> {
     let mut depth = 1usize;
     while let Some(&c) = chars.get(at) {
@@ -172,11 +194,19 @@ fn lex_from(src: &str, first_line: u32) -> Result<Vec<Spanned>, LexError> {
                         i = close + 1;
                     }
                     Some('\\') => {
+                        if chars.get(i + 1) == Some(&'u') {
+                            let (scalar, next) = unicode_escape(&chars, i + 2, line)?;
+                            text.push(scalar);
+                            i = next;
+                            continue;
+                        }
                         let escaped = match chars.get(i + 1) {
                             Some('n') => '\n',
                             Some('t') => '\t',
+                            Some('r') => '\r',
                             Some('\\') => '\\',
                             Some('"') => '"',
+                            Some('\'') => '\'',
                             Some('0') => '\0',
                             _ => {
                                 return Err(LexError {
@@ -207,18 +237,35 @@ fn lex_from(src: &str, first_line: u32) -> Result<Vec<Spanned>, LexError> {
                 line: start_line,
             });
         } else if c.is_ascii_digit() {
+            let radix = match (c, chars.get(i + 1)) {
+                ('0', Some('x')) => 16,
+                ('0', Some('b')) => 2,
+                ('0', Some('o')) => 8,
+                _ => 10,
+            };
+            if radix != 10 {
+                i += 2;
+            }
             let mut value: i64 = 0;
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
-                if let Some(d) = chars[i].to_digit(10) {
+            let mut digits = 0;
+            while i < chars.len() && (chars[i].is_digit(radix) || chars[i] == '_') {
+                if let Some(d) = chars[i].to_digit(radix) {
+                    digits += 1;
                     value = value
-                        .checked_mul(10)
-                        .and_then(|v| v.checked_add(d as i64))
+                        .checked_mul(i64::from(radix))
+                        .and_then(|v| v.checked_add(i64::from(d)))
                         .ok_or(LexError {
                             line,
                             message: "integer literal overflows".to_string(),
                         })?;
                 }
                 i += 1;
+            }
+            if digits == 0 {
+                return Err(LexError {
+                    line,
+                    message: "a number prefix needs digits".to_string(),
+                });
             }
             out.push(Spanned {
                 token: Token::Int(value),
@@ -410,5 +457,46 @@ mod tests {
         );
         assert_eq!(tokens("Int? x"), vec![ident("Int"), punct("?"), ident("x")]);
         assert_eq!(tokens("a ?? b"), vec![ident("a"), punct("??"), ident("b")]);
+    }
+
+    #[test]
+    fn a_unicode_escape_names_a_scalar_by_its_hexadecimal_value() {
+        assert_eq!(
+            tokens("\"a\\u{41}\\u{1F600}\""),
+            vec![Token::Str("aA\u{1F600}".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_carriage_return_and_single_quote_escapes_are_read() {
+        assert_eq!(tokens("\"\\r\\'\""), vec![Token::Str("\r'".to_string())]);
+    }
+
+    #[test]
+    fn a_malformed_unicode_escape_is_an_error() {
+        for bad in ["\"\\u41\"", "\"\\u{}\"", "\"\\u{110000}\"", "\"\\u{zz}\""] {
+            assert!(lex(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn integer_literals_may_be_hexadecimal_binary_or_octal_and_use_underscores() {
+        assert_eq!(
+            tokens("0xFF 0b101 0o17 1_000 0x_f_f"),
+            vec![
+                Token::Int(255),
+                Token::Int(5),
+                Token::Int(15),
+                Token::Int(1000),
+                Token::Int(255)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prefix_without_digits_or_a_value_too_large_is_an_error() {
+        for bad in ["0x", "0b2", "0xFFFFFFFFFFFFFFFFF"] {
+            assert!(lex(bad).is_err(), "{bad}");
+        }
     }
 }
