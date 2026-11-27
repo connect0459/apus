@@ -7965,3 +7965,38 @@ fn default_values_are_checked_where_they_are_used() {
         assert!(build_error(source).contains(message), "{source}");
     }
 }
+
+#[test]
+fn a_variadic_parameter_collects_the_extra_arguments_into_an_array() {
+    assert_eq!(
+        run(
+            "func sum(_ xs: Int...) -> Int {\n  var total = 0\n  for x in xs {\n    total += x\n  }\n  return total\n}\nfunc join(prefix: String, _ parts: String..., suffix: String) -> String {\n  return prefix + parts.joined(separator: \",\") + suffix\n}\nfunc two(x: Int..., y: Int...) -> Int {\n  return x.count * 10 + y.count\n}\nfunc first<T>(_ xs: T...) -> T {\n  return xs[0]\n}\nstruct S {\n  var base: Int\n  func add(_ more: Int...) -> Int {\n    return base + more.count\n  }\n}\nprint(sum())\nprint(sum(1))\nprint(sum(1, 2, 3))\nprint(join(prefix: \"<\", \"a\", \"b\", suffix: \">\"))\nprint(join(prefix: \"<\", suffix: \">\"))\nprint(two(x: 1, 2, y: 3))\nprint(first(7, 8))\nprint(S(base: 10).add(1, 2, 3))"
+        ),
+        "0\n1\n6\n<a,b>\n<>\n21\n7\n13\n"
+    );
+}
+
+#[test]
+fn variadic_parameters_are_checked() {
+    for (source, message) in [
+        (
+            "func f(_ xs: Int...) {\n}\nfunc main() {\n  f(1, \"a\")\n}",
+            "expected Int",
+        ),
+        (
+            "func f(_ xs: Int...) {\n}\nfunc main() {\n  f([1, 2])\n}",
+            "expected Int",
+        ),
+        (
+            "func main() {\n  func g(_ xs: Int...) {\n  }\n}",
+            "local function",
+        ),
+        (
+            "protocol P {\n  func f(_ xs: Int...)\n}\nfunc main() {\n}",
+            "variadic",
+        ),
+        ("func f(_ xs: inout Int...) {\n}\nfunc main() {\n}", "inout"),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}

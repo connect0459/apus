@@ -194,13 +194,29 @@ fn argument_count_error(line: u32, callee: &str, wanted: usize, args: &[Arg]) ->
 }
 
 fn complete_arguments<'a>(params: &[ParamSig], args: &'a [Arg]) -> std::borrow::Cow<'a, [Arg]> {
-    if params.iter().all(|p| p.default().is_none()) {
+    if params
+        .iter()
+        .all(|p| p.default().is_none() && !p.is_variadic())
+    {
         return std::borrow::Cow::Borrowed(args);
     }
     let mut complete = Vec::with_capacity(params.len());
     let mut given = args.iter().peekable();
     for param in params {
         let matches = given.peek().is_some_and(|a| a.label() == param.label());
+        if param.is_variadic() {
+            let line = given.peek().map_or(0, |a| a.value().line());
+            let mut values = Vec::new();
+            if matches {
+                values.extend(given.next().map(|a| a.value().clone()));
+                while let Some(more) = given.next_if(|a| a.label().is_none()) {
+                    values.push(more.value().clone());
+                }
+            }
+            let collected = Expr::new(line, ExprKind::ArrayLiteral(values));
+            complete.push(Arg::new(param.label().map(str::to_string), collected));
+            continue;
+        }
         match (matches, param.default()) {
             (true, _) => complete.extend(given.next().cloned()),
             (false, Some(default)) => {
@@ -6969,10 +6985,10 @@ impl<'a> FnCx<'a> {
         let mut parameters = Vec::new();
         let mut labels = Vec::new();
         for param in func.params() {
-            if param.is_inout() {
+            if param.is_inout() || param.is_variadic() {
                 return Err(CheckError::at(
                     line,
-                    "a local function cannot have an inout parameter yet",
+                    "a local function cannot have an inout or a variadic parameter yet",
                 ));
             }
             let ty = sigs.resolve_type(param.ty(), &self.scope, line)?;

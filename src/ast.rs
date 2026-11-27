@@ -272,6 +272,7 @@ pub struct Param {
     ty: TypeName,
     inout: bool,
     default: Option<Expr>,
+    variadic: bool,
 }
 
 impl Param {
@@ -282,7 +283,17 @@ impl Param {
             ty: ty.into(),
             inout: false,
             default: None,
+            variadic: false,
         }
+    }
+
+    pub fn as_variadic(mut self) -> Self {
+        self.variadic = true;
+        self
+    }
+
+    pub fn is_variadic(&self) -> bool {
+        self.variadic
     }
 
     pub fn with_default(mut self, default: Expr) -> Self {

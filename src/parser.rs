@@ -716,7 +716,14 @@ impl Parser<'_> {
             self.pos += 1;
         }
         let ty = self.type_ref()?;
+        let variadic = self.eat_punct("...");
         let mut param = Param::new(label, name, ty);
+        if variadic {
+            if inout {
+                return self.fail("an inout parameter cannot be variadic");
+            }
+            param = param.as_variadic();
+        }
         if self.eat_punct("=") {
             param = param.with_default(self.expr()?);
         }

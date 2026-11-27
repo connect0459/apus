@@ -256,6 +256,7 @@ fn operator_requirement(name: &str) -> Requirement {
         ty: Ty::Param(0),
         inout: false,
         default: None,
+        variadic: false,
     };
     Requirement {
         name: name.to_string(),
@@ -321,6 +322,7 @@ pub struct ParamSig {
     ty: Ty,
     inout: bool,
     default: Option<Expr>,
+    variadic: bool,
 }
 
 impl ParamSig {
@@ -330,7 +332,12 @@ impl ParamSig {
             ty,
             inout: false,
             default: None,
+            variadic: false,
         }
+    }
+
+    pub fn is_variadic(&self) -> bool {
+        self.variadic
     }
 
     pub fn default(&self) -> Option<&Expr> {
@@ -918,6 +925,12 @@ impl Signatures {
             }
             let mut params = Vec::new();
             for param in requirement.params() {
+                if param.is_variadic() {
+                    return Err(CheckError::at(
+                        requirement.line(),
+                        "a protocol requirement cannot have a variadic parameter yet",
+                    ));
+                }
                 if param.default().is_some() {
                     return Err(CheckError::at(
                         requirement.line(),
@@ -935,6 +948,7 @@ impl Signatures {
                     ty: self.resolve_type(param.ty(), &scope, requirement.line())?,
                     inout: false,
                     default: None,
+                    variadic: false,
                 });
             }
             let ret = self.resolve_result(requirement.ret(), &scope, requirement.line())?;
@@ -1644,11 +1658,18 @@ impl Signatures {
                     "a default value for an initializer parameter is not supported yet",
                 ));
             }
+            let element = self.resolve_type(p.ty(), &scope, func.line())?;
+            let ty = if p.is_variadic() {
+                self.array_of(element, func.line())?
+            } else {
+                element
+            };
             params.push(ParamSig {
                 label: p.label().map(str::to_string),
-                ty: self.resolve_type(p.ty(), &scope, func.line())?,
+                ty,
                 inout: p.is_inout(),
                 default: p.default().cloned(),
+                variadic: p.is_variadic(),
             });
         }
         let ret = match (func.ret(), owner_ty) {
