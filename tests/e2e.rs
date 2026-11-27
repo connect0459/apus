@@ -6541,7 +6541,11 @@ fn tuple_misuse_is_rejected_with_a_message() {
             "for (a, b) in [1, 2] { }",
             "needs a dictionary or an array of pairs",
         ),
-        ("let t = (1, 2, 3, 4, 5)", "at most four elements"),
+        ("let t = (1, 2, 3, 4, 5, 6)", "at most five elements"),
+        (
+            "let (a, b, c, d, e, f) = (1, 2, 3, 4, 5, 6)",
+            "two to five elements",
+        ),
     ] {
         let source = format!("func main() {{\n  {body}\n}}");
         let error = build_error(&source);
@@ -7203,5 +7207,25 @@ fn a_where_clause_after_if_case_guard_case_and_while_case_adds_a_condition() {
             "enum Shape {\n  case circle(Int)\n  case dot\n}\nfunc big(_ s: Shape) -> String {\n  if case .circle(let r) = s where r > 5 { return \"big\" } else { return \"not big\" }\n}\nfunc radius(_ s: Shape) -> Int {\n  guard case .circle(let r) = s where r > 0 else { return -1 }\n  return r\n}\nfunc main() {\n  print(big(.circle(9)))\n  print(big(.circle(2)))\n  print(big(.dot))\n  print(radius(.circle(4)))\n  print(radius(.circle(0)))\n  var queue = [1, 2, 5]\n  var sum = 0\n  while case .some(let r) = queue.first where r < 3 {\n    sum += r\n    queue.remove(at: 0)\n  }\n  print(sum)\n}"
         ),
         "big\nnot big\nnot big\n4\n-1\n3\n"
+    );
+}
+
+#[test]
+fn a_tuple_holds_up_to_five_elements() {
+    assert_eq!(
+        run(
+            "func make(_ n: Int) -> (Int, String, Bool, Character, Int) {\n  return (n, \"s\", n > 1, \"c\", n * 2)\n}\nfunc main() {\n  let t = make(3)\n  print(t.0 + t.4)\n  let (a, b, c, d, e) = t\n  print(b + String(d) + String(c) + String(a + e))\n  var u = (1, 2, 3, 4, 5)\n  u.4 += 10\n  (u.0, u.1) = (u.1, u.0)\n  print(u)\n  print(u == (2, 1, 3, 4, 15))\n  let named = (a: 1, b: 2, c: 3, d: 4, e: 5)\n  print(named.e)\n  switch u {\n  case (2, _, _, _, let last): print(last)\n  default: print(0)\n  }\n  var seen: Set<Int> = []\n  for v in [(1, 2, 3, 4, 5), (1, 2, 3, 4, 5)] { seen.insert(v.2) }\n  print(seen.count)\n}"
+        ),
+        "9\nsctrue9\n(2, 1, 3, 4, 15)\ntrue\n5\n15\n1\n"
+    );
+}
+
+#[test]
+fn parentheses_around_one_name_group_it_because_there_is_no_one_element_tuple() {
+    assert_eq!(
+        main_printing(
+            "let (a) = 4\nvar (b) = (a + 1)\nb += 1\nlet c: (Int) = (b)\nprint(a + b + c)"
+        ),
+        "16\n"
     );
 }

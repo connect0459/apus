@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    Decl, EnumCaseDecl, EnumDecl, Field, FuncDecl, ProtocolDecl, StructDecl, TypeRef,
+    Decl, EnumCaseDecl, EnumDecl, Field, FuncDecl, MAX_TUPLE, ProtocolDecl, StructDecl, TypeRef,
 };
 use crate::tir::{TExpr, TFunc, TStruct};
 use crate::types::{EnumId, StructId, Ty};
@@ -45,8 +45,8 @@ pub const ARRAY: &str = "Array";
 pub const CELL: &str = "$Cell";
 pub const CELL_DEF: usize = 4;
 pub const TUPLE_DEF: usize = 5;
-pub const WEAK_CELL_DEF: usize = 8;
-pub const UNOWNED_CELL_DEF: usize = 9;
+pub const WEAK_CELL_DEF: usize = TUPLE_DEF + MAX_TUPLE - 1;
+pub const UNOWNED_CELL_DEF: usize = WEAK_CELL_DEF + 1;
 pub const DICTIONARY: &str = "Dictionary";
 pub const SET: &str = "Set";
 pub const DICT_COUNT: usize = 4;
@@ -561,7 +561,7 @@ impl Signatures {
         sigs.register_struct_def(&dictionary_decl())?;
         sigs.register_struct_def(&set_decl())?;
         sigs.register_struct_def(&cell_decl())?;
-        for count in 2..=4 {
+        for count in 2..=MAX_TUPLE {
             sigs.register_struct_def(&tuple_decl(count))?;
         }
         sigs.register_struct_def(&weak_cell_decl())?;
@@ -2553,7 +2553,7 @@ impl Signatures {
 
     pub fn tuple_elements(&self, ty: Ty) -> Option<Vec<Ty>> {
         match self.origin_of(ty)? {
-            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => {
+            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + MAX_TUPLE - 1).contains(&def) => {
                 Some(args[..args.len() / 2].to_vec())
             }
             _ => None,
@@ -2562,7 +2562,7 @@ impl Signatures {
 
     pub fn tuple_labels(&self, ty: Ty) -> Option<Vec<Option<String>>> {
         match self.origin_of(ty)? {
-            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + 3).contains(&def) => {
+            (Kind::Struct, def, args) if (TUPLE_DEF..TUPLE_DEF + MAX_TUPLE - 1).contains(&def) => {
                 let instances = self.instances.borrow();
                 Some(
                     args[args.len() / 2..]

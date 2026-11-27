@@ -321,7 +321,7 @@ impl Parser<'_> {
         if !self.is_punct("->") && parts.len() == 1 && labels[0].is_none() {
             return Ok(parts.remove(0));
         }
-        if !self.is_punct("->") && (2..=4).contains(&parts.len()) {
+        if !self.is_punct("->") && (2..=MAX_TUPLE).contains(&parts.len()) {
             return Ok(TypeRef::new(tuple_type_name(parts.len(), &labels), parts));
         }
         self.expect_punct("->")?;
@@ -797,8 +797,8 @@ impl Parser<'_> {
             }
         }
         self.expect_punct(")")?;
-        if !(2..=4).contains(&parts.len()) {
-            return self.fail("a tuple pattern has two to four elements");
+        if !(2..=MAX_TUPLE).contains(&parts.len()) {
+            return self.fail("a tuple pattern has two to five elements");
         }
         Ok(parts)
     }
@@ -1068,8 +1068,19 @@ impl Parser<'_> {
                 }
             }
             self.expect_punct(")")?;
-            if !(2..=4).contains(&names.len()) {
-                return self.fail("a tuple pattern names two to four elements");
+            if let [Some(name)] = names.as_slice() {
+                let name = name.clone();
+                self.expect_punct("=")?;
+                let init = self.expr()?;
+                return Ok(StmtKind::Let {
+                    name,
+                    mutable,
+                    ty: None,
+                    init: Some(init),
+                });
+            }
+            if !(2..=MAX_TUPLE).contains(&names.len()) {
+                return self.fail("a tuple pattern names two to five elements");
             }
             self.expect_punct("=")?;
             let init = self.expr()?;
@@ -1956,8 +1967,8 @@ impl Parser<'_> {
                 if rest.is_empty() {
                     return self.fail("a tuple has at least two elements");
                 }
-                if rest.len() > 3 {
-                    return self.fail("a tuple has at most four elements");
+                if rest.len() >= MAX_TUPLE {
+                    return self.fail("a tuple has at most five elements");
                 }
                 let mut items = vec![inner];
                 items.extend(rest);

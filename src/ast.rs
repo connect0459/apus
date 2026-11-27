@@ -1,3 +1,5 @@
+pub const MAX_TUPLE: usize = 5;
+
 pub fn tuple_type_name(count: usize, labels: &[Option<String>]) -> String {
     if labels.iter().all(Option::is_none) {
         return format!("$Tuple{count}");
