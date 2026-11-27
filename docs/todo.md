@@ -397,7 +397,7 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 
 ### Deep input is bounded by the parser and every pass runs on a large stack (2026-11-25)
 
-**Problem.** The parser, the checker, `mono`, the reference counting pass, the key and the code generator recurse over the depth of an expression, so a long chain such as `1 + 1 + ... ` overflowed the default 2 MiB thread stack, and the limit depended on the frame size of each function: adding a match arm to `Rewriter::expr` made a 120-term expression crash twice.
+**Problem.** The parser, the checker, `mono`, the reference counting pass, the key and the code generator recurse over the depth of an expression, so a long chain such as `1 + 1 + ...` overflowed the default 2 MiB thread stack, and the limit depended on the frame size of each function: adding a match arm to `Rewriter::expr` made a 120-term expression crash twice.
 
 **Options.** Swift's parser caps structure nesting at 256 (`StructureMarkerRAII`, the error `structure nesting level exceeded maximum of 256`) and parses an operator chain as a flat sequence, with only a complexity limit in the type checker; `rustc` grows the stack on demand with `stacker`; a flat representation of chains in the syntax tree and the typed IR with iterative passes.
 
@@ -699,7 +699,7 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 
 **Decision.** `{ [weak self, unowned other] params in ... }` is parsed as a capture list in front of the parameters (and `[weak self] in` alone for no parameters); the list is taken only when it is followed by `in`, a parameter list or a parameter name, so `{ [1, 2].count }` stays an array literal. Two builtin generic classes were added after the tuples: `$WeakCell<T>` with `weak var value: T?` and `$UnownedCell<T>` with `unowned let value: T`. For a name listed as `weak` or `unowned`, the closure expression creates a fresh cell at the place where the closure is made (`construct` of the cell class with `Some(x)` or `x`, so the existing rules for weak and unowned members count the reference), and the environment retains that cell like any other. Inside the closure the name is declared with the type `T?` (weak) or `T` (unowned), as a constant, and `capture::lower` reads it as the field of the cell loaded from the environment, which the reference counting pass already turns into a weak read (nil when the object is gone) or an unowned read (a trap when it is gone); it reads the member of the cell class, so no new typed IR node and no new code generation were needed. The enclosing variable stays an ordinary variable and is not moved into a strong cell. A nested closure that uses the name inherits the kind and shares the parent's cell. `[self]` is accepted as the default strong capture; any other entry without `weak` or `unowned` is rejected, because a copy of a value is not supported, and `weak` or `unowned` on a value that is not a class instance is an error.
 
-**Consequences.** `{ [weak self] in self?.x }` needs the explicit `?.` as in Swift, because `self` is optional inside the closure. A closure with a weak capture keeps the object only as long as another strong reference does, so an object that stores such a closure is freed when its last strong reference goes (a loop of one million objects that each store a closure over themselves keeps the resident set at 1.4 MB). A weak or unowned capture costs one cell per closure creation. 
+**Consequences.** `{ [weak self] in self?.x }` needs the explicit `?.` as in Swift, because `self` is optional inside the closure. A closure with a weak capture keeps the object only as long as another strong reference does, so an object that stores such a closure is freed when its last strong reference goes (a loop of one million objects that each store a closure over themselves keeps the resident set at 1.4 MB). A weak or unowned capture costs one cell per closure creation.
 
 ### A copied capture is a private cell made when the closure is made (2026-11-27)
 
@@ -756,7 +756,6 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `for x in xs where cond { body }` (and the `for (k, v)` form) is parsed as a loop whose body is `if cond { body }`, and `case P = s where cond` in an `if`, `guard` or `while` is parsed as the two conditions `case P = s, cond`. No checker or code generation change: the filter sees the loop variable, a `continue` or labeled `break` in the body keeps its meaning, and the binding rules are the ones of a condition list.
 
 **Consequences.** A filtered loop costs one comparison per element. Errors in the condition are reported against the line of the `for` or the condition list, not of a separate clause.
-
 
 ### A tuple holds two to five elements and one parenthesized name is a grouping (2026-11-27)
 
@@ -851,7 +850,7 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 After M12b, 57 of the 62 applicable tests fail to build. The line of the first error, read in each file, shows that the count by message hides the cause: they are about 25 separate features of Swift, and one test often needs several. Features by the number of tests whose first error they are (counted by hand from the failing line of each file, so approximate; a test is counted once, and most of these would unlock a test only up to its next error):
 
 | feature | tests | example |
-|---|---:|---|
+| --- | ---: | --- |
 | access and declaration modifiers and attributes before a declaration (`public`, `private`, `final`, `@inline(never)`, `@_eagerMove`) | 6 | `public class BaseView { }` |
 | `extension` declarations, also with `where` | 2 | `extension Array where Element == Foo {` |
 | computed properties (`var x: T { ... }`, `get`, `set`), also `{ get }` in a protocol | 4 | `var description: String {` |
