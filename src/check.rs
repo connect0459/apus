@@ -241,6 +241,49 @@ fn chain_branches(
     tail.unwrap_or_default()
 }
 
+fn flag_branches(
+    branches: Vec<(TExpr, Vec<TStmt>)>,
+    default_body: Option<Vec<TStmt>>,
+    matched: LocalId,
+) -> Vec<TStmt> {
+    let open = || TExpr::Unary {
+        op: UnaryOp::Not,
+        expr: Box::new(local(matched, Ty::Bool)),
+    };
+    let mut out = Vec::new();
+    for (condition, body) in branches {
+        let mut then_body = vec![TStmt::Assign {
+            local: matched,
+            value: TExpr::Bool(true),
+        }];
+        then_body.extend(body);
+        out.push(TStmt::If {
+            cond: compare(BinOp::And, open(), condition),
+            then_body,
+            else_body: Vec::new(),
+        });
+    }
+    if let Some(body) = default_body {
+        out.push(TStmt::If {
+            cond: open(),
+            then_body: body,
+            else_body: Vec::new(),
+        });
+    }
+    out
+}
+
+fn guarded(guard: TExpr, matched: LocalId, body: Vec<TStmt>) -> TStmt {
+    TStmt::If {
+        cond: guard,
+        then_body: body,
+        else_body: vec![TStmt::Assign {
+            local: matched,
+            value: TExpr::Bool(false),
+        }],
+    }
+}
+
 fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
     FnCx {
         sigs,
@@ -3338,6 +3381,16 @@ impl<'a> FnCx<'a> {
             init: subject_value,
         });
 
+        let flag = cases
+            .iter()
+            .any(|case| case.guard().is_some())
+            .then(|| self.temp(Ty::Bool));
+        if let Some(flag) = flag {
+            out.push(TStmt::Let {
+                local: flag,
+                init: TExpr::Bool(false),
+            });
+        }
         let mut covered = vec![false; sig.cases().len()];
         let mut default_body: Option<Vec<TStmt>> = None;
         let mut branches: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
@@ -3360,20 +3413,39 @@ impl<'a> FnCx<'a> {
                 }
                 CaseLabel::Patterns(patterns) => {
                     self.scopes.push(HashMap::new());
-                    let outcome = self.case_patterns(
-                        case,
-                        patterns,
-                        (&sig, temporary, subject_ty),
-                        &mut covered,
-                    );
-                    let checked =
-                        outcome.and_then(|tests| self.block(case.body()).map(|body| (tests, body)));
+                    let mut scratch = covered.clone();
+                    let target = if case.guard().is_some() {
+                        &mut scratch
+                    } else {
+                        &mut covered
+                    };
+                    let outcome =
+                        self.case_patterns(case, patterns, (&sig, temporary, subject_ty), target);
+                    let checked = outcome.and_then(|tests| {
+                        let guard = case.guard().map(|g| self.condition(g)).transpose()?;
+                        self.block(case.body()).map(|body| (tests, guard, body))
+                    });
                     self.scopes.pop();
-                    let (tests, body) = checked?;
+                    let (tests, guard, body) = checked?;
                     if tests.is_empty() {
                         return Err(CheckError::at(case.line(), "a case needs a pattern"));
                     }
-                    if tests.iter().all(|(_, prelude)| prelude.is_empty()) {
+                    if let (Some(guard), Some(flag)) = (guard, flag) {
+                        for pattern in &patterns[..patterns.len() - 1] {
+                            if let Some(index) = sig.case_index(pattern.case()) {
+                                covered[index] = true;
+                            }
+                        }
+                        let last = tests.len() - 1;
+                        for (position, (test, mut prelude)) in tests.into_iter().enumerate() {
+                            if position == last {
+                                prelude.push(guarded(guard.clone(), flag, body.clone()));
+                            } else {
+                                prelude.extend(body.iter().cloned());
+                            }
+                            branches.push((test, prelude));
+                        }
+                    } else if tests.iter().all(|(_, prelude)| prelude.is_empty()) {
                         let mut combined: Option<TExpr> = None;
                         for (test, _) in tests {
                             combined = Some(match combined.take() {
@@ -3408,7 +3480,10 @@ impl<'a> FnCx<'a> {
                 ),
             ));
         }
-        out.extend(chain_branches(branches, default_body));
+        out.extend(match flag {
+            Some(flag) => flag_branches(branches, default_body, flag),
+            None => chain_branches(branches, default_body),
+        });
         Ok(())
     }
 
@@ -3450,9 +3525,20 @@ impl<'a> FnCx<'a> {
                 }
                 CaseLabel::Values(values) => {
                     let mut condition: Option<TExpr> = None;
-                    for value in values {
-                        let test =
-                            self.value_test(case.line(), temporary, ty, value, &mut bools)?;
+                    let guard = case.guard().map(|g| self.condition(g)).transpose()?;
+                    for (index, value) in values.iter().enumerate() {
+                        let last = index + 1 == values.len();
+                        let mut scratch = [false, false];
+                        let target = if last && guard.is_some() {
+                            &mut scratch
+                        } else {
+                            &mut bools
+                        };
+                        let mut test =
+                            self.value_test(case.line(), temporary, ty, value, target)?;
+                        if let (true, Some(guard)) = (last, &guard) {
+                            test = compare(BinOp::And, test, guard.clone());
+                        }
                         condition = Some(match condition {
                             None => test,
                             Some(before) => TExpr::Binary {
@@ -3472,7 +3558,7 @@ impl<'a> FnCx<'a> {
         if default_body.is_none() {
             if ty == Ty::Bool {
                 if !(bools[0] && bools[1]) {
-                    let missing = if bools[0] { "false" } else { "true" };
+                    let missing = if bools[0] { "true" } else { "false" };
                     return Err(CheckError::at(
                         line,
                         format!("switch must be exhaustive: missing case '{missing}'"),
@@ -3542,6 +3628,19 @@ impl<'a> FnCx<'a> {
             });
             parts.push(local);
         }
+        let flag = cases
+            .iter()
+            .any(|case| {
+                case.guard().is_some()
+                    && matches!(case.label(), CaseLabel::Tuples(alternatives) if alternatives.len() == 1)
+            })
+            .then(|| self.temp(Ty::Bool));
+        if let Some(flag) = flag {
+            out.push(TStmt::Let {
+                local: flag,
+                init: TExpr::Bool(false),
+            });
+        }
         let mut default_body: Option<Vec<TStmt>> = None;
         let mut branches: Vec<(TExpr, Vec<TStmt>)> = Vec::new();
         for (position, case) in cases.iter().enumerate() {
@@ -3557,7 +3656,7 @@ impl<'a> FnCx<'a> {
                 }
                 CaseLabel::Tuples(alternatives) => {
                     self.scopes.push(HashMap::new());
-                    let checked = self.tuple_case(case, alternatives, &elements, &parts);
+                    let checked = self.tuple_case(case, alternatives, (&elements, &parts), flag);
                     self.scopes.pop();
                     branches.push(checked?);
                 }
@@ -3570,8 +3669,9 @@ impl<'a> FnCx<'a> {
             }
         }
         if default_body.is_none() {
+            let unguarded = cases.last().is_some_and(|case| case.guard().is_none());
             match branches.pop() {
-                Some((TExpr::Bool(true), body)) => default_body = Some(body),
+                Some((TExpr::Bool(true), body)) if unguarded => default_body = Some(body),
                 _ => {
                     return Err(CheckError::at(
                         line,
@@ -3580,7 +3680,10 @@ impl<'a> FnCx<'a> {
                 }
             }
         }
-        out.extend(chain_branches(branches, default_body));
+        out.extend(match flag {
+            Some(flag) => flag_branches(branches, default_body, flag),
+            None => chain_branches(branches, default_body),
+        });
         Ok(())
     }
 
@@ -3588,12 +3691,28 @@ impl<'a> FnCx<'a> {
         &mut self,
         case: &SwitchCase,
         alternatives: &[Vec<TuplePart>],
-        elements: &[Ty],
-        parts: &[LocalId],
+        subject: (&[Ty], &[LocalId]),
+        flag: Option<LocalId>,
     ) -> CResult<(TExpr, Vec<TStmt>)> {
-        let (condition, mut body) =
-            self.tuple_bindings(case.line(), alternatives, elements, parts)?;
+        let (elements, parts) = subject;
+        let line = case.line();
+        let (condition, mut body) = self.tuple_bindings(line, alternatives, elements, parts)?;
+        let Some(guard) = case.guard() else {
+            body.extend(self.block(case.body())?);
+            return Ok((condition, body));
+        };
+        if let (1, Some(flag)) = (alternatives.len(), flag) {
+            let guard = self.condition(guard)?;
+            let inner = self.block(case.body())?;
+            body.push(guarded(guard, flag, inner));
+            return Ok((condition, body));
+        }
+        let split = alternatives.len() - 1;
+        let (head, _) = self.tuple_bindings(line, &alternatives[..split], elements, parts)?;
+        let (last, _) = self.tuple_bindings(line, &alternatives[split..], elements, parts)?;
+        let guard = self.condition(guard)?;
         body.extend(self.block(case.body())?);
+        let condition = compare(BinOp::Or, head, compare(BinOp::And, last, guard));
         Ok((condition, body))
     }
 

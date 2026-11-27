@@ -545,6 +545,9 @@ impl Scan<'_> {
                             }
                         }
                     }
+                    if let Some(guard) = case.guard() {
+                        used |= self.expr_uses_self(guard);
+                    }
                     used |= self.stmts_use_self(case.body());
                     self.locals.pop();
                 }

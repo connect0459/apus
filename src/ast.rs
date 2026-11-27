@@ -667,12 +667,27 @@ pub enum StmtKind {
 pub struct SwitchCase {
     line: u32,
     label: CaseLabel,
+    guard: Option<Expr>,
     body: Vec<Stmt>,
 }
 
 impl SwitchCase {
     pub fn new(line: u32, label: CaseLabel, body: Vec<Stmt>) -> Self {
-        Self { line, label, body }
+        Self {
+            line,
+            label,
+            guard: None,
+            body,
+        }
+    }
+
+    pub fn with_guard(mut self, guard: Option<Expr>) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    pub fn guard(&self) -> Option<&Expr> {
+        self.guard.as_ref()
     }
 
     pub fn line(&self) -> u32 {

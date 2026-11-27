@@ -787,10 +787,15 @@ impl Parser<'_> {
 
     fn switch_case(&mut self) -> PResult<SwitchCase> {
         let line = self.line();
+        let mut guard = None;
         let label = if self.eat_keyword("default") {
             CaseLabel::Default
         } else if self.eat_keyword("case") {
-            self.case_label()?
+            let label = self.case_label()?;
+            if self.eat_keyword("where") {
+                guard = Some(self.header_expr()?);
+            }
+            label
         } else {
             return self.fail("expected 'case' or 'default' in a switch body");
         };
@@ -799,7 +804,7 @@ impl Parser<'_> {
         loop {
             while self.eat_punct(";") {}
             if self.is_punct("}") || self.is_keyword("case") || self.is_keyword("default") {
-                return Ok(SwitchCase::new(line, label, body));
+                return Ok(SwitchCase::new(line, label, body).with_guard(guard));
             }
             if self.peek().is_none() {
                 return self.fail("unterminated switch, expected '}'");

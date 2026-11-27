@@ -144,6 +144,9 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
                     }
                     _ => {}
                 }
+                if let Some(guard) = case.guard() {
+                    expression(guard, found);
+                }
                 statements(case.body(), found);
             }
         }

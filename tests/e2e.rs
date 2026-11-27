@@ -7062,3 +7062,63 @@ fn a_let_before_the_pattern_is_checked_like_a_let_in_it() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_where_clause_skips_a_case_whose_condition_fails_and_falls_to_the_next_case() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case rect(Int, Int)\n  case dot\n}\nfunc label(_ s: Shape) -> String {\n  switch s {\n  case .circle(let r) where r > 10: return \"big circle\"\n  case .circle(let r) where r > 5: return \"medium circle\"\n  case .circle: return \"small circle\"\n  case .rect(let w, let h) where w == h: return \"square\"\n  case .rect(let w, _) where w > 100: return \"wide\"\n  case .rect: return \"rect\"\n  case .dot: return \"dot\"\n  }\n}\nfunc main() {\n  print(label(.circle(20)))\n  print(label(.circle(7)))\n  print(label(.circle(1)))\n  print(label(.rect(3, 3)))\n  print(label(.rect(200, 1)))\n  print(label(.rect(2, 1)))\n  print(label(.dot))\n}"
+        ),
+        "big circle\nmedium circle\nsmall circle\nsquare\nwide\nrect\ndot\n"
+    );
+}
+
+#[test]
+fn a_where_clause_on_values_and_tuples_and_with_a_default() {
+    assert_eq!(
+        run(
+            "func kind(_ n: Int, _ even: Bool) -> String {\n  switch n {\n  case 0...9 where even: return \"small even\"\n  case 0...9: return \"small\"\n  case 10, 11 where !even: return \"ten or eleven odd\"\n  default: return \"large\"\n  }\n}\nfunc quadrant(_ p: (Int, Int)) -> String {\n  switch p {\n  case (let x, let y) where x == y: return \"diagonal\"\n  case (0, _), (_, 0) where p.0 + p.1 > 5: return \"far axis\"\n  case (let x, _) where x < 0: return \"left\"\n  default: return \"other\"\n  }\n}\nfunc main() {\n  print(kind(4, true))\n  print(kind(4, false))\n  print(kind(10, false))\n  print(kind(12, true))\n  print(quadrant((2, 2)))\n  print(quadrant((0, 1)))\n  print(quadrant((9, 0)))\n  print(quadrant((1, 0)))\n  print(quadrant((-3, 5)))\n}"
+        ),
+        "small even\nsmall\nten or eleven odd\nlarge\ndiagonal\nfar axis\nfar axis\nother\nleft\n"
+    );
+}
+
+#[test]
+fn a_where_clause_binds_only_the_last_pattern_of_a_case_and_can_leave_through_break() {
+    assert_eq!(
+        run(
+            "enum E {\n  case a(Int)\n  case b(Int)\n}\nfunc main() {\n  for e in [E.a(1), E.b(1), E.b(9)] {\n    switch e {\n    case let .a(n), .b(let n) where n > 5:\n      print(\"hit \" + String(n))\n    case .a, .b:\n      print(\"miss\")\n    }\n  }\n  var total = 0\n  for i in 0..<6 {\n    switch i {\n    case 0...5 where i > 3: break\n    default: total += i\n    }\n  }\n  print(total)\n}"
+        ),
+        "hit 1\nmiss\nhit 9\n6\n"
+    );
+}
+
+#[test]
+fn a_where_clause_does_not_make_a_switch_exhaustive_and_must_be_a_bool() {
+    for (body, message) in [
+        (
+            "let o: Int? = 1\n  switch o {\n  case .some(let v) where v > 0: print(v)\n  case .none: print(0)\n  }",
+            "missing case 'some'",
+        ),
+        (
+            "let b = true\n  switch b {\n  case true where b: print(1)\n  case false: print(0)\n  }",
+            "missing case 'true'",
+        ),
+        (
+            "let o: Int? = 1\n  switch o {\n  case .some(let v) where v: print(v)\n  default: print(0)\n  }",
+            "expected Bool",
+        ),
+        (
+            "let t = (1, 2)\n  switch t {\n  case (let a, let b) where a < b: print(a)\n  }",
+            "needs a 'default'",
+        ),
+        (
+            "let o: Int? = 1\n  switch o {\n  case .some(let v) where w > 0: print(v)\n  default: print(0)\n  }",
+            "w",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}
