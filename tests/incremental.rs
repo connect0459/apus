@@ -667,3 +667,18 @@ fn editing_a_function_of_a_program_with_top_level_statements_rebuilds_it() {
     project.build(&source(5));
     assert_eq!(project.run(), "6\n");
 }
+
+#[test]
+fn editing_a_method_of_an_extension_compiles_only_that_method() {
+    let project = Project::new();
+    let source = |value: i64| {
+        format!(
+            "struct S {{\n  var x: Int\n}}\nextension S {{\n  func f() -> Int {{\n    return x + {value}\n  }}\n  func g() -> Int {{\n    return x * 2\n  }}\n}}\nfunc main() {{\n  let s = S(x: 1)\n  print(s.f() + s.g())\n}}\n"
+        )
+    };
+    project.build(&source(1));
+    assert_eq!(project.run(), "4\n");
+    let report = project.build(&source(5));
+    assert_eq!(project.run(), "8\n");
+    assert_eq!(report.compiled(), 1);
+}

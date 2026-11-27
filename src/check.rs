@@ -9719,10 +9719,12 @@ impl<'a> FnCx<'a> {
                 let function = self.field_of(line, receiver, name)?;
                 return self.apply_value(line, name, function, None, args);
             }
-            if ty == Ty::Char {
+            let extended =
+                matches!(ty, Ty::Char | Ty::Str) && sigs.resolve_method(ty, name).is_some();
+            if ty == Ty::Char && !extended {
                 return self.character_method(line, receiver, name, args);
             }
-            if ty == Ty::Str {
+            if ty == Ty::Str && !extended {
                 if explicit.is_some() {
                     return Err(CheckError::at(
                         line,

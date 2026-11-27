@@ -65,6 +65,7 @@ pub enum Decl {
     Struct(StructDecl),
     Enum(EnumDecl),
     Protocol(ProtocolDecl),
+    Extension(ExtensionDecl),
 }
 
 impl Decl {
@@ -74,7 +75,48 @@ impl Decl {
             Decl::Struct(s) => s.name(),
             Decl::Enum(e) => e.name(),
             Decl::Protocol(p) => p.name(),
+            Decl::Extension(e) => e.type_name(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionDecl {
+    line: u32,
+    type_name: String,
+    conformances: Vec<String>,
+    aliases: Vec<(String, TypeRef)>,
+}
+
+impl ExtensionDecl {
+    pub fn new(
+        line: u32,
+        type_name: String,
+        conformances: Vec<String>,
+        aliases: Vec<(String, TypeRef)>,
+    ) -> Self {
+        Self {
+            line,
+            type_name,
+            conformances,
+            aliases,
+        }
+    }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn conformances(&self) -> &[String] {
+        &self.conformances
+    }
+
+    pub fn aliases(&self) -> &[(String, TypeRef)] {
+        &self.aliases
     }
 }
 

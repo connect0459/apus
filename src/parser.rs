@@ -484,6 +484,33 @@ impl Parser<'_> {
         Ok(names)
     }
 
+    fn extension_decl(&mut self, line: u32) -> PResult<ExtensionDecl> {
+        let name = self.name()?;
+        if self.is_punct("<") {
+            return self.fail("an extension names its type without type arguments");
+        }
+        let conformances = self.conformance_list()?;
+        if self.is_keyword("where") {
+            return self.fail("an extension with a where clause is not supported yet");
+        }
+        self.expect_punct("{")?;
+        let mut aliases = Vec::new();
+        loop {
+            while self.eat_punct(";") {}
+            if self.eat_punct("}") {
+                break;
+            }
+            if self.eat_keyword("typealias") {
+                aliases.push(self.type_alias()?);
+                self.end_of_statement()?;
+                continue;
+            }
+            return self
+                .fail("an extension cannot declare stored properties; add methods with 'func'");
+        }
+        Ok(ExtensionDecl::new(line, name, conformances, aliases))
+    }
+
     fn protocol_decl(&mut self, line: u32) -> PResult<ProtocolDecl> {
         let name = self.name()?;
         let mut inherited = Vec::new();
@@ -577,8 +604,10 @@ impl Parser<'_> {
             self.enum_decl(line).map(Decl::Enum)
         } else if self.eat_keyword("protocol") {
             self.protocol_decl(line).map(Decl::Protocol)
+        } else if self.eat_keyword("extension") {
+            self.extension_decl(line).map(Decl::Extension)
         } else {
-            self.fail("expected 'func', 'struct', 'class', 'enum' or 'protocol'")
+            self.fail("expected 'func', 'struct', 'class', 'enum', 'protocol' or 'extension'")
         }
     }
 

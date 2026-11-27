@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    Decl, EnumCaseDecl, EnumDecl, Expr, Field, FuncDecl, MAX_TUPLE, ProtocolDecl, StructDecl,
-    TypeRef,
+    Decl, EnumCaseDecl, EnumDecl, Expr, ExtensionDecl, Field, FuncDecl, MAX_TUPLE, ProtocolDecl,
+    StructDecl, TypeRef,
 };
 use crate::tir::{TExpr, TFunc, TStruct};
 use crate::types::{EnumId, StructId, Ty};
@@ -288,6 +288,16 @@ fn standard_protocols() -> HashMap<String, ProtocolSig> {
         .collect()
 }
 
+fn basic_type(name: &str) -> Option<Ty> {
+    match name {
+        "Int" => Some(Ty::Int),
+        "Bool" => Some(Ty::Bool),
+        "String" => Some(Ty::Str),
+        "Character" => Some(Ty::Char),
+        _ => None,
+    }
+}
+
 pub fn bound_includes(bound: &[String], protocol: &str) -> bool {
     bound
         .iter()
@@ -551,6 +561,7 @@ pub struct Signatures {
     protocols: HashMap<String, ProtocolSig>,
     assoc_types: Vec<(String, String)>,
     inits: HashMap<String, Vec<String>>,
+    primitive_conformances: Vec<(Ty, Vec<String>, u32)>,
     instances: RefCell<Instances>,
 }
 
@@ -565,6 +576,7 @@ impl Signatures {
             protocols: standard_protocols(),
             assoc_types: Vec::new(),
             inits: HashMap::new(),
+            primitive_conformances: Vec::new(),
             instances: RefCell::new(Instances::default()),
         };
         let mut protocol_decls: Vec<&ProtocolDecl> = Vec::new();
@@ -574,8 +586,9 @@ impl Signatures {
                 protocol_decls.push(p);
             }
         }
-        let normalized: Vec<Decl> = decls
+        let mut normalized: Vec<Decl> = decls
             .iter()
+            .filter(|decl| !matches!(decl, Decl::Extension(_)))
             .map(|decl| match decl {
                 Decl::Struct(s)
                     if s.superclass().is_some_and(|parent| {
@@ -592,6 +605,11 @@ impl Signatures {
                 other => other.clone(),
             })
             .collect();
+        for decl in decls {
+            if let Decl::Extension(extension) = decl {
+                sigs.merge_extension(&mut normalized, extension)?;
+            }
+        }
         let decls = &normalized[..];
         sigs.register_enum_def(&optional_decl())?;
         sigs.register_struct_def(&box_decl())?;
@@ -608,7 +626,7 @@ impl Signatures {
             match decl {
                 Decl::Struct(s) => sigs.register_struct_def(s)?,
                 Decl::Enum(e) => sigs.register_enum_def(e)?,
-                Decl::Func(_) | Decl::Protocol(_) => {}
+                Decl::Func(_) | Decl::Protocol(_) | Decl::Extension(_) => {}
             }
         }
         sigs.validate_protocol_names()?;
@@ -639,6 +657,76 @@ impl Signatures {
         }
         sigs.check_conformances()?;
         Ok(sigs)
+    }
+
+    fn merge_extension(&mut self, decls: &mut [Decl], extension: &ExtensionDecl) -> CResult<()> {
+        let name = extension.type_name();
+        let line = extension.line();
+        let merged = |own: &[String], more: &[String]| -> Vec<String> {
+            let mut all = own.to_vec();
+            for item in more {
+                if !all.contains(item) {
+                    all.push(item.clone());
+                }
+            }
+            all
+        };
+        for decl in decls.iter_mut() {
+            match decl {
+                Decl::Struct(target) if target.name() == name => {
+                    let conformances = merged(target.conformances(), extension.conformances());
+                    let mut aliases = target.aliases().to_vec();
+                    aliases.extend(extension.aliases().iter().cloned());
+                    *target = target
+                        .clone()
+                        .with_conformances(conformances)
+                        .with_aliases(aliases);
+                    return Ok(());
+                }
+                Decl::Enum(target) if target.name() == name => {
+                    let conformances = merged(target.conformances(), extension.conformances());
+                    let mut aliases = target.aliases().to_vec();
+                    aliases.extend(extension.aliases().iter().cloned());
+                    *target = target
+                        .clone()
+                        .with_conformances(conformances)
+                        .with_aliases(aliases);
+                    return Ok(());
+                }
+                Decl::Protocol(_) if decl.name() == name => {
+                    return Err(CheckError::at(
+                        line,
+                        format!("an extension of a protocol ('{name}') is not supported yet"),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let basic = match name {
+            "Int" => Some(Ty::Int),
+            "Bool" => Some(Ty::Bool),
+            "String" => Some(Ty::Str),
+            "Character" => Some(Ty::Char),
+            _ => None,
+        };
+        if let Some(ty) = basic {
+            if !extension.aliases().is_empty() {
+                return Err(CheckError::at(
+                    line,
+                    format!("an extension of '{name}' cannot declare a type alias yet"),
+                ));
+            }
+            self.primitive_conformances
+                .push((ty, extension.conformances().to_vec(), line));
+            return Ok(());
+        }
+        if matches!(name, ARRAY | DICTIONARY | SET | OPTIONAL) {
+            return Err(CheckError::at(
+                line,
+                format!("'{name}' cannot be extended yet"),
+            ));
+        }
+        Err(CheckError::at(line, format!("unknown type '{name}'")))
     }
 
     fn declares_user_protocol(&self, conformances: &[String]) -> bool {
@@ -780,6 +868,11 @@ impl Signatures {
                 for name in decl.bound(index) {
                     self.require_protocol(name, decl.line())?;
                 }
+            }
+        }
+        for (_, conformances, line) in &self.primitive_conformances {
+            for name in conformances {
+                self.require_protocol(name, *line)?;
             }
         }
         for decl in &self.enum_defs {
@@ -976,6 +1069,11 @@ impl Signatures {
                 names.extend(self.protocol_closure(declared));
             }
             current = self.superclass(t);
+        }
+        for (basic, declared, _) in &self.primitive_conformances {
+            if *basic == ty {
+                names.extend(self.protocol_closure(declared));
+            }
         }
         names
     }
@@ -1265,6 +1363,10 @@ impl Signatures {
                 !generics.is_empty(),
                 decl.line(),
             )?;
+        }
+        for (ty, conformances, line) in &self.primitive_conformances {
+            let name = self.owner_name(*ty).unwrap_or_default();
+            self.check_type_conformances(*ty, &name, conformances, false, *line)?;
         }
         Ok(())
     }
@@ -1776,6 +1878,15 @@ impl Signatures {
 
     fn member_owner(&self, func: &FuncDecl, owner: &str) -> CResult<(Ty, Vec<String>)> {
         let line = func.line();
+        if let Some(ty) = basic_type(owner) {
+            if func.is_mutating() || func.is_init() || func.is_deinit() || func.is_override() {
+                return Err(CheckError::at(
+                    line,
+                    format!("a method of '{owner}' cannot be mutating, an initializer or a deinit"),
+                ));
+            }
+            return Ok((ty, Vec::new()));
+        }
         let (ty, generics) = if let Some(def) = self.struct_def_ids.get(owner).copied() {
             let generics = self.struct_defs[def].generics().to_vec();
             let id =
@@ -1828,6 +1939,16 @@ impl Signatures {
     }
 
     pub fn owner_name(&self, ty: Ty) -> Option<String> {
+        let basic = match ty {
+            Ty::Int => Some("Int"),
+            Ty::Bool => Some("Bool"),
+            Ty::Str => Some("String"),
+            Ty::Char => Some("Character"),
+            _ => None,
+        };
+        if let Some(name) = basic {
+            return Some(name.to_string());
+        }
         let (kind, def, _) = self.origin_of(ty)?;
         Some(match kind {
             Kind::Struct => self.struct_defs[def].name().to_string(),

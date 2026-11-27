@@ -10,6 +10,7 @@ pub enum ItemKind {
     Enum,
     Protocol,
     Method,
+    Extension,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +238,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
     let tokens = &without_modifiers(tokens)[..];
     let mut items = Vec::new();
     let mut top_level: Vec<Spanned> = Vec::new();
+    let mut extension_members: Vec<(String, Vec<Spanned>)> = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let kind = match tokens[i].token() {
@@ -244,6 +246,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             Token::Ident(k) if k == "struct" || k == "class" => ItemKind::Struct,
             Token::Ident(k) if k == "enum" => ItemKind::Enum,
             Token::Ident(k) if k == "protocol" => ItemKind::Protocol,
+            Token::Ident(k) if k == "extension" => ItemKind::Extension,
             _ => {
                 i = take_statements(tokens, i, &mut top_level)?;
                 continue;
@@ -298,14 +301,14 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             matches!(slice.get(2).map(|t| t.token()), Some(Token::Punct(p)) if p == "<");
         let members = match kind {
             ItemKind::Func | ItemKind::Method => Vec::new(),
-            ItemKind::Struct | ItemKind::Enum => extract_members(&mut slice)?,
+            ItemKind::Struct | ItemKind::Enum | ItemKind::Extension => extract_members(&mut slice)?,
             ItemKind::Protocol => Vec::new(),
         };
         let hash = hash_tokens(&slice);
         let generic = kind == ItemKind::Func
             && matches!(slice.get(2).map(|t| t.token()), Some(Token::Punct(p)) if p == "<");
         let signature_hash = match kind {
-            ItemKind::Struct | ItemKind::Enum | ItemKind::Protocol => hash,
+            ItemKind::Struct | ItemKind::Enum | ItemKind::Protocol | ItemKind::Extension => hash,
             ItemKind::Func if generic => hash,
             ItemKind::Method => hash,
             ItemKind::Func => {
@@ -318,7 +321,11 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         };
         items.push(Item {
             kind,
-            name: name.clone(),
+            name: if kind == ItemKind::Extension {
+                format!("extension {name}")
+            } else {
+                name.clone()
+            },
             tokens: slice,
             hash,
             signature_hash,
@@ -326,10 +333,26 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             owner: None,
             top_level: false,
         });
-        for member in members {
-            items.push(member_item(&name, member, owner_generic)?);
+        if kind == ItemKind::Extension {
+            extension_members.extend(members.into_iter().map(|member| (name.clone(), member)));
+        } else {
+            for member in members {
+                items.push(member_item(&name, member, owner_generic)?);
+            }
         }
         i = end;
+    }
+    let generic_types: Vec<String> = items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Struct | ItemKind::Enum))
+        .filter(|item| {
+            matches!(item.tokens.get(2).map(Spanned::token), Some(Token::Punct(p)) if p == "<")
+        })
+        .map(|item| item.name.clone())
+        .collect();
+    for (owner, member) in extension_members {
+        let generic = generic_types.contains(&owner);
+        items.push(member_item(&owner, member, generic)?);
     }
     if !top_level.is_empty() {
         items.push(top_level_item(top_level));
@@ -338,7 +361,7 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
 }
 
 fn is_declaration_start(token: &Token) -> bool {
-    matches!(token, Token::Ident(k) if matches!(k.as_str(), "func" | "struct" | "class" | "enum" | "protocol"))
+    matches!(token, Token::Ident(k) if matches!(k.as_str(), "func" | "struct" | "class" | "enum" | "protocol" | "extension"))
 }
 
 fn take_statements(
@@ -987,5 +1010,56 @@ mod tests {
                 .iter()
                 .any(|t| matches!(t.token(), Token::Ident(w) if w == "@autoclosure"))
         );
+    }
+
+    #[test]
+    fn an_extension_is_an_item_and_its_methods_are_items_of_the_extended_type() {
+        let found = items(
+            "struct S { var x: Int }\nextension S: P {\n  func f() { }\n  mutating func g() { }\n}",
+        );
+        let summary: Vec<(ItemKind, &str, Option<&str>)> = found
+            .iter()
+            .map(|i| (i.kind(), i.name(), i.owner()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (ItemKind::Struct, "S", None),
+                (ItemKind::Extension, "extension S", None),
+                (ItemKind::Method, "S.f", Some("S")),
+                (ItemKind::Method, "S.g", Some("S")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_methods_of_an_extension_of_a_generic_type_are_generic_items() {
+        let found = items(
+            "extension Box {\n  func f() { }\n}\nstruct Box<T> { var v: T }\nstruct Plain { var v: Int }\nextension Plain {\n  func g() { }\n}",
+        );
+        let generic = |name: &str| {
+            found
+                .iter()
+                .find(|i| i.name() == name)
+                .unwrap()
+                .is_generic()
+        };
+        assert!(generic("Box.f"));
+        assert!(!generic("Plain.g"));
+    }
+
+    #[test]
+    fn editing_an_extension_method_body_changes_neither_the_extension_item_nor_the_digest() {
+        let one = items("struct S { }\nextension S {\n  func f() -> Int { return 1 }\n}");
+        let two = items("struct S { }\nextension S {\n  func f() -> Int { return 2 }\n}");
+        assert_eq!(signature_digest(&one), signature_digest(&two));
+        let extension = |found: &[Item]| {
+            found
+                .iter()
+                .find(|i| i.kind() == ItemKind::Extension)
+                .unwrap()
+                .hash()
+        };
+        assert_eq!(extension(&one), extension(&two));
     }
 }

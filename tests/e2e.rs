@@ -7817,3 +7817,83 @@ fn a_value_of_an_inheriting_protocol_calls_the_requirements_it_inherits() {
         "ann3bob\ntrue\n9\n"
     );
 }
+
+#[test]
+fn an_extension_adds_methods_and_initializers_to_a_type_declared_anywhere() {
+    assert_eq!(
+        run(
+            "extension Point {\n  func sum() -> Int {\n    return x + y\n  }\n  mutating func shift(by n: Int) {\n    x += n\n  }\n  init(both n: Int) {\n    self.x = n\n    self.y = n\n  }\n}\nextension Counter {\n  func bump() -> Int {\n    n += 1\n    return n\n  }\n}\nextension Color {\n  func code() -> Int {\n    switch self {\n    case .red: return 1\n    case .green: return 2\n    }\n  }\n}\nstruct Point {\n  var x: Int\n  var y: Int\n}\nclass Counter {\n  var n: Int\n}\nenum Color {\n  case red\n  case green\n}\nvar p = Point(both: 3)\np.shift(by: 4)\nprint(p.sum())\nlet c = Counter(n: 0)\nprint(c.bump() + c.bump())\nprint(Color.green.code())"
+        ),
+        "10\n3\n2\n"
+    );
+}
+
+#[test]
+fn an_extension_declares_a_conformance_and_binds_an_associated_type() {
+    assert_eq!(
+        run(
+            "protocol Source {\n  associatedtype Item\n  func first() -> Item\n}\nprotocol Named {\n  func name() -> String\n}\nstruct S {\n  var v: Int\n}\nextension S: Named {\n  func name() -> String {\n    return \"s\" + String(v)\n  }\n}\nextension S: Source {\n  typealias Item = Int\n  func first() -> Int {\n    return v\n  }\n}\nfunc show<T: Named>(_ t: T) -> String {\n  return t.name()\n}\nfunc item<T: Source>(_ t: T) -> T.Item {\n  return t.first()\n}\nlet boxed: Named = S(v: 2)\nprint(show(S(v: 1)) + boxed.name())\nprint(item(S(v: 8)))"
+        ),
+        "s1s2\n8\n"
+    );
+}
+
+#[test]
+fn an_extension_may_add_methods_and_conformances_to_the_basic_types() {
+    assert_eq!(
+        run(
+            "protocol Describable {\n  func describe() -> String\n}\nextension Int: Describable {\n  func describe() -> String {\n    return \"int \" + String(self)\n  }\n  func doubled() -> Int {\n    return self * 2\n  }\n}\nextension String: Describable {\n  func describe() -> String {\n    return \"string \" + self\n  }\n}\nextension Bool {\n  func flipped() -> Bool {\n    return !self\n  }\n}\nfunc show<T: Describable>(_ t: T) -> String {\n  return t.describe()\n}\nprint(5.describe())\nprint(show(7))\nprint(show(\"x\"))\nprint(21.doubled())\nprint(true.flipped())\nlet n = 4\nprint(n.doubled().describe())"
+        ),
+        "int 5\nint 7\nstring x\n42\nfalse\nint 8\n"
+    );
+}
+
+#[test]
+fn an_extension_of_a_generic_type_sees_its_type_parameters() {
+    assert_eq!(
+        run(
+            "extension Box {\n  func twice() -> [T] {\n    return [value, value]\n  }\n  func map<U>(_ f: (T) -> U) -> Box<U> {\n    return Box<U>(value: f(value))\n  }\n}\nstruct Box<T> {\n  var value: T\n}\nprint(Box(value: 3).twice().count)\nprint(Box(value: 4).map { $0 + 1 }.value)\nprint(Box(value: \"s\").twice()[1])"
+        ),
+        "2\n5\ns\n"
+    );
+}
+
+#[test]
+fn extensions_are_checked() {
+    for (source, message) in [
+        (
+            "extension Missing {\n  func f() { }\n}\nfunc main() {\n}",
+            "unknown type 'Missing'",
+        ),
+        (
+            "protocol P {\n}\nextension P {\n  func f() { }\n}\nfunc main() {\n}",
+            "extension of a protocol",
+        ),
+        (
+            "struct S {\n}\nextension S where S: Equatable {\n}\nfunc main() {\n}",
+            "where",
+        ),
+        (
+            "struct S {\n  func f() { }\n}\nextension S {\n  func f() { }\n}\nfunc main() {\n}",
+            "f",
+        ),
+        (
+            "struct S {\n}\nextension S {\n  var x: Int\n}\nfunc main() {\n}",
+            "stored propert",
+        ),
+        (
+            "extension Int {\n  mutating func up() { }\n}\nfunc main() {\n}",
+            "mutating",
+        ),
+        (
+            "extension Array {\n  func f() { }\n}\nfunc main() {\n}",
+            "cannot be extended",
+        ),
+        (
+            "protocol P {\n  func f()\n}\nextension Int: P {\n}\nfunc main() {\n}",
+            "'f'",
+        ),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}
