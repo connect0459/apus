@@ -40,7 +40,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`memo`** stores, next to the cache, which function keys each item hash produced in the last successful build (its own entry and the generic instances it needs) and the signature digest it was built under. The driver trusts it only while the compiler stamp and the digest match, and then skips parsing and checking of functions it still knows.
 
-**`link`** runs the system linker on the object file: `ld` called directly with the SDK location cached, falling back to `cc`.
+**`link`** runs the system linker on the object file: `ld` called directly against a generated stub of `libSystem` that lists only the libc functions the object imports, then against the real `libSystem` with the SDK location cached, then `cc`.
 
 **`driver`** wires the stages together and reports errors with their line. `src/main.rs` is the command line on top of it.
 
@@ -72,4 +72,4 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **Errors.** Every stage returns a `Result` whose error carries the line of the offending token or node.
 
-**Performance.** The reference point is `swiftc -Onone`. On the generated 1000-function program in `bench/`, apus builds in about 115 ms against 2.3 s. Of that, about 6 ms is parsing, 2 ms is checking, 47 ms is Cranelift code generation and 56 ms is linking through `cc`. Each stage must justify its cost against these numbers.
+**Performance.** The reference point is `swiftc -Onone`. On the generated 1000-function program in `bench/`, apus builds in about 85 ms against 2.4 s. Of that, about 8 ms is parsing, 9 ms is checking, 12 ms is Cranelift code generation (in parallel) and 30 to 45 ms is linking through `ld`. Rebuilding after one edited function takes about 75 ms, of which the link is the largest part (see the decision on rebuild cost in `todo.md`). Each stage must justify its cost against these numbers.
