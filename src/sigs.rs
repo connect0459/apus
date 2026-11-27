@@ -255,6 +255,7 @@ fn operator_requirement(name: &str) -> Requirement {
         label: None,
         ty: Ty::Param(0),
         inout: false,
+        default: None,
     };
     Requirement {
         name: name.to_string(),
@@ -319,6 +320,7 @@ pub struct ParamSig {
     label: Option<String>,
     ty: Ty,
     inout: bool,
+    default: Option<Expr>,
 }
 
 impl ParamSig {
@@ -327,7 +329,12 @@ impl ParamSig {
             label,
             ty,
             inout: false,
+            default: None,
         }
+    }
+
+    pub fn default(&self) -> Option<&Expr> {
+        self.default.as_ref()
     }
 
     pub fn is_inout(&self) -> bool {
@@ -911,6 +918,12 @@ impl Signatures {
             }
             let mut params = Vec::new();
             for param in requirement.params() {
+                if param.default().is_some() {
+                    return Err(CheckError::at(
+                        requirement.line(),
+                        "a protocol requirement cannot have a default value for a parameter",
+                    ));
+                }
                 if param.is_inout() {
                     return Err(CheckError::at(
                         requirement.line(),
@@ -921,6 +934,7 @@ impl Signatures {
                     label: param.label().map(str::to_string),
                     ty: self.resolve_type(param.ty(), &scope, requirement.line())?,
                     inout: false,
+                    default: None,
                 });
             }
             let ret = self.resolve_result(requirement.ret(), &scope, requirement.line())?;
@@ -1624,10 +1638,17 @@ impl Signatures {
             .into_iter()
             .collect();
         for p in func.params() {
+            if func.is_init() && p.default().is_some() {
+                return Err(CheckError::at(
+                    func.line(),
+                    "a default value for an initializer parameter is not supported yet",
+                ));
+            }
             params.push(ParamSig {
                 label: p.label().map(str::to_string),
                 ty: self.resolve_type(p.ty(), &scope, func.line())?,
                 inout: p.is_inout(),
+                default: p.default().cloned(),
             });
         }
         let ret = match (func.ret(), owner_ty) {

@@ -716,7 +716,10 @@ impl Parser<'_> {
             self.pos += 1;
         }
         let ty = self.type_ref()?;
-        let param = Param::new(label, name, ty);
+        let mut param = Param::new(label, name, ty);
+        if self.eat_punct("=") {
+            param = param.with_default(self.expr()?);
+        }
         Ok(if inout { param.as_inout() } else { param })
     }
 

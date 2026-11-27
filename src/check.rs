@@ -177,6 +177,42 @@ impl CellSelf {
     }
 }
 
+fn argument_count_error(line: u32, callee: &str, wanted: usize, args: &[Arg]) -> CheckError {
+    if args.len() > wanted && args[wanted..].iter().any(|a| a.label().is_some()) {
+        return CheckError::at(
+            line,
+            format!("'{callee}' needs its labeled arguments in the order of its parameters"),
+        );
+    }
+    CheckError::at(
+        line,
+        format!(
+            "'{callee}' takes {wanted} argument(s), but {} were given",
+            args.len()
+        ),
+    )
+}
+
+fn complete_arguments<'a>(params: &[ParamSig], args: &'a [Arg]) -> std::borrow::Cow<'a, [Arg]> {
+    if params.iter().all(|p| p.default().is_none()) {
+        return std::borrow::Cow::Borrowed(args);
+    }
+    let mut complete = Vec::with_capacity(params.len());
+    let mut given = args.iter().peekable();
+    for param in params {
+        let matches = given.peek().is_some_and(|a| a.label() == param.label());
+        match (matches, param.default()) {
+            (true, _) => complete.extend(given.next().cloned()),
+            (false, Some(default)) => {
+                complete.push(Arg::new(param.label().map(str::to_string), default.clone()));
+            }
+            (false, None) => complete.extend(given.next().cloned()),
+        }
+    }
+    complete.extend(given.cloned());
+    std::borrow::Cow::Owned(complete)
+}
+
 fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty, body: &[Stmt]) -> CResult<Vec<TStmt>> {
     let methods = cx.sigs.method_names(ty);
     let methods: Vec<&str> = methods.iter().map(String::as_str).collect();
@@ -9795,15 +9831,9 @@ impl<'a> FnCx<'a> {
             None => receiver,
         };
         let params = &sig.params()[1..];
+        let args = &complete_arguments(params, args)[..];
         if args.len() != params.len() {
-            return Err(CheckError::at(
-                line,
-                format!(
-                    "'{qualified}' takes {} argument(s), but {} were given",
-                    params.len(),
-                    args.len()
-                ),
-            ));
+            return Err(argument_count_error(line, &qualified, params.len(), args));
         }
         let checked = self.check_values(line, sig, params, args, vec![receiver])?;
         let explicit = match explicit {
@@ -10832,15 +10862,9 @@ impl<'a> FnCx<'a> {
         sig: &FuncSig,
         args: &[Arg],
     ) -> CResult<Vec<TExpr>> {
+        let args = &complete_arguments(sig.params(), args)[..];
         if args.len() != sig.params().len() {
-            return Err(CheckError::at(
-                line,
-                format!(
-                    "'{callee}' takes {} argument(s), but {} were given",
-                    sig.params().len(),
-                    args.len()
-                ),
-            ));
+            return Err(argument_count_error(line, callee, sig.params().len(), args));
         }
         self.check_values(line, sig, sig.params(), args, Vec::new())
     }

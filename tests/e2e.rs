@@ -7927,3 +7927,41 @@ fn any_before_a_protocol_name_writes_the_protocol_type() {
         "19\n10\n"
     );
 }
+
+#[test]
+fn a_parameter_may_have_a_default_value_that_a_call_can_leave_out() {
+    assert_eq!(
+        run(
+            "func greet(_ name: String, punctuation: String = \"!\", times: Int = 1) -> String {\n  var out = \"\"\n  var i = 0\n  while i < times {\n    out += name + punctuation\n    i += 1\n  }\n  return out\n}\nfunc area(width: Int = 2, height: Int = 3) -> Int {\n  return width * height\n}\nfunc mid(_ a: Int, b: Int = 5, _ c: Int) -> Int {\n  return a + b + c\n}\nfunc generic<T>(_ x: T, flag: Bool = true) -> Bool {\n  return flag\n}\nstruct S {\n  var base: Int\n  func plus(_ n: Int = 10) -> Int {\n    return base + n\n  }\n}\nprint(greet(\"a\"))\nprint(greet(\"b\", times: 2))\nprint(greet(\"c\", punctuation: \"?\", times: 2))\nprint(area())\nprint(area(height: 10))\nprint(area(width: 1, height: 1))\nprint(mid(1, 3))\nprint(mid(1, b: 1, 3))\nprint(generic(1))\nprint(S(base: 1).plus() + S(base: 1).plus(2))"
+        ),
+        "a!\nb!b!\nc?c?\n6\n20\n1\n9\n5\ntrue\n14\n"
+    );
+}
+
+#[test]
+fn default_values_are_checked_where_they_are_used() {
+    for (source, message) in [
+        (
+            "func f(_ a: Int = 1, _ b: Int) {\n}\nfunc main() {\n  f()\n}",
+            "takes",
+        ),
+        (
+            "func f(_ a: Int = \"x\") {\n}\nfunc main() {\n  f()\n}",
+            "expected Int",
+        ),
+        (
+            "func f(a: Int = 1, b: Int = 2) {\n}\nfunc main() {\n  f(b: 1, a: 2)\n}",
+            "label",
+        ),
+        (
+            "protocol P {\n  func f(_ a: Int = 1)\n}\nfunc main() {\n}",
+            "default",
+        ),
+        (
+            "func f(_ a: Int = 1) {\n}\nfunc main() {\n  f(1, 2)\n}",
+            "takes",
+        ),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}

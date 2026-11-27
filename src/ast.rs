@@ -271,6 +271,7 @@ pub struct Param {
     name: String,
     ty: TypeName,
     inout: bool,
+    default: Option<Expr>,
 }
 
 impl Param {
@@ -280,7 +281,17 @@ impl Param {
             name,
             ty: ty.into(),
             inout: false,
+            default: None,
         }
+    }
+
+    pub fn with_default(mut self, default: Expr) -> Self {
+        self.default = Some(default);
+        self
+    }
+
+    pub fn default(&self) -> Option<&Expr> {
+        self.default.as_ref()
     }
 
     pub fn as_inout(mut self) -> Self {
