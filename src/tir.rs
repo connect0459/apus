@@ -396,6 +396,10 @@ pub enum TStmt {
     Clear(LocalId),
     Free(TExpr),
     ReleaseUnowned(TExpr),
+    SetGlobal {
+        name: String,
+        value: TExpr,
+    },
     DropArray {
         array: TExpr,
         elem: Ty,
@@ -515,6 +519,10 @@ pub enum TExpr {
         params: Vec<Ty>,
         ret: Ty,
     },
+    GlobalCell {
+        name: String,
+        ty: Ty,
+    },
     EnvCell {
         env: Box<TExpr>,
         index: usize,
@@ -579,6 +587,7 @@ impl TExpr {
             TExpr::HashMix { .. } | TExpr::EnvCount(_) => Ty::Int,
             TExpr::Closure { ty, .. }
             | TExpr::EnvCell { ty, .. }
+            | TExpr::GlobalCell { ty, .. }
             | TExpr::Capture(_, ty)
             | TExpr::Retag(_, ty) => *ty,
             TExpr::CallValue { ret, .. } => *ret,
@@ -754,6 +763,10 @@ impl<E> Rewriter<'_, E> {
             TStmt::Clear(local) => TStmt::Clear(*local),
             TStmt::Free(expr) => TStmt::Free(self.expr(expr)?),
             TStmt::ReleaseUnowned(expr) => TStmt::ReleaseUnowned(self.expr(expr)?),
+            TStmt::SetGlobal { name, value } => TStmt::SetGlobal {
+                name: name.clone(),
+                value: self.expr(value)?,
+            },
             TStmt::DropArray { array, elem } => TStmt::DropArray {
                 array: self.expr(array)?,
                 elem: (self.ty)(*elem)?,
@@ -1038,6 +1051,10 @@ impl<E> Rewriter<'_, E> {
             TExpr::EnvCell { env, index, ty } => TExpr::EnvCell {
                 env: Box::new(self.expr(env)?),
                 index: *index,
+                ty: (self.ty)(*ty)?,
+            },
+            TExpr::GlobalCell { name, ty } => TExpr::GlobalCell {
+                name: name.clone(),
                 ty: (self.ty)(*ty)?,
             },
             TExpr::Capture(local, ty) => TExpr::Capture(*local, (self.ty)(*ty)?),

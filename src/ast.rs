@@ -92,6 +92,7 @@ pub struct FuncDecl {
     overriding: bool,
     init: bool,
     deinit: bool,
+    top_level: bool,
 }
 
 impl FuncDecl {
@@ -115,6 +116,7 @@ impl FuncDecl {
             overriding: false,
             init: false,
             deinit: false,
+            top_level: false,
         }
     }
 
@@ -150,6 +152,15 @@ impl FuncDecl {
     pub fn as_init(mut self) -> Self {
         self.init = true;
         self
+    }
+
+    pub fn as_top_level(mut self) -> Self {
+        self.top_level = true;
+        self
+    }
+
+    pub fn is_top_level(&self) -> bool {
+        self.top_level
     }
 
     pub fn with_owner(mut self, owner: &str) -> Self {

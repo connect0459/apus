@@ -55,6 +55,12 @@ const INT_BUFFER: i64 = 32;
 const SNPRINTF_PADDING: usize = 5;
 const RUNTIME_TRUE: &str = "apus_true";
 const RUNTIME_FALSE: &str = "apus_false";
+const GLOBAL_PREFIX: &str = "apus_global_";
+
+fn global_symbol(name: &str) -> String {
+    format!("{GLOBAL_PREFIX}{name}")
+}
+
 const RUNTIME_DATA: [(&str, &[u8]); 4] = [
     (RUNTIME_FORMAT_INT, b"%ld\n\0"),
     (RUNTIME_FORMAT_PLAIN, b"%ld\0"),
@@ -210,6 +216,21 @@ impl Backend {
         for entry in entries {
             let id = module.declare_function(entry.symbol(), Linkage::Export, &placeholder)?;
             funcs.insert(entry.symbol().to_string(), id);
+        }
+        for entry in entries {
+            for reloc in entry.relocs() {
+                if let SymbolRef::Data(name) = reloc.target()
+                    && name.starts_with(GLOBAL_PREFIX)
+                    && !data.contains_key(name)
+                {
+                    let id = module.declare_data(name, Linkage::Local, true, false)?;
+                    let mut slot = DataDescription::new();
+                    slot.define_zeroinit(8);
+                    slot.set_align(8);
+                    module.define_data(id, &slot)?;
+                    data.insert(name.clone(), id);
+                }
+            }
         }
         let mut pending: Vec<(DataId, &Literal)> = Vec::new();
         for entry in entries {
@@ -734,6 +755,14 @@ impl Emitter<'_, '_> {
             TStmt::ReleaseUnowned(expr) => {
                 let value = self.value(expr)?;
                 self.release_unowned(value)?;
+                Ok(false)
+            }
+            TStmt::SetGlobal { name, value } => {
+                let value = self.value(value)?;
+                let address = self.data_address(&global_symbol(name));
+                self.builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), value, address, 0);
                 Ok(false)
             }
         }
@@ -2713,6 +2742,12 @@ impl Emitter<'_, '_> {
                 let signature = self.builder.import_signature(sig);
                 let call = self.builder.ins().call_indirect(signature, code, &values);
                 return Ok(result_slot.or_else(|| self.builder.inst_results(call).first().copied()));
+            }
+            TExpr::GlobalCell { name, .. } => {
+                let address = self.data_address(&global_symbol(name));
+                self.builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), address, 0)
             }
             TExpr::EnvCell { env, index, .. } => {
                 let env = self.value(env)?;

@@ -51,8 +51,10 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         labels: HashMap::new(),
         hoisted: Vec::new(),
         templates: Vec::new(),
+        globals: Vec::new(),
     };
     let receiver = sig.has_receiver();
+    cx.scopes.push(HashMap::new());
     let mut cell_enum = None;
     if let Some(self_sig) = sig.params().first().filter(|_| receiver) {
         match cx.sigs.cell_enum(self_sig.ty()) {
@@ -71,6 +73,21 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         .zip(sig.params().iter().skip(usize::from(receiver)))
     {
         cx.declare(func.line(), param.name(), param_sig.ty(), false)?;
+    }
+    if !func.is_top_level() {
+        let self_ty = sig.params().first().filter(|_| receiver).map(ParamSig::ty);
+        for name in crate::free::names_in(func.body()) {
+            let Some((ty, mutable)) = sigs.global(&name) else {
+                continue;
+            };
+            let member = self_ty.is_some_and(|owner| {
+                cx.member_of(func.line(), owner, &name).is_ok()
+                    || sigs.resolve_method(owner, &name).is_some()
+            });
+            if !member && !cx.scopes[0].contains_key(name.as_str()) {
+                cx.declare_global(&name, ty, mutable)?;
+            }
+        }
     }
     let prelude = if func.is_init() {
         init_prelude(&mut cx, func, sig.ret())?
@@ -92,7 +109,22 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     } else {
         Vec::new()
     };
-    let mut body = cx.block(func.body())?;
+    let mut body = if func.is_top_level() {
+        cx.top_level_block(func.body())?
+    } else {
+        cx.block(func.body())?
+    };
+    if func.is_top_level() {
+        let mut allocation = Vec::new();
+        for (local, name) in &cx.globals {
+            let ty = cx.locals[local.index()];
+            allocation.push(TStmt::SetGlobal {
+                name: name.clone(),
+                value: sigs.construct(sigs.cell_of(ty), vec![TExpr::Zero(ty)]),
+            });
+        }
+        body.splice(0..0, allocation);
+    }
     if let Some(cell_self) = cx.cell_self {
         body.splice(0..0, prelude);
         body.push(cell_self.write_back());
@@ -116,7 +148,13 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         cx.locals,
         body,
     );
-    Ok(crate::capture::lower(&typed, &cx.captured, &[], sigs))
+    Ok(crate::capture::lower(
+        &typed,
+        &cx.captured,
+        &[],
+        &cx.globals,
+        sigs,
+    ))
 }
 
 impl CellSelf {
@@ -316,6 +354,7 @@ fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
         labels: HashMap::new(),
         hoisted: Vec::new(),
         templates: Vec::new(),
+        globals: Vec::new(),
     }
 }
 
@@ -2546,6 +2585,7 @@ struct FnCx<'a> {
     labels: HashMap<LocalId, Vec<Option<String>>>,
     hoisted: Vec<LocalId>,
     templates: Vec<(String, Rc<FuncDecl>)>,
+    globals: Vec<(LocalId, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -3071,6 +3111,74 @@ impl<'a> FnCx<'a> {
             .rev()
             .find_map(|scope| scope.get(name).copied())
             .ok_or_else(|| CheckError::at(line, format!("cannot find '{name}' in scope")))
+    }
+
+    fn declare_global(&mut self, name: &str, ty: Ty, mutable: bool) -> CResult<LocalId> {
+        let local = LocalId::new(self.locals.len());
+        self.locals.push(ty);
+        self.scopes[0].insert(name.to_string(), Binding { local, ty, mutable });
+        self.globals.push((local, name.to_string()));
+        Ok(local)
+    }
+
+    fn top_level_block(&mut self, stmts: &[Stmt]) -> CResult<Vec<TStmt>> {
+        self.scopes.push(HashMap::new());
+        let mut checked = Vec::with_capacity(stmts.len());
+        let mut result = Ok(());
+        for stmt in stmts {
+            result = match stmt.kind() {
+                StmtKind::Let { .. } => self.global_declaration(stmt, &mut checked),
+                _ => self.lower_stmt(stmt, &mut checked),
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+        self.scopes.pop();
+        result.map(|()| checked)
+    }
+
+    fn global_declaration(&mut self, stmt: &Stmt, out: &mut Vec<TStmt>) -> CResult<()> {
+        let line = stmt.line();
+        let StmtKind::Let { name, mutable, .. } = stmt.kind() else {
+            return Err(CheckError::at(line, "internal error: not a declaration"));
+        };
+        let mut lowered = Vec::new();
+        self.lower_stmt(stmt, &mut lowered)?;
+        let binding = self.lookup(name, line)?;
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.remove(name);
+        }
+        let position = lowered
+            .iter()
+            .rposition(|s| matches!(s, TStmt::Let { local, .. } if *local == binding.local))
+            .ok_or_else(|| CheckError::at(line, "internal error: a declaration has no value"))?;
+        if !self.sigs.register_global(name, binding.ty, *mutable) {
+            return Err(CheckError::at(
+                line,
+                format!("'{name}' is already declared in this scope"),
+            ));
+        }
+        let cell = self.sigs.cell_of(binding.ty);
+        self.declare_global(name, binding.ty, *mutable)?;
+        let after = lowered.split_off(position + 1);
+        let Some(TStmt::Let { init, .. }) = lowered.pop() else {
+            return Err(CheckError::at(
+                line,
+                "internal error: a declaration has no value",
+            ));
+        };
+        out.extend(lowered);
+        out.push(TStmt::AssignPath {
+            base: TExpr::GlobalCell {
+                name: name.clone(),
+                ty: cell,
+            },
+            index: crate::tir::HEADER_SLOTS,
+            value: init,
+        });
+        out.extend(after);
+        Ok(())
     }
 
     fn block(&mut self, stmts: &[Stmt]) -> CResult<Vec<TStmt>> {
@@ -6364,7 +6472,7 @@ impl<'a> FnCx<'a> {
             expected: None,
             ret,
             locals: Vec::new(),
-            scopes: vec![HashMap::new()],
+            scopes: vec![HashMap::new(), HashMap::new()],
             init_self: None,
             cell_self: None,
             cell_call: CellCall::default(),
@@ -6381,6 +6489,7 @@ impl<'a> FnCx<'a> {
             labels: HashMap::new(),
             hoisted: Vec::new(),
             templates: self.templates.clone(),
+            globals: Vec::new(),
         }
     }
 
@@ -6492,6 +6601,12 @@ impl<'a> FnCx<'a> {
             let Ok(outer) = self.lookup(candidate, line) else {
                 continue;
             };
+            if self.globals.iter().any(|(local, _)| *local == outer.local) {
+                if !cx.scopes[0].contains_key(candidate.as_str()) {
+                    cx.declare_global(candidate, outer.ty, outer.mutable)?;
+                }
+                continue;
+            }
             let inherited = self
                 .environment
                 .iter()
@@ -6524,7 +6639,8 @@ impl<'a> FnCx<'a> {
             cx.locals.clone(),
             statements,
         );
-        let lowered = crate::capture::lower(&typed, &cx.captured, &cx.environment, sigs);
+        let lowered =
+            crate::capture::lower(&typed, &cx.captured, &cx.environment, &cx.globals, sigs);
         sigs.register_closure(name.clone(), Rc::new(lowered));
         let ty = sigs.func_ty(param_types.clone(), cx.ret);
         Ok(TExpr::Closure {
@@ -6723,7 +6839,7 @@ impl<'a> FnCx<'a> {
             move |cx| {
                 let copy = LocalId::new(cx.locals.len());
                 cx.locals.push(accumulator);
-                if let Some(scope) = cx.scopes.first_mut() {
+                if let Some(scope) = cx.scopes.last_mut() {
                     scope.insert(
                         first.clone(),
                         Binding {

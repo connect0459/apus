@@ -21,6 +21,7 @@ struct Environment {
     index: usize,
     value: Ty,
     cell: Ty,
+    global: Option<String>,
 }
 
 struct Lowering<'a> {
@@ -36,6 +37,15 @@ impl Lowering<'_> {
             return Some((TExpr::Local(cell.holder, cell.cell), cell.value));
         }
         let env = self.environment.get(&local)?;
+        if let Some(name) = &env.global {
+            return Some((
+                TExpr::GlobalCell {
+                    name: name.clone(),
+                    ty: env.cell,
+                },
+                env.value,
+            ));
+        }
         Some((
             TExpr::EnvCell {
                 env: Box::new(TExpr::Local(LocalId::new(0), Ty::Int)),
@@ -141,9 +151,10 @@ pub fn lower(
     func: &TFunc,
     celled: &[LocalId],
     environment: &[(LocalId, usize, EnvKind)],
+    globals: &[(LocalId, String)],
     sigs: &Signatures,
 ) -> TFunc {
-    if celled.is_empty() && environment.is_empty() {
+    if celled.is_empty() && environment.is_empty() && globals.is_empty() {
         return func.clone();
     }
     let mut locals = func.locals().to_vec();
@@ -193,6 +204,19 @@ pub fn lower(
                 index: *index,
                 value,
                 cell,
+                global: None,
+            },
+        );
+    }
+    for (local, name) in globals {
+        let value = locals[local.index()];
+        captured.insert(
+            *local,
+            Environment {
+                index: 0,
+                value,
+                cell: sigs.cell_of(value),
+                global: Some(name.clone()),
             },
         );
     }

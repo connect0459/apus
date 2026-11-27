@@ -123,6 +123,10 @@ class FirstErrorTests(unittest.TestCase):
         stderr = "a.swift:3: error: 'f' takes 2 argument(s), but 3 were given\n"
         self.assertEqual(st.error_category(stderr), "'_' takes N argument(s), but N were given")
 
+    def test_a_syntax_error_keeps_the_token_that_it_expected(self):
+        stderr = "a.swift:3: error: expected ')' after the arguments\n"
+        self.assertEqual(st.error_category(stderr), "expected ')' after the arguments")
+
     def test_no_error_line_gives_a_placeholder(self):
         self.assertEqual(st.error_category("boom"), "(no error message)")
 

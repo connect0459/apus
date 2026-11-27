@@ -655,3 +655,15 @@ fn the_minimal_system_library_stub_links_a_working_program() {
     assert_eq!(project.run(), "21\n");
     assert!(project.cache_dir().join("libSystem.tbd").exists());
 }
+
+#[test]
+fn editing_a_function_of_a_program_with_top_level_statements_rebuilds_it() {
+    let project = Project::new();
+    let source = |value: i64| {
+        format!("var total = 1\nfunc add() {{\n  total += {value}\n}}\nadd()\nprint(total)\n")
+    };
+    project.build(&source(2));
+    assert_eq!(project.run(), "3\n");
+    project.build(&source(5));
+    assert_eq!(project.run(), "6\n");
+}

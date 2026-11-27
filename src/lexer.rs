@@ -20,6 +20,10 @@ pub struct Spanned {
 }
 
 impl Spanned {
+    pub fn new(token: Token, line: u32) -> Self {
+        Self { token, line }
+    }
+
     pub fn token(&self) -> &Token {
         &self.token
     }

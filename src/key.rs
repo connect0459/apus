@@ -196,6 +196,11 @@ impl Encoder<'_> {
                 self.tag(22);
                 self.expr(expr);
             }
+            TStmt::SetGlobal { name, value } => {
+                self.tag(28);
+                self.str(name);
+                self.expr(value);
+            }
             TStmt::DropTable { table, key, value } => {
                 self.tag(24);
                 self.expr(table);
@@ -351,6 +356,11 @@ impl Encoder<'_> {
                     self.ty(*param);
                 }
                 self.ty(*ret);
+            }
+            TExpr::GlobalCell { name, ty } => {
+                self.tag(70);
+                self.str(name);
+                self.ty(*ty);
             }
             TExpr::EnvCell { env, index, ty } => {
                 self.tag(66);

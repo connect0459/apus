@@ -198,7 +198,9 @@ def error_category(stderr):
     m = re.search(r"^[^\n]*?:(?:\d+:)?\s*error:\s*(.*)$", stderr, re.M)
     if not m:
         return "(no error message)"
-    text = re.sub(r"'[^']*'", "'_'", m.group(1))
+    text = m.group(1)
+    if not text.startswith("expected"):
+        text = re.sub(r"'[^']*'", "'_'", text)
     return re.sub(r"\d+", "N", text).strip()
 
 
@@ -284,10 +286,12 @@ def main():
     seconds = round(time.time() - started, 1)
     counts = {}
     categories = {}
-    for _, kind, detail in results:
+    examples = {}
+    for path, kind, detail in sorted(results):
         counts[kind] = counts.get(kind, 0) + 1
         if kind in ("build-error", "crash"):
             categories[(kind, detail)] = categories.get((kind, detail), 0) + 1
+            examples.setdefault((kind, detail), os.path.basename(path))
     total = len(results)
     passed = counts.get("pass", 0)
     summary = {
@@ -334,7 +338,7 @@ def main():
     if categories:
         print(f"first errors (top {a.top}):")
         for (kind, text), n in sorted(categories.items(), key=lambda kv: -kv[1])[: a.top]:
-            print(f"  {n:4}  {kind}: {text}")
+            print(f"  {n:4}  {kind}: {text}   (e.g. {examples[(kind, text)]})")
     sys.exit(status)
 
 

@@ -391,6 +391,14 @@ impl Pass<'_> {
                 out.push(TStmt::ReleaseUnowned(expr));
                 out.extend(self.release_temps(&temps));
             }
+            TStmt::SetGlobal { name, value } => {
+                let (value, temps) = self.scoped(|p| p.expr(value));
+                out.push(TStmt::SetGlobal {
+                    name: name.clone(),
+                    value,
+                });
+                out.extend(self.release_temps(&temps));
+            }
             TStmt::Clear(local) => out.push(TStmt::Clear(*local)),
             TStmt::DropTable { table, key, value } => {
                 let (table, temps) = self.scoped(|p| p.expr(table));
@@ -719,6 +727,10 @@ impl Pass<'_> {
                 ty: *ty,
             },
             TExpr::Capture(local, ty) => TExpr::Capture(*local, *ty),
+            TExpr::GlobalCell { name, ty } => TExpr::GlobalCell {
+                name: name.clone(),
+                ty: *ty,
+            },
             TExpr::HashMix { acc, value } => TExpr::HashMix {
                 acc: Box::new(self.borrowed(acc)),
                 value: Box::new(self.borrowed(value)),

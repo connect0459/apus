@@ -521,6 +521,7 @@ struct Instances {
     labels: Vec<String>,
     label_index: HashMap<String, usize>,
     closures: HashMap<String, Rc<TFunc>>,
+    globals: Vec<(String, Ty, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2621,6 +2622,24 @@ impl Signatures {
             .instantiate_struct(CELL_DEF, vec![ty], &[], 0)
             .unwrap_or(StructId::new(0));
         self.struct_ty(CELL_DEF, id)
+    }
+
+    pub fn register_global(&self, name: &str, ty: Ty, mutable: bool) -> bool {
+        let mut instances = self.instances.borrow_mut();
+        if instances.globals.iter().any(|(n, _, _)| n == name) {
+            return false;
+        }
+        instances.globals.push((name.to_string(), ty, mutable));
+        true
+    }
+
+    pub fn global(&self, name: &str) -> Option<(Ty, bool)> {
+        self.instances
+            .borrow()
+            .globals
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, ty, mutable)| (*ty, *mutable))
     }
 
     pub fn register_closure(&self, name: String, body: Rc<TFunc>) {

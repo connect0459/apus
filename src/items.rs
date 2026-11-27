@@ -19,9 +19,14 @@ pub struct Item {
     signature_hash: u64,
     generic: bool,
     owner: Option<String>,
+    top_level: bool,
 }
 
 impl Item {
+    pub fn is_top_level(&self) -> bool {
+        self.top_level
+    }
+
     pub fn owner(&self) -> Option<&str> {
         self.owner.as_deref()
     }
@@ -77,6 +82,7 @@ impl SplitError {
 
 pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
     let mut items = Vec::new();
+    let mut top_level: Vec<Spanned> = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let kind = match tokens[i].token() {
@@ -85,12 +91,8 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             Token::Ident(k) if k == "enum" => ItemKind::Enum,
             Token::Ident(k) if k == "protocol" => ItemKind::Protocol,
             _ => {
-                return Err(SplitError {
-                    line: tokens[i].line(),
-                    message:
-                        "expected 'func', 'struct', 'class', 'enum' or 'protocol' at top level"
-                            .to_string(),
-                });
+                i = take_statements(tokens, i, &mut top_level)?;
+                continue;
             }
         };
         let start = i;
@@ -168,13 +170,101 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
             signature_hash,
             generic,
             owner: None,
+            top_level: false,
         });
         for member in members {
             items.push(member_item(&name, member, owner_generic)?);
         }
         i = end;
     }
+    if !top_level.is_empty() {
+        if let Some(main) = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Func && i.name == "main")
+        {
+            return Err(SplitError {
+                line: main.tokens.first().map_or(1, Spanned::line),
+                message: "a program with top-level statements cannot define 'func main()'"
+                    .to_string(),
+            });
+        }
+        items.push(top_level_item(top_level));
+    }
     Ok(items)
+}
+
+fn is_declaration_start(token: &Token) -> bool {
+    matches!(token, Token::Ident(k) if matches!(k.as_str(), "func" | "struct" | "class" | "enum" | "protocol"))
+}
+
+fn take_statements(
+    tokens: &[Spanned],
+    start: usize,
+    out: &mut Vec<Spanned>,
+) -> Result<usize, SplitError> {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        let first_on_line = i == 0 || tokens[i - 1].line() != token.line();
+        if depth == 0 && i > start && first_on_line && is_declaration_start(token.token()) {
+            break;
+        }
+        if depth == 0
+            && first_on_line
+            && let Token::Ident(word) = token.token()
+            && matches!(word.as_str(), "mutating" | "override" | "init" | "deinit")
+        {
+            return Err(SplitError {
+                line: token.line(),
+                message: format!("'{word}' belongs inside a type, not at the top level"),
+            });
+        }
+        if depth == 0
+            && first_on_line
+            && matches!(token.token(), Token::Ident(k) if k == "import")
+            && matches!(tokens.get(i + 1).map(Spanned::token), Some(Token::Ident(_)))
+        {
+            i += 2;
+            continue;
+        }
+        match token.token() {
+            Token::Punct(p) if p == "{" || p == "(" || p == "[" => depth += 1,
+            Token::Punct(p) if p == "}" || p == ")" || p == "]" => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        out.push(token.clone());
+        i += 1;
+    }
+    Ok(i)
+}
+
+fn top_level_item(statements: Vec<Spanned>) -> Item {
+    let line = statements.first().map_or(1, Spanned::line);
+    let last = statements.last().map_or(line, Spanned::line);
+    let punct = |text: &str, line: u32| Spanned::new(Token::Punct(text.to_string()), line);
+    let mut tokens = vec![
+        Spanned::new(Token::Ident("func".to_string()), line),
+        Spanned::new(Token::Ident("main".to_string()), line),
+        punct("(", line),
+        punct(")", line),
+        punct("{", line),
+    ];
+    tokens.extend(statements);
+    tokens.push(punct("}", last + 1));
+    let hash = hash_tokens(&tokens);
+    Item {
+        kind: ItemKind::Func,
+        name: "main".to_string(),
+        tokens,
+        hash,
+        signature_hash: hash,
+        generic: false,
+        owner: None,
+        top_level: true,
+    }
 }
 
 fn is_member_start(token: &Token) -> bool {
@@ -293,6 +383,7 @@ fn member_item(owner: &str, tokens: Vec<Spanned>, generic: bool) -> Result<Item,
         generic,
         owner: Some(owner.to_string()),
         tokens,
+        top_level: false,
     })
 }
 
@@ -441,9 +532,15 @@ mod tests {
     }
 
     #[test]
-    fn a_stray_top_level_token_is_an_error_with_its_line() {
-        let err = split_items(&lex("func f() { }\n\nx = 1").unwrap()).unwrap_err();
-        assert_eq!(err.line(), 3);
+    fn a_top_level_statement_keeps_the_line_it_was_written_on() {
+        let found = items("func f() { }\n\nx = 1");
+        let main = found.iter().find(|i| i.is_top_level()).unwrap();
+        let x = main
+            .tokens()
+            .iter()
+            .find(|t| matches!(t.token(), Token::Ident(w) if w == "x"))
+            .unwrap();
+        assert_eq!(x.line(), 3);
     }
 
     #[test]
@@ -644,5 +741,74 @@ mod tests {
             digest_of("struct P { var x: Int\n func id<T>(_ v: T) -> T { return v } }"),
             digest_of("struct P { var x: Int\n func id<T>(_ v: T) -> T { let w = v\n return w } }")
         );
+    }
+
+    #[test]
+    fn top_level_statements_become_one_main_item_after_the_declarations() {
+        let found = items("print(1)\nfunc f() { }\nlet a = 2\nstruct P { var x: Int }\nprint(a)");
+        let summary: Vec<(ItemKind, &str, bool)> = found
+            .iter()
+            .map(|i| (i.kind(), i.name(), i.is_top_level()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (ItemKind::Func, "f", false),
+                (ItemKind::Struct, "P", false),
+                (ItemKind::Func, "main", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_statements_keep_their_order_and_blocks_stay_together() {
+        let found = items("let a = 1\nif a > 0 {\n  func inner() { }\n}\nprint(a)");
+        let main = found.iter().find(|i| i.is_top_level()).unwrap();
+        let words: Vec<String> = main
+            .tokens()
+            .iter()
+            .filter_map(|t| match t.token() {
+                Token::Ident(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "func", "main", "let", "a", "if", "a", "func", "inner", "print", "a"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_import_line_is_dropped() {
+        let found = items("import Swift\nprint(1)");
+        let main = found.iter().find(|i| i.is_top_level()).unwrap();
+        assert!(
+            !main
+                .tokens()
+                .iter()
+                .any(|t| matches!(t.token(), Token::Ident(w) if w == "import" || w == "Swift"))
+        );
+    }
+
+    #[test]
+    fn a_program_without_statements_has_no_top_level_item() {
+        assert!(items("func main() { }").iter().all(|i| !i.is_top_level()));
+    }
+
+    #[test]
+    fn top_level_statements_and_a_main_function_cannot_be_mixed() {
+        let tokens = lex("func main() { }\nprint(1)").unwrap();
+        let error = split_items(&tokens).unwrap_err();
+        assert!(error.message().contains("cannot define 'func main()'"));
+    }
+
+    #[test]
+    fn editing_a_top_level_statement_changes_the_main_item_and_the_digest() {
+        let one = items("func f() { }\nprint(1)");
+        let two = items("func f() { }\nprint(2)");
+        assert_ne!(signature_digest(&one), signature_digest(&two));
+        assert_eq!(one[0].hash(), two[0].hash());
     }
 }

@@ -7450,3 +7450,70 @@ fn a_ternary_releases_what_it_creates_and_keeps_what_it_borrows() {
         "10\nfree 100\nfree 102\n203\nkeptxy\nfree 9\nfree 1\ndone\n"
     );
 }
+
+#[test]
+fn top_level_statements_run_as_the_program_without_a_main_function() {
+    assert_eq!(
+        run(
+            "import Swift\nprint(1)\nlet a = 2\nprint(a + 1)\nfunc f() -> Int {\n  return 10\n}\nprint(f())\nstruct P {\n  var x: Int\n}\nprint(P(x: 4).x)"
+        ),
+        "1\n3\n10\n4\n"
+    );
+}
+
+#[test]
+fn a_function_reads_and_writes_a_top_level_variable() {
+    assert_eq!(
+        run(
+            "var counter = 0\nfunc bump() {\n  counter += 1\n}\nbump()\nbump()\nprint(counter)\nlet label = \"n\"\nfunc show() {\n  print(label + String(counter))\n}\nshow()\ncounter = 10\nshow()"
+        ),
+        "2\nn2\nn10\n"
+    );
+}
+
+#[test]
+fn top_level_variables_of_every_kind_can_be_changed_from_a_function() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n}\nclass Box {\n  var n: Int\n}\nvar p = P(x: 1)\nvar xs = [1, 2]\nvar d: [String: Int] = [:]\nvar b = Box(n: 5)\nvar o: Int? = nil\nvar s = \"a\"\nfunc touch() {\n  p.x += 1\n  xs.append(3)\n  xs[0] = 9\n  d[\"k\"] = 7\n  b.n += 1\n  o = 9\n  s += \"b\"\n}\ntouch()\nprint(p.x)\nprint(xs.count + xs[0])\nprint(d[\"k\"] ?? 0)\nprint(b.n)\nprint(o ?? 0)\nprint(s)"
+        ),
+        "2\n12\n7\n6\n9\nab\n"
+    );
+}
+
+#[test]
+fn closures_and_methods_share_top_level_variables() {
+    assert_eq!(
+        run(
+            "var total = 0\nlet add = { (x: Int) -> Void in\n  total += x\n}\nadd(2)\nadd(3)\nprint(total)\nfunc viaFunc() {\n  [1, 2].forEach { total += $0 }\n}\nviaFunc()\nprint(total)\nstruct S {\n  var v: Int\n  func hit() {\n    total += v\n  }\n}\nS(v: 4).hit()\nprint(total)\nlet shadow = 1\nfunc keep(_ shadow: Int) -> Int {\n  return shadow + 100\n}\nprint(keep(5) + shadow)"
+        ),
+        "5\n8\n12\n106\n"
+    );
+}
+
+#[test]
+fn top_level_control_flow_and_objects_are_released() {
+    assert_eq!(
+        run(
+            "class T {\n  var n: Int\n  deinit {\n    print(\"free \\(n)\")\n  }\n}\nvar sum = 0\nfor i in 0..<4 {\n  sum += i\n}\nif sum > 3 {\n  print(\"big\")\n} else {\n  print(\"small\")\n}\nwhile sum < 10 {\n  sum += 1\n}\nprint(sum)\nvar t = T(n: 1)\nt = T(n: 2)\nprint(\"end\")"
+        ),
+        "big\n10\nfree 1\nend\n"
+    );
+}
+
+#[test]
+fn a_program_with_top_level_statements_is_checked_for_main_and_declarations() {
+    for (source, message) in [
+        ("func main() {\n}\nprint(1)", "cannot define 'func main()'"),
+        ("let a = 1\nlet a = 2", "already declared"),
+        ("print(late)\nlet late = 1", "cannot find 'late'"),
+        ("let c = 1\nc = 2", "constant"),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}
+
+#[test]
+fn a_program_without_top_level_statements_still_needs_main() {
+    assert!(build_error("func other() {\n}").contains("main"));
+}

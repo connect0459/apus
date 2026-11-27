@@ -152,12 +152,15 @@ fn build_on_this_thread(
         if !is_function(item) || item.is_generic() {
             continue;
         }
-        let known = memo.as_ref().and_then(|m| {
-            m.function_keys(item.hash())?
-                .iter()
-                .map(|key| Some((*key, cache.get(*key)?.clone())))
-                .collect::<Option<Vec<_>>>()
-        });
+        let known = memo
+            .as_ref()
+            .filter(|_| !item.is_top_level())
+            .and_then(|m| {
+                m.function_keys(item.hash())?
+                    .iter()
+                    .map(|key| Some((*key, cache.get(*key)?.clone())))
+                    .collect::<Option<Vec<_>>>()
+            });
         slots.push(Slot {
             item_index: index,
             item_hash: item.hash(),
@@ -194,10 +197,17 @@ fn build_on_this_thread(
             };
             decls.push(match (parse(item.tokens())?, item.owner()) {
                 (Decl::Func(func), Some(owner)) => Decl::Func(func.with_owner(owner)),
+                (Decl::Func(func), None) if item.is_top_level() => Decl::Func(func.as_top_level()),
                 (decl, _) => decl,
             });
         }
         let sigs = Signatures::collect(&decls)?;
+        let mut top_level: Option<(usize, TFunc)> = None;
+        if let Some(index) = items.iter().position(Item::is_top_level)
+            && let Decl::Func(func) = &decls[index]
+        {
+            top_level = Some((index, check_func(func, &sigs)?));
+        }
         let mut generic_decls: HashMap<&str, &FuncDecl> = HashMap::new();
         for (index, item) in items.iter().enumerate() {
             if let (true, Decl::Func(func)) = (item.is_generic(), &decls[index]) {
@@ -230,7 +240,10 @@ fn build_on_this_thread(
             let Decl::Func(func) = &decls[slots[*slot].item_index] else {
                 continue;
             };
-            let typed = check_func(func, &sigs)?;
+            let typed = match &top_level {
+                Some((index, typed)) if *index == slots[*slot].item_index => typed.clone(),
+                _ => check_func(func, &sigs)?,
+            };
             let (typed, direct) = instantiator.resolve(&typed).map_err(BuildError::new)?;
             let (typed, created) = rc::insert(&typed, &sigs);
             resolved.push((*slot, typed, direct, created));
