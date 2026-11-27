@@ -206,6 +206,7 @@ fn expression(expr: &Expr, found: &mut Vec<String>) {
             expression(default, found);
         }
         ExprKind::Unwrap(inner)
+        | ExprKind::InOut(inner)
         | ExprKind::Unary { expr: inner, .. }
         | ExprKind::Cast { expr: inner, .. }
         | ExprKind::Member { base: inner, .. } => expression(inner, found),

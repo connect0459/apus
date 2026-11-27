@@ -7645,3 +7645,79 @@ fn print_arguments_are_checked() {
         assert!(build_error(&source).contains(message), "{body}");
     }
 }
+
+#[test]
+fn an_inout_parameter_changes_the_variable_that_the_caller_passes() {
+    assert_eq!(
+        run(
+            "func bump(_ x: inout Int) {\n  x += 1\n}\nfunc twice(_ x: inout Int) {\n  bump(&x)\n  bump(&x)\n}\nfunc swapTwo<T>(_ a: inout T, _ b: inout T) {\n  let t = a\n  a = b\n  b = t\n}\nfunc grow(_ xs: inout [Int], by n: Int) -> Int {\n  xs.append(n)\n  return xs.count\n}\nvar n = 1\nbump(&n)\ntwice(&n)\nprint(n)\nvar a = \"left\"\nvar b = \"right\"\nswapTwo(&a, &b)\nprint(a + b)\nvar x = 1\nvar y = 2\nswapTwo(&x, &y)\nprint(x * 10 + y)\nvar xs = [1]\nlet count = grow(&xs, by: 5)\nprint(count + xs[1])"
+        ),
+        "4\nrightleft\n21\n7\n"
+    );
+}
+
+#[test]
+fn an_inout_argument_may_be_a_member_an_element_or_a_global() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x: Int\n  var names: [String]\n}\nclass Box {\n  var n: Int\n}\nvar total = 0\nfunc add(_ x: inout Int, _ by: Int) {\n  x += by\n}\nfunc rename(_ s: inout String) {\n  s += \"!\"\n}\nvar p = P(x: 1, names: [\"a\"])\nvar xs = [10, 20]\nlet b = Box(n: 5)\nadd(&p.x, 2)\nadd(&xs[1], 3)\nadd(&b.n, 4)\nadd(&total, 7)\nrename(&p.names[0])\nprint(p.x)\nprint(xs[1])\nprint(b.n)\nprint(total)\nprint(p.names[0])"
+        ),
+        "3\n23\n9\n7\na!\n"
+    );
+}
+
+#[test]
+fn an_inout_method_parameter_and_a_closure_that_uses_it_work() {
+    assert_eq!(
+        run(
+            "struct Acc {\n  var base: Int\n  func fold(into total: inout Int) {\n    [1, 2, 3].forEach { total += $0 * base }\n  }\n}\nvar t = 100\nAcc(base: 2).fold(into: &t)\nprint(t)"
+        ),
+        "112\n"
+    );
+}
+
+#[test]
+fn an_inout_parameter_releases_and_keeps_objects_correctly() {
+    assert_eq!(
+        run(
+            "class T {\n  var n: Int\n  deinit {\n    print(\"free \\(n)\")\n  }\n}\nfunc replace(_ t: inout T, with n: Int) {\n  t = T(n: n)\n}\nfunc inner() {\n  var t = T(n: 1)\n  replace(&t, with: 2)\n  print(\"after \\(t.n)\")\n  replace(&t, with: 3)\n}\ninner()\nprint(\"end\")"
+        ),
+        "free 1\nafter 2\nfree 2\nfree 3\nend\n"
+    );
+}
+
+#[test]
+fn inout_arguments_and_parameters_are_checked() {
+    for (source, message) in [
+        (
+            "func f(_ x: inout Int) {\n}\nfunc main() {\n  var a = 1\n  f(a)\n}",
+            "needs '&'",
+        ),
+        (
+            "func f(_ x: Int) {\n}\nfunc main() {\n  var a = 1\n  f(&a)\n}",
+            "not an inout parameter",
+        ),
+        (
+            "func f(_ x: inout Int) {\n}\nfunc main() {\n  let a = 1\n  f(&a)\n}",
+            "constant",
+        ),
+        (
+            "func f(_ x: inout Int) {\n}\nfunc main() {\n  f(&1)\n}",
+            "can be changed",
+        ),
+        (
+            "func f(_ x: inout Int) {\n}\nfunc main() {\n  var s = \"a\"\n  f(&s)\n}",
+            "expected Int",
+        ),
+        (
+            "func main() {\n  var a = 1\n  let b = &a\n}",
+            "inout parameter",
+        ),
+        (
+            "func main() {\n  func g(_ x: inout Int) {\n  }\n}",
+            "local function",
+        ),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}

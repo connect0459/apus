@@ -619,8 +619,14 @@ impl Parser<'_> {
             (None, false) => return self.fail("expected a parameter name after '_'"),
         };
         self.expect_punct(":")?;
+        let inout = matches!(self.peek(), Some(Token::Ident(w)) if w == "inout")
+            && !matches!(self.peek_at(1), Some(Token::Punct(p)) if p == "," || p == ")");
+        if inout {
+            self.pos += 1;
+        }
         let ty = self.type_ref()?;
-        Ok(Param::new(label, name, ty))
+        let param = Param::new(label, name, ty);
+        Ok(if inout { param.as_inout() } else { param })
     }
 
     fn struct_decl(&mut self, line: u32, class: bool) -> PResult<StructDecl> {
@@ -1517,6 +1523,13 @@ impl Parser<'_> {
 
     fn unary(&mut self) -> PResult<Expr> {
         let line = self.line();
+        if self.is_punct("&") {
+            self.pos += 1;
+            self.enter()?;
+            let operand = self.unary();
+            self.leave();
+            return Ok(Expr::new(line, ExprKind::InOut(Box::new(operand?))));
+        }
         let alone = matches!(
             self.peek_at(1),
             Some(Token::Punct(next)) if next == ")" || next == ","
@@ -3863,5 +3876,19 @@ mod tests {
         };
         let names: Vec<&str> = decl.fields().iter().map(|f| f.name()).collect();
         assert_eq!(names, ["x", "y", "z"]);
+    }
+
+    #[test]
+    fn an_inout_parameter_and_an_ampersand_argument_are_parsed() {
+        let decl = func("func f(_ a: inout Int, b: Int) { }");
+        let flags: Vec<bool> = decl.params().iter().map(|p| p.is_inout()).collect();
+        assert_eq!(flags, [true, false]);
+        assert_eq!(decl.params()[0].ty().to_string(), "Int");
+        let call = expr("f(&x, y)");
+        let ExprKind::Call { args, .. } = call.kind() else {
+            panic!("expected a call");
+        };
+        assert!(matches!(args[0].value().kind(), ExprKind::InOut(_)));
+        assert!(matches!(args[1].value().kind(), ExprKind::Ident(_)));
     }
 }

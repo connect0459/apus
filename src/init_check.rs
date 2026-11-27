@@ -603,7 +603,7 @@ impl Scan<'_> {
     fn expr_uses_self(&self, expr: &Expr) -> bool {
         match expr.kind() {
             ExprKind::Ident(name) => name == SELF || self.is_member(name),
-            ExprKind::Unwrap(inner) => self.expr_uses_self(inner),
+            ExprKind::Unwrap(inner) | ExprKind::InOut(inner) => self.expr_uses_self(inner),
             ExprKind::Coalesce { lhs, rhs } => self.expr_uses_self(lhs) || self.expr_uses_self(rhs),
             ExprKind::Ternary {
                 cond,

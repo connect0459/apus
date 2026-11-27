@@ -52,6 +52,8 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         hoisted: Vec::new(),
         templates: Vec::new(),
         globals: Vec::new(),
+        inout_params: Vec::new(),
+        inout_after: Vec::new(),
     };
     let receiver = sig.has_receiver();
     cx.scopes.push(HashMap::new());
@@ -72,7 +74,10 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         .iter()
         .zip(sig.params().iter().skip(usize::from(receiver)))
     {
-        cx.declare(func.line(), param.name(), param_sig.ty(), false)?;
+        let local = cx.declare(func.line(), param.name(), param_sig.ty(), param.is_inout())?;
+        if param.is_inout() {
+            cx.inout_params.push(local);
+        }
     }
     if !func.is_top_level() {
         let self_ty = sig.params().first().filter(|_| receiver).map(ParamSig::ty);
@@ -157,6 +162,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         &cx.captured,
         &[],
         &cx.globals,
+        &cx.inout_params,
         sigs,
     ))
 }
@@ -405,6 +411,8 @@ fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
         hoisted: Vec::new(),
         templates: Vec::new(),
         globals: Vec::new(),
+        inout_params: Vec::new(),
+        inout_after: Vec::new(),
     }
 }
 
@@ -2636,6 +2644,8 @@ struct FnCx<'a> {
     hoisted: Vec<LocalId>,
     templates: Vec<(String, Rc<FuncDecl>)>,
     globals: Vec<(LocalId, String)>,
+    inout_params: Vec<LocalId>,
+    inout_after: Vec<TStmt>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -6540,6 +6550,8 @@ impl<'a> FnCx<'a> {
             hoisted: Vec::new(),
             templates: self.templates.clone(),
             globals: Vec::new(),
+            inout_params: Vec::new(),
+            inout_after: Vec::new(),
         }
     }
 
@@ -6689,8 +6701,14 @@ impl<'a> FnCx<'a> {
             cx.locals.clone(),
             statements,
         );
-        let lowered =
-            crate::capture::lower(&typed, &cx.captured, &cx.environment, &cx.globals, sigs);
+        let lowered = crate::capture::lower(
+            &typed,
+            &cx.captured,
+            &cx.environment,
+            &cx.globals,
+            &[],
+            sigs,
+        );
         sigs.register_closure(name.clone(), Rc::new(lowered));
         let ty = sigs.func_ty(param_types.clone(), cx.ret);
         Ok(TExpr::Closure {
@@ -6915,6 +6933,12 @@ impl<'a> FnCx<'a> {
         let mut parameters = Vec::new();
         let mut labels = Vec::new();
         for param in func.params() {
+            if param.is_inout() {
+                return Err(CheckError::at(
+                    line,
+                    "a local function cannot have an inout parameter yet",
+                ));
+            }
             let ty = sigs.resolve_type(param.ty(), &self.scope, line)?;
             parameters.push((param.name().to_string(), ty));
             labels.push(param.label().map(str::to_string));
@@ -8682,14 +8706,9 @@ impl<'a> FnCx<'a> {
         if let Some((base, name, args, explicit)) = member_call
             && self.enum_target(base).is_none()
         {
-            return Ok(TStmt::Eval(self.method_call(
-                expr.line(),
-                base,
-                name,
-                args,
-                None,
-                explicit,
-            )?));
+            return Ok(TStmt::Eval(self.with_inout_writes(|cx| {
+                cx.method_call(expr.line(), base, name, args, None, explicit)
+            })?));
         }
         let ExprKind::Call { callee, args } = expr.kind() else {
             return Err(CheckError::at(
@@ -8703,7 +8722,9 @@ impl<'a> FnCx<'a> {
         if callee == FATAL_ERROR {
             return Self::fatal_error(expr.line(), args);
         }
-        Ok(TStmt::Eval(self.call(expr.line(), callee, args, None)?))
+        Ok(TStmt::Eval(self.with_inout_writes(|cx| {
+            cx.call(expr.line(), callee, args, None)
+        })?))
     }
 
     fn fatal_error(line: u32, args: &[Arg]) -> CResult<TStmt> {
@@ -9363,6 +9384,38 @@ impl<'a> FnCx<'a> {
     }
 
     fn expr(&mut self, expr: &Expr) -> CResult<TExpr> {
+        let is_call = matches!(
+            expr.kind(),
+            ExprKind::Call { .. }
+                | ExprKind::MemberCall { .. }
+                | ExprKind::GenericCall { .. }
+                | ExprKind::GenericMemberCall { .. }
+                | ExprKind::Apply { .. }
+        );
+        if !is_call {
+            return self.expr_kind(expr);
+        }
+        self.with_inout_writes(|cx| cx.expr_kind(expr))
+    }
+
+    fn with_inout_writes(
+        &mut self,
+        call: impl FnOnce(&mut Self) -> CResult<TExpr>,
+    ) -> CResult<TExpr> {
+        let outer = std::mem::take(&mut self.inout_after);
+        let result = call(self);
+        let after = std::mem::replace(&mut self.inout_after, outer);
+        let result = result?;
+        if after.is_empty() {
+            return Ok(result);
+        }
+        Ok(TExpr::Then {
+            value: Box::new(result),
+            after,
+        })
+    }
+
+    fn expr_kind(&mut self, expr: &Expr) -> CResult<TExpr> {
         let line = expr.line();
         let expected = self.expected.take();
         match expr.kind() {
@@ -9377,6 +9430,10 @@ impl<'a> FnCx<'a> {
                     "nil needs a type from its context, such as 'let x: Int? = nil'",
                 )),
             },
+            ExprKind::InOut(_) => Err(CheckError::at(
+                line,
+                "'&' can only be written on an argument that is passed to an inout parameter",
+            )),
             ExprKind::Unwrap(inner) => {
                 let base = self.value(inner)?;
                 let ty = self.sigs.unwrapped(base.ty()).ok_or_else(|| {
@@ -10784,6 +10841,42 @@ impl<'a> FnCx<'a> {
         self.check_values(line, sig, sig.params(), args, Vec::new())
     }
 
+    fn inout_argument(&mut self, line: u32, expr: &Expr) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let ExprKind::InOut(target) = expr.kind() else {
+            return Err(CheckError::at(
+                line,
+                "an inout argument needs '&' before the variable",
+            ));
+        };
+        let read = self.value(target)?;
+        let ty = read.ty();
+        let cell = sigs.cell_of(ty);
+        let held = self.temp(cell);
+        let copy = TExpr::Bind {
+            local: held,
+            init: Box::new(sigs.construct(cell, vec![read])),
+        };
+        let name = format!("$inout{}", self.locals.len());
+        let result = self.declare(line, &name, ty, false)?;
+        let written = Expr::new(line, ExprKind::Ident(name));
+        let update = Update::Assign {
+            op: None,
+            value: &written,
+        };
+        let stores = self.update_stmts(line, target, &update)?;
+        self.inout_after.push(TStmt::Let {
+            local: result,
+            init: TExpr::Field {
+                base: Box::new(TExpr::Local(held, cell)),
+                index: crate::tir::HEADER_SLOTS,
+                ty,
+            },
+        });
+        self.inout_after.extend(stores);
+        Ok(copy)
+    }
+
     fn check_values(
         &mut self,
         line: u32,
@@ -10798,6 +10891,17 @@ impl<'a> FnCx<'a> {
         let mut deferred = Vec::new();
         for (index, (arg, param)) in args.iter().zip(params).enumerate() {
             self.expect_label(line, arg, param.label())?;
+            if param.is_inout() {
+                let value = self.inout_argument(line, arg.value())?;
+                checked.push(Some(value));
+                continue;
+            }
+            if matches!(arg.value().kind(), ExprKind::InOut(_)) {
+                return Err(CheckError::at(
+                    line,
+                    "'&' was written, but this parameter is not an inout parameter",
+                ));
+            }
             let closure_param = sigs.func_parts(param.ty()).is_some() && sigs.has_param(param.ty());
             if closure_param && matches!(arg.value().kind(), ExprKind::Closure(_)) {
                 deferred.push(index);
@@ -11004,13 +11108,31 @@ impl<'a> FnCx<'a> {
     ) -> CResult<TExpr> {
         let sigs = self.sigs;
         let patterns: Vec<Ty> = sig.params().iter().map(ParamSig::ty).collect();
+        let inout = sig.params().iter().any(ParamSig::is_inout);
         let type_args = if sig.generics().is_empty() {
             Vec::new()
         } else if let Some(given) = explicit {
             given
         } else {
             let context = expected.map(|e| (sig.ret(), e));
-            self.infer(line, callee, sig.generics(), &patterns, &checked, context)?
+            let seen: Vec<TExpr>;
+            let values = if inout {
+                seen = sig
+                    .params()
+                    .iter()
+                    .zip(&checked)
+                    .map(
+                        |(p, v)| match sigs.cell_value(v.ty()).filter(|_| p.is_inout()) {
+                            Some(ty) => TExpr::Zero(ty),
+                            None => v.clone(),
+                        },
+                    )
+                    .collect();
+                &seen
+            } else {
+                &checked
+            };
+            self.infer(line, callee, sig.generics(), &patterns, values, context)?
         };
         if let Some((ty, protocol)) = sigs.unsatisfied_bound(sig.bounds(), &type_args, &self.bounds)
         {
@@ -11023,9 +11145,15 @@ impl<'a> FnCx<'a> {
             ));
         }
         let mut args = Vec::with_capacity(checked.len());
-        for (pattern, value) in patterns.iter().zip(checked) {
+        for ((pattern, param), value) in patterns.iter().zip(sig.params()).zip(checked) {
             let wanted = sigs.subst(*pattern, &type_args, &self.scope, line)?;
-            args.push(self.coerce(line, wanted, value)?);
+            if param.is_inout() {
+                let held = sigs.cell_value(value.ty()).unwrap_or(value.ty());
+                self.expect(line, wanted, held)?;
+                args.push(value);
+            } else {
+                args.push(self.coerce(line, wanted, value)?);
+            }
         }
         let ret = sigs.subst(sig.ret(), &type_args, &self.scope, line)?;
         Ok(TExpr::Call {

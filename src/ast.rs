@@ -228,6 +228,7 @@ pub struct Param {
     label: Option<String>,
     name: String,
     ty: TypeName,
+    inout: bool,
 }
 
 impl Param {
@@ -236,7 +237,17 @@ impl Param {
             label,
             name,
             ty: ty.into(),
+            inout: false,
         }
+    }
+
+    pub fn as_inout(mut self) -> Self {
+        self.inout = true;
+        self
+    }
+
+    pub fn is_inout(&self) -> bool {
+        self.inout
     }
 
     pub fn label(&self) -> Option<&str> {
@@ -854,6 +865,7 @@ fn depth_of(kind: &ExprKind) -> u32 {
             default,
         } => base.depth.max(index.depth).max(default.depth),
         ExprKind::Unwrap(expr)
+        | ExprKind::InOut(expr)
         | ExprKind::Unary { expr, .. }
         | ExprKind::Cast { expr, .. }
         | ExprKind::Member { base: expr, .. } => expr.depth,
@@ -1021,6 +1033,7 @@ pub enum ExprKind {
         default: Box<Expr>,
     },
     Unwrap(Box<Expr>),
+    InOut(Box<Expr>),
     Coalesce {
         lhs: Box<Expr>,
         rhs: Box<Expr>,

@@ -252,6 +252,7 @@ fn operator_requirement(name: &str) -> Requirement {
     let operand = ParamSig {
         label: None,
         ty: Ty::Param(0),
+        inout: false,
     };
     Requirement {
         name: name.to_string(),
@@ -301,11 +302,20 @@ pub fn scope_of(generics: &[String]) -> Vec<(String, Ty)> {
 pub struct ParamSig {
     label: Option<String>,
     ty: Ty,
+    inout: bool,
 }
 
 impl ParamSig {
     pub fn new(label: Option<String>, ty: Ty) -> Self {
-        Self { label, ty }
+        Self {
+            label,
+            ty,
+            inout: false,
+        }
+    }
+
+    pub fn is_inout(&self) -> bool {
+        self.inout
     }
 
     pub fn label(&self) -> Option<&str> {
@@ -746,9 +756,16 @@ impl Signatures {
             }
             let mut params = Vec::new();
             for param in requirement.params() {
+                if param.is_inout() {
+                    return Err(CheckError::at(
+                        requirement.line(),
+                        "a protocol requirement cannot have an inout parameter yet",
+                    ));
+                }
                 params.push(ParamSig {
                     label: param.label().map(str::to_string),
                     ty: self.resolve_type(param.ty(), &scope, requirement.line())?,
+                    inout: false,
                 });
             }
             let ret = self.resolve_result(requirement.ret(), &scope, requirement.line())?;
@@ -1429,13 +1446,14 @@ impl Signatures {
             other => other,
         });
         let mut params: Vec<ParamSig> = receiver_param
-            .map(|ty| ParamSig { label: None, ty })
+            .map(|ty| ParamSig::new(None, ty))
             .into_iter()
             .collect();
         for p in func.params() {
             params.push(ParamSig {
                 label: p.label().map(str::to_string),
                 ty: self.resolve_type(p.ty(), &scope, func.line())?,
+                inout: p.is_inout(),
             });
         }
         let ret = match (func.ret(), owner_ty) {
@@ -2662,6 +2680,13 @@ impl Signatures {
             .iter()
             .find(|(n, _, _)| n == name)
             .map(|(_, ty, mutable)| (*ty, *mutable))
+    }
+
+    pub fn cell_value(&self, cell: Ty) -> Option<Ty> {
+        match self.origin_of(cell)? {
+            (Kind::Struct, CELL_DEF, args) => args.first().copied(),
+            _ => None,
+        }
     }
 
     pub fn register_closure(&self, name: String, body: Rc<TFunc>) {

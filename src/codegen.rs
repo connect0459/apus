@@ -2800,10 +2800,12 @@ impl Emitter<'_, '_> {
                 self.hash_mix(acc, value)
             }
             TExpr::Then { value, after } => {
-                let result = self.value(value)?;
-                let result = self.detach(result, value.ty())?;
+                let result = match self.expr(value)? {
+                    Some(result) => Some(self.detach(result, value.ty())?),
+                    None => None,
+                };
                 self.stmts(after)?;
-                result
+                return Ok(result);
             }
             TExpr::Witness { .. } | TExpr::Dispatch { .. } => {
                 return Err(CodegenError::from(

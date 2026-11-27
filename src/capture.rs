@@ -152,15 +152,30 @@ pub fn lower(
     celled: &[LocalId],
     environment: &[(LocalId, usize, EnvKind)],
     globals: &[(LocalId, String)],
+    inout_params: &[LocalId],
     sigs: &Signatures,
 ) -> TFunc {
-    if celled.is_empty() && environment.is_empty() && globals.is_empty() {
+    if celled.is_empty() && environment.is_empty() && globals.is_empty() && inout_params.is_empty()
+    {
         return func.clone();
     }
     let mut locals = func.locals().to_vec();
     let mut cells = HashMap::new();
     let mut prologue = Vec::new();
-    for local in celled {
+    for local in inout_params {
+        let value = locals[local.index()];
+        let cell = sigs.cell_of(value);
+        locals[local.index()] = cell;
+        cells.insert(
+            *local,
+            Cell {
+                holder: *local,
+                value,
+                cell,
+            },
+        );
+    }
+    for local in celled.iter().filter(|l| !inout_params.contains(l)) {
         let value = locals[local.index()];
         let cell = sigs.cell_of(value);
         if local.index() < func.param_count() {
