@@ -7544,3 +7544,13 @@ fn string_escapes_include_unicode_scalars_and_integer_literals_have_other_bases(
         "aAéb\n5\n1275\ntrue\n"
     );
 }
+
+#[test]
+fn a_parameter_may_have_no_name() {
+    assert_eq!(
+        run(
+            "protocol Sink {\n  func take(_: Int) -> Int\n}\nstruct S: Sink {\n  func take(_: Int) -> Int {\n    return 7\n  }\n}\nfunc ignore(_: Int, _ b: Int, _: String) -> Int {\n  return b\n}\nprint(ignore(1, 2, \"x\") + S().take(9))"
+        ),
+        "9\n"
+    );
+}

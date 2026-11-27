@@ -495,7 +495,7 @@ impl Parser<'_> {
             if !params.is_empty() {
                 self.expect_punct(",")?;
             }
-            params.push(self.param()?);
+            params.push(self.param(params.len())?);
         }
         self.expect_punct(")")?;
         let ret = if self.eat_punct("->") {
@@ -545,7 +545,7 @@ impl Parser<'_> {
             if !params.is_empty() {
                 self.expect_punct(",")?;
             }
-            params.push(self.param()?);
+            params.push(self.param(params.len())?);
         }
         self.expect_punct(")")?;
         let ret = if self.eat_punct("->") {
@@ -582,7 +582,7 @@ impl Parser<'_> {
             if !params.is_empty() {
                 self.expect_punct(",")?;
             }
-            params.push(self.param()?);
+            params.push(self.param(params.len())?);
         }
         self.expect_punct(")")?;
         let body = if self.header_only {
@@ -597,7 +597,7 @@ impl Parser<'_> {
             .as_init())
     }
 
-    fn param(&mut self) -> PResult<Param> {
+    fn param(&mut self, position: usize) -> PResult<Param> {
         let first = match self.peek() {
             Some(Token::Ident(s)) if s == "_" => {
                 self.pos += 1;
@@ -615,6 +615,7 @@ impl Parser<'_> {
         let (label, name) = match (first, self.peek_name().is_some()) {
             (first, true) => (first, self.name()?),
             (Some(n), false) => (Some(n.clone()), n),
+            (None, false) if self.is_punct(":") => (None, format!("$unnamed{position}")),
             (None, false) => return self.fail("expected a parameter name after '_'"),
         };
         self.expect_punct(":")?;
@@ -3731,5 +3732,13 @@ mod tests {
             panic!("expected a method call");
         };
         assert_eq!(args[0].label(), Some("while"));
+    }
+
+    #[test]
+    fn a_parameter_may_be_an_underscore_with_only_a_type() {
+        let decl = func("func f(_: Int, _ x: Int, _: Bool) { }");
+        let names: Vec<&str> = decl.params().iter().map(|p| p.name()).collect();
+        assert_eq!(names, ["$unnamed0", "x", "$unnamed2"]);
+        assert!(decl.params().iter().all(|p| p.label().is_none()));
     }
 }
