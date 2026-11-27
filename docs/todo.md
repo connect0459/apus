@@ -104,6 +104,8 @@
   - [x] M12a: a harness that runs the run-pass tests of swiftlang/swift `test/Interpreter` and reports pass rates (`just swift-tests`, see the harness decision)
   - [x] M12b: top-level statements as the program body (an implicit `main`) and top-level variables that every function can use (see the top-level decision)
   - [ ] M12c: work through the failure categories, most frequent first, with a baseline list that must not regress
+    - [x] the cheap items of the survey: `Void` as a result type, `\u{...}` and the other escapes, integer literals in other bases, `_: T` parameters, access modifiers and attributes with no meaning here, several names in one declaration, default values of stored properties (see the cheap items decision)
+    - [ ] the expensive items of the survey, one at a time: `extension`, computed properties, `inout`, variadic parameters, `any` and protocol composition, `throws`, `where` clauses and protocol inheritance, operator functions
   - [ ] M12d: diagnostics tests (`-verify`, `expected-error`), after a `check` command exists
 
 ### Plan for M12
@@ -870,3 +872,16 @@ After M12b, 57 of the 62 applicable tests fail to build. The line of the first e
 | hexadecimal integer literals | 1 | `var someval = 0xFFeeFF0033` |
 
 **Reading.** No single change moves the pass rate: the largest groups (modifiers, computed properties, `where` and protocol inheritance) each hold under ten tests, and a test that passes the first one meets the next. The cheapest items are the ones with one local change and no new semantics: ignoring the access modifiers and `@inline`-like attributes, the type name `Void`, the escape `\u{...}`, `_: T` parameters, several names in one declaration, and a default value of a stored property. The expensive ones are `extension`, computed properties, `inout`, variadics, `any` and `throws`, each of which is a feature with its own design. Order for M12c: cheap items first (about a third of the first errors), re-run the harness after each, and take the expensive features one at a time in the order of what the next run shows.
+
+### The cheap items of the upstream survey (2026-11-27)
+
+**Decision.** Seven items, each in its own commit, each with tests of its own:
+
+- `Void` is read as the result type of any function, method or protocol requirement (`Signatures::resolve_result`), as it already was for closures.
+- A string may contain `\u{...}` (1 to 8 hexadecimal digits that name a scalar), `\r` and `\'`; an integer literal may start with `0x`, `0b` or `0o`, may contain `_`, and a prefix without digits or a value that does not fit in `Int` is an error.
+- A parameter written `_: T` has no name; the parser calls it `$unnamedN` after its position, so it cannot clash.
+- Before the items are split, `items::without_modifiers` removes `public`, `private` (also `private(set)`), `internal`, `fileprivate`, `open`, `package`, `final`, `convenience` and `required` when they start a declaration, and the attributes that mean nothing here (`@inline(...)`, `@inlinable`, `@usableFromInline`, `@discardableResult`, `@escaping`, `@frozen`, `@_eagerMove`, `@_optimize(...)`, `@_transparent`, `@_alwaysEmitIntoClient`, `@_semantics(...)`, `@_effects(...)`, `@_noAllocation`). The words are kept where they are names (`var open = 1`), and an attribute with a meaning (`@autoclosure`) is kept so that it is an error. Removing them before hashing means that adding `public` to a declaration does not change its hash.
+- `var a, b: Int` gives every name without a type or a value the type that follows (`Parser::push_statement` for statements, the struct body for members), and `let a = 1, b = 2` declares each name with its own value. A member with a default value is declared with one name.
+- A stored property may have a default value: `var a = 1`, `var next: Node? = nil`, `var xs: [Int] = []`. Without a type, the type comes from a literal (`Int`, `Bool`, `String`); any other value needs a written type. The memberwise initializer (`struct_init`) takes the members in declaration order and a member that has a default may be left out; an initializer that is written (`init(...)`) starts with `self.member = default` for each such member of its own type, inserted into its body before the initialization check, unless the body delegates with `self.init(...)`.
+
+**Consequences.** A default value is evaluated where the initializer is called (memberwise) or at the start of the initializer, so it sees the names of that place; a default value in a generic type is rejected with a message. The default of an inherited member is not applied by the initializer of a subclass. An attribute that is not on the list is still a parse error. The upstream harness goes from 5 to 7 passing tests (`destructors` and `interpolation` pass now); the first errors move deeper (the commonest are now `inout` and variadic parameters, function-type labels, and `where` clauses and protocol inheritance), which is what the survey predicted: most tests need several features.
