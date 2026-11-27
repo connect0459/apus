@@ -376,6 +376,11 @@ impl Pass<'_> {
                 out.push(TStmt::Print(expr));
                 out.extend(self.release_temps(&temps));
             }
+            TStmt::PrintPart(expr) => {
+                let (expr, temps) = self.scoped(|p| p.borrowed(expr));
+                out.push(TStmt::PrintPart(expr));
+                out.extend(self.release_temps(&temps));
+            }
             TStmt::Eval(expr) => {
                 let (expr, temps) = self.scoped(|p| p.borrowed(expr));
                 out.push(TStmt::Eval(expr));

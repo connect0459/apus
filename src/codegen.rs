@@ -52,6 +52,7 @@ const STRING_LEN: i32 = -8;
 const IMMORTAL: i64 = i64::MIN;
 const RUNTIME_FORMAT_INT: &str = "apus_format_int";
 const RUNTIME_FORMAT_PLAIN: &str = "apus_format_plain";
+const RUNTIME_FORMAT_TEXT: &str = "apus_format_text";
 const INT_BUFFER: i64 = 32;
 const SNPRINTF_PADDING: usize = 5;
 const RUNTIME_TRUE: &str = "apus_true";
@@ -62,9 +63,10 @@ fn global_symbol(name: &str) -> String {
     format!("{GLOBAL_PREFIX}{name}")
 }
 
-const RUNTIME_DATA: [(&str, &[u8]); 4] = [
+const RUNTIME_DATA: [(&str, &[u8]); 5] = [
     (RUNTIME_FORMAT_INT, b"%ld\n\0"),
     (RUNTIME_FORMAT_PLAIN, b"%ld\0"),
+    (RUNTIME_FORMAT_TEXT, b"%s\0"),
     (RUNTIME_TRUE, b"true\0"),
     (RUNTIME_FALSE, b"false\0"),
 ];
@@ -718,6 +720,11 @@ impl Emitter<'_, '_> {
             } => self.for_stmt(self.vars[local.index()], lo, hi, *inclusive, body),
             TStmt::Print(expr) => {
                 self.print(expr)?;
+                Ok(false)
+            }
+            TStmt::PrintPart(expr) => {
+                let value = self.value(expr)?;
+                self.print_text(value);
                 Ok(false)
             }
             TStmt::Fatal(text) => {
@@ -2581,6 +2588,21 @@ impl Emitter<'_, '_> {
 
     fn print_int(&mut self, value: Value) {
         let format = self.data_address(RUNTIME_FORMAT_INT);
+        let mut sig = Signature::new(self.call_conv);
+        for _ in 0..(2 + VARIADIC_PADDING) {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I32));
+        let printf = self.import_func("printf", sig, false);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let mut args = vec![format];
+        args.extend(std::iter::repeat_n(zero, VARIADIC_PADDING));
+        args.push(value);
+        self.builder.ins().call(printf, &args);
+    }
+
+    fn print_text(&mut self, value: Value) {
+        let format = self.data_address(RUNTIME_FORMAT_TEXT);
         let mut sig = Signature::new(self.call_conv);
         for _ in 0..(2 + VARIADIC_PADDING) {
             sig.params.push(AbiParam::new(types::I64));

@@ -7618,3 +7618,30 @@ fn a_member_default_that_is_not_a_literal_needs_a_type_and_labels_stay_in_order(
         assert!(build_error(source).contains(message), "{source}");
     }
 }
+
+#[test]
+fn print_takes_several_items_a_separator_and_a_terminator() {
+    assert_eq!(
+        main_printing(
+            "print(1, 2, 3)\nprint(\"a\", \"b\", separator: \"-\")\nprint(\"x\", terminator: \"\")\nprint(\"y\", terminator: \"!\\n\")\nprint(1, true, \"s\", separator: \", \", terminator: \";\\n\")\nprint()\nprint(\"\", terminator: \"\")\nprint(\"end\")\nlet c: Character = \"c\"\nprint(c, (1, 2), terminator: \"\\n\")\nprint(7, terminator: \"|\")\nprint(8)"
+        ),
+        "1 2 3\na-b\nxy!\n1, true, s;\n\nend\nc (1, 2)\n7|8\n"
+    );
+}
+
+#[test]
+fn print_arguments_are_checked() {
+    for (body, message) in [
+        ("print(1, terminator: 2)", "expected String"),
+        ("print(1, sep: \"-\")", "print takes"),
+        (
+            "print(1, separator: \"a\", separator: \"b\")",
+            "print takes",
+        ),
+        ("print(terminator: \"x\", 1)", "print takes"),
+        ("print([1])", "cannot print"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        assert!(build_error(&source).contains(message), "{body}");
+    }
+}

@@ -8742,6 +8742,10 @@ impl<'a> FnCx<'a> {
             return Err(CheckError::at(line, usage));
         }
         let value = self.value(arg.value())?;
+        self.text_of(line, value)
+    }
+
+    fn text_of(&mut self, line: u32, value: TExpr) -> CResult<TExpr> {
         match value.ty() {
             Ty::Str => Ok(value),
             Ty::Char => Ok(TExpr::StrOp {
@@ -9206,19 +9210,114 @@ impl<'a> FnCx<'a> {
     }
 
     fn print(&mut self, line: u32, args: &[Arg]) -> CResult<TStmt> {
-        let [arg] = args else {
-            return Err(CheckError::at(
-                line,
-                "print takes exactly one unlabeled argument",
-            ));
-        };
-        if arg.label().is_some() {
-            return Err(CheckError::at(
-                line,
-                "print takes exactly one unlabeled argument",
-            ));
+        let usage = "print takes values, then the labels 'separator:' and 'terminator:' once each";
+        let items = args.iter().take_while(|a| a.label().is_none()).count();
+        let labeled = &args[items..];
+        let mut separator = None;
+        let mut terminator = None;
+        for arg in labeled {
+            let slot = match arg.label() {
+                Some("separator") => &mut separator,
+                Some("terminator") => &mut terminator,
+                _ => return Err(CheckError::at(line, usage)),
+            };
+            if slot.replace(arg.value()).is_some() {
+                return Err(CheckError::at(line, usage));
+            }
         }
-        let value = self.value(arg.value())?;
+        if labeled.is_empty() && items == 1 {
+            return self.print_one(line, args[0].value());
+        }
+        self.print_many(line, &args[..items], separator, terminator)
+    }
+
+    fn print_many(
+        &mut self,
+        line: u32,
+        items: &[Arg],
+        separator: Option<&Expr>,
+        terminator: Option<&Expr>,
+    ) -> CResult<TStmt> {
+        let mut texts = Vec::with_capacity(items.len());
+        for item in items {
+            let value = self.value(item.value())?;
+            if !matches!(
+                value.ty(),
+                Ty::Int | Ty::Bool | Ty::Str | Ty::Char | Ty::Enum(_)
+            ) && self.sigs.tuple_elements(value.ty()).is_none()
+            {
+                return Err(CheckError::at(
+                    line,
+                    format!("cannot print a value of type {}", self.name_of(value.ty())),
+                ));
+            }
+            texts.push(self.text_of(line, value)?);
+        }
+        let mut out = Vec::new();
+        let separator = match separator {
+            Some(expr) if items.len() > 1 => Some(self.print_text_operand(line, expr, &mut out)?),
+            _ => None,
+        };
+        let terminator = match terminator {
+            Some(expr) => Some(self.print_text_operand(line, expr, &mut out)?),
+            None => None,
+        };
+        let count = texts.len();
+        for (index, text) in texts.into_iter().enumerate() {
+            if index > 0 {
+                out.push(TStmt::PrintPart(
+                    separator
+                        .clone()
+                        .unwrap_or_else(|| TExpr::Str(" ".to_string())),
+                ));
+            }
+            let last = index + 1 == count;
+            out.push(if last && terminator.is_none() {
+                TStmt::Print(text)
+            } else {
+                TStmt::PrintPart(text)
+            });
+        }
+        match terminator {
+            Some(text) => out.push(TStmt::PrintPart(text)),
+            None if count == 0 => out.push(TStmt::Print(TExpr::Str(String::new()))),
+            None => {}
+        }
+        Ok(TStmt::If {
+            cond: TExpr::Bool(true),
+            then_body: out,
+            else_body: Vec::new(),
+        })
+    }
+
+    fn print_text_operand(
+        &mut self,
+        line: u32,
+        expr: &Expr,
+        out: &mut Vec<TStmt>,
+    ) -> CResult<TExpr> {
+        self.expected = Some(Ty::Str);
+        let value = self.value(expr)?;
+        self.expect(line, Ty::Str, value.ty())?;
+        if matches!(value, TExpr::Str(_)) {
+            return Ok(value);
+        }
+        let held = self.declare(
+            line,
+            &format!("$print{}", self.locals.len()),
+            Ty::Str,
+            false,
+        )?;
+        out.push(TStmt::Let {
+            local: held,
+            init: value,
+        });
+        Ok(TExpr::Local(held, Ty::Str))
+    }
+
+    fn print_one(&mut self, line: u32, expr: &Expr) -> CResult<TStmt> {
+        let arg_value = expr;
+        let value = self.value(arg_value)?;
         if matches!(value.ty(), Ty::Enum(_)) {
             return Ok(self.print_enum(value));
         }

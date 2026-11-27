@@ -176,6 +176,10 @@ impl Encoder<'_> {
                 self.tag(17);
                 self.expr(expr);
             }
+            TStmt::PrintPart(expr) => {
+                self.tag(29);
+                self.expr(expr);
+            }
             TStmt::Eval(expr) => {
                 self.tag(18);
                 self.expr(expr);
