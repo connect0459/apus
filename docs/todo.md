@@ -100,6 +100,39 @@
   - [x] a capture list entry that copies a value: `[x]`, `[x = expr]`, `[weak held = b]` (see the copied capture decision)
   - [x] `weak`/`unowned` on a value that is not a class instance (rejected with a message)
   - [x] generic local functions (`func twice<T>(_ x: T, _ f: (T) -> T) -> T` inside a function, with bounds and explicit arguments) and local functions that call a local function declared after them (see the local function decisions)
+- [ ] M12: upstream Swift tests as a specification suite (see the plan below)
+  - [ ] M12a: a harness that runs the run-pass tests of swiftlang/swift `test/Interpreter` and reports pass rates
+  - [ ] M12b: top-level statements as the program body (an implicit `main`)
+  - [ ] M12c: work through the failure categories, most frequent first, with a baseline list that must not regress
+  - [ ] M12d: diagnostics tests (`-verify`, `expected-error`), after a `check` command exists
+
+### Plan for M12
+
+**Why.** The Swift repository holds the closest thing the language has to an executable specification. Running it shows which parts of the dialect are missing or wrong, and a list of passing tests keeps them from regressing. The approach follows the one that zust uses on the UI tests of rustc: pin a commit, classify every test from its directives, count only the tests the compiler can be asked to handle, require an exact expectation to pass, and compare against a committed list of passing tests.
+
+**Scope of the first step.** `test/Interpreter` (about 435 files). A test is applicable when all of these hold, and every other test is counted as "not applicable" with its reason, never as a failure:
+
+- Its `RUN:` lines are the plain forms `%target-run-simple-swift` and `%target-build-swift` followed by `%target-run`, optionally piped into `%FileCheck`.
+- Its `REQUIRES:` and `UNSUPPORTED:` lines do not exclude macOS arm64 or an executable test, and name no feature the compiler lacks (Objective-C interop, concurrency, sanitizers, resilience, optimization levels).
+- It imports no module other than `Swift` (no `Foundation`, `Dispatch`, `StdlibUnittest`).
+- It does not use what the dialect cannot express yet: `Double` and the sized integer types, `async`, actors, noncopyable types, macros, `#if`, `@available`, unsafe pointers. These reasons are listed separately so that they read as the backlog of the language.
+
+A rough count with these rules on the pinned commit is 53 of 435 files. About 50 of them rely on top-level statements, so M12b comes before most of the work.
+
+**What counts as passing.** The harness builds the test with apus, runs it, and checks that it exits with 0 and that its standard output satisfies the `CHECK` directives of the file. The checker is a subset of FileCheck: `CHECK`, `CHECK-NEXT`, `CHECK-NOT`, `CHECK-LABEL` and `CHECK-SAME`, with plain text and `{{regex}}` parts, and without variable captures. A test that uses another directive (`CHECK-DAG`, `CHECK-COUNT`, `[[var:...]]`, `--check-prefix`) is not applicable, with that reason. A build error, a crash of the compiler, a timeout and a wrong output are different results, so a crash can be listed first.
+
+**Pinned source.** The harness takes the checkout of swiftlang/swift from an option or an environment variable, refuses to run when it is not at the pinned commit, and never writes a local path into the repository. The commit is recorded in the baseline file.
+
+**Regression list.** `bench/swift_tests_passing.txt` lists the passing tests (one path per line). `--check` fails when a listed test stops passing or when the compiler crashes on any test, and `--write-baseline` rewrites the list. A test that passes without testing what it names, for example because it only prints something trivial, goes to an exclusion list next to it, as zust does.
+
+**Working loop.** After the harness exists, the first error of every failing applicable test is grouped into categories. One category at a time is fixed, each change is kept only if no test in the baseline regresses and `just verify` still passes. Language divergences that this exposes are recorded as decisions here: a dialect feature that Swift does not have stays documented as an extension, and a leniency that Swift rejects is decided case by case (it is a false pass for the diagnostics tests of M12d).
+
+**Not in this plan.** Diagnostics tests (2440 files with `expected-error`) need a `check` command that stops after type checking, errors that carry a column, and a way to match messages; the line of the error alone gives many accidental passes. They are M12d. `StdlibUnittest` tests, tests of the standard library outside the subset, and anything that needs Foundation are out of scope until those exist.
+
+**Open questions.**
+
+- Top-level statements: how they relate to `func main()` (the entry point decision under Open decisions). The likely rule is that a source without `func main()` whose items include top-level statements gets an implicit `main`, with variables declared at the top level treated as locals of it.
+- Whether the harness lives in `bench/` as a Python script (like `bench/gen.py`) or as a Rust test binary. A script is simpler and mirrors zust; the baseline check can still run in CI.
 
 ## Open decisions
 
