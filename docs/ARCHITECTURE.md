@@ -18,6 +18,8 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 **`lexer`** turns source text into tokens. Comments and whitespace produce no tokens, but every token remembers its line. The parser relies on lines to decide where statements end.
 
+**`prelude`** looks at the tokens of a program and, when it uses a word of the library (`lazy`, `prefix`, `dropFirst`, `reversed` ...), returns Swift source for the library members (`array_prelude.swift`, `lazy_prelude.swift`). The driver appends it to the program text and lexes the result again, so the library is split, hashed, checked and cached like user code.
+
 **`items`** splits the token stream into top-level items, takes the methods and initializers out of each type body as items of their own, and computes a content hash for each. It is the only stage that sees the whole file; later stages receive one item at a time.
 
 **`ast` and `parser`** define the syntax tree and parse a single item into it. The parser never looks at tokens outside the item it was given. Every statement and expression remembers its line.
