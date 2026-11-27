@@ -980,7 +980,7 @@ impl Parser<'_> {
                 self.expect_punct(")")?;
                 self.expect_keyword("in")?;
                 let iter = self.header_expr()?;
-                let body = self.block()?;
+                let body = self.filtered_block(line)?;
                 StmtKind::ForPair {
                     key,
                     value,
@@ -991,7 +991,7 @@ impl Parser<'_> {
                 let var = self.name()?;
                 self.expect_keyword("in")?;
                 let iter = self.header_expr()?;
-                let body = self.block()?;
+                let body = self.filtered_block(line)?;
                 StmtKind::For { var, iter, body }
             }
         } else if self.eat_keyword("break") {
@@ -1009,6 +1009,22 @@ impl Parser<'_> {
             self.expr_or_assign_kind()?
         };
         Ok(Stmt::new(line, kind))
+    }
+
+    fn filtered_block(&mut self, line: u32) -> PResult<Vec<Stmt>> {
+        if !self.eat_keyword("where") {
+            return self.block();
+        }
+        let cond = self.header_expr()?;
+        let body = self.block()?;
+        Ok(vec![Stmt::new(
+            line,
+            StmtKind::If {
+                cond,
+                then_body: body,
+                else_body: None,
+            },
+        )])
     }
 
     fn jump_label(&mut self) -> Option<String> {
@@ -1128,11 +1144,18 @@ impl Parser<'_> {
     }
 
     fn condition_list(&mut self) -> PResult<Vec<Condition>> {
-        let mut list = vec![self.condition()?];
-        while self.eat_punct(",") {
-            list.push(self.condition()?);
+        let mut list = Vec::new();
+        loop {
+            let condition = self.condition()?;
+            let is_case = matches!(condition, Condition::Case { .. });
+            list.push(condition);
+            if is_case && self.eat_keyword("where") {
+                list.push(Condition::Expr(self.header_expr()?));
+            }
+            if !self.eat_punct(",") {
+                return Ok(list);
+            }
         }
-        Ok(list)
     }
 
     fn if_kind(&mut self) -> PResult<StmtKind> {

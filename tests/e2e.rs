@@ -7185,3 +7185,23 @@ fn nested_tuple_patterns_are_checked() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_where_clause_filters_the_elements_of_a_for_loop_and_continue_still_works() {
+    assert_eq!(
+        run(
+            "func main() {\n  var total = 0\n  for i in 0..<10 where i % 2 == 0 { total += i }\n  print(total)\n  for n in [3, 8, 5, 12] where n > 4 {\n    if n == 5 { continue }\n    print(n)\n  }\n  for c in \"a-b\" where c != \"-\" { print(c) }\n  let d = [\"x\": 1, \"y\": 2]\n  for (k, v) in d where v > 1 { print(k) }\n  var seen = 0\n  outer: for i in 0..<5 where i > 0 {\n    for j in 0..<5 where j == i {\n      seen += j\n      if seen > 5 { break outer }\n    }\n  }\n  print(seen)\n}"
+        ),
+        "20\n8\n12\na\nb\ny\n6\n"
+    );
+}
+
+#[test]
+fn a_where_clause_after_if_case_guard_case_and_while_case_adds_a_condition() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case dot\n}\nfunc big(_ s: Shape) -> String {\n  if case .circle(let r) = s where r > 5 { return \"big\" } else { return \"not big\" }\n}\nfunc radius(_ s: Shape) -> Int {\n  guard case .circle(let r) = s where r > 0 else { return -1 }\n  return r\n}\nfunc main() {\n  print(big(.circle(9)))\n  print(big(.circle(2)))\n  print(big(.dot))\n  print(radius(.circle(4)))\n  print(radius(.circle(0)))\n  var queue = [1, 2, 5]\n  var sum = 0\n  while case .some(let r) = queue.first where r < 3 {\n    sum += r\n    queue.remove(at: 0)\n  }\n  print(sum)\n}"
+        ),
+        "big\nnot big\nnot big\n4\n-1\n3\n"
+    );
+}
