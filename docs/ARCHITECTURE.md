@@ -46,7 +46,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 ## Invariants
 
-- An item's hash depends only on its normalized tokens. Whitespace, comments and line shifts never change it.
+- An item's hash depends only on its normalized tokens. Whitespace, comments and line shifts never change it, except that a `?` with whitespace on both sides is a different token (the ternary mark) from one without.
 - Hashes are persisted, so the hash function must be deterministic across runs and Rust versions.
 - The parser is stateless across items. Parsing item A never depends on item B.
 - Checking a function depends only on its own body and on signatures.
@@ -68,7 +68,7 @@ All stages exist. `codegen` is split into `compile_function`, which turns one ty
 
 ## Cross-Cutting Concerns
 
-**Dialect.** Statements end at a newline, `;` or `}`. A binary operator must stay on the same line as its left operand. The entry point is `func main()`. Type inference flows from an initializer only; there are no overloads, and integer literals are always `Int`. Argument labels must match the declaration exactly.
+**Dialect.** Statements end at a newline, `;` or `}`. A binary operator must stay on the same line as its left operand, and so must the `?` of a ternary, whose mark is a `?` with whitespace on both sides (any other `?` is an optional type or an optional chain). The entry point is `func main()`. Type inference flows from an initializer only; there are no overloads, and integer literals are always `Int`. Argument labels must match the declaration exactly.
 
 **Errors.** Every stage returns a `Result` whose error carries the line of the offending token or node.
 
