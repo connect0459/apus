@@ -49,6 +49,8 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
         captured: Vec::new(),
         environment: Vec::new(),
         labels: HashMap::new(),
+        hoisted: Vec::new(),
+        templates: Vec::new(),
     };
     let receiver = sig.has_receiver();
     let mut cell_enum = None;
@@ -312,6 +314,8 @@ fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
         captured: Vec::new(),
         environment: Vec::new(),
         labels: HashMap::new(),
+        hoisted: Vec::new(),
+        templates: Vec::new(),
     }
 }
 
@@ -2508,6 +2512,8 @@ struct AssignPath {
     crossed_class: bool,
 }
 
+type LocalSignature = (Vec<(String, Ty)>, Vec<Option<String>>, Ty);
+
 #[derive(Clone, Copy)]
 struct Binding {
     local: LocalId,
@@ -2536,6 +2542,8 @@ struct FnCx<'a> {
     captured: Vec<LocalId>,
     environment: Vec<(LocalId, usize, EnvKind)>,
     labels: HashMap<LocalId, Vec<Option<String>>>,
+    hoisted: Vec<LocalId>,
+    templates: Vec<(String, Rc<FuncDecl>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -3002,16 +3010,98 @@ impl<'a> FnCx<'a> {
 
     fn block(&mut self, stmts: &[Stmt]) -> CResult<Vec<TStmt>> {
         self.scopes.push(HashMap::new());
+        let visible = self.templates.len();
         let mut checked = Vec::with_capacity(stmts.len());
-        let mut result = Ok(());
-        for stmt in stmts {
-            result = self.lower_stmt(stmt, &mut checked);
-            if result.is_err() {
-                break;
+        let mut result = self.hoist_local_functions(stmts, &mut checked);
+        if result.is_ok() {
+            for stmt in stmts {
+                result = self.lower_stmt(stmt, &mut checked);
+                if result.is_err() {
+                    break;
+                }
             }
         }
         self.scopes.pop();
+        self.templates.truncate(visible);
         result.map(|()| checked)
+    }
+
+    fn hoist_local_functions(&mut self, stmts: &[Stmt], checked: &mut Vec<TStmt>) -> CResult<()> {
+        let mut funcs: Vec<(usize, &FuncDecl)> = Vec::new();
+        for (index, stmt) in stmts.iter().enumerate() {
+            let StmtKind::LocalFunc(func) = stmt.kind() else {
+                continue;
+            };
+            if func.generics().is_empty() {
+                funcs.push((index, &**func));
+            } else {
+                self.templates
+                    .push((func.name().to_string(), Rc::new((**func).clone())));
+            }
+        }
+        let mut hoisted: Vec<(usize, &FuncDecl)> = Vec::new();
+        for (index, func) in &funcs {
+            let needed = funcs
+                .iter()
+                .filter(|(earlier, _)| earlier < index)
+                .any(|(_, other)| {
+                    crate::free::names_in(other.body())
+                        .iter()
+                        .any(|n| n == func.name())
+                });
+            if needed {
+                hoisted.push((*index, *func));
+            }
+        }
+        for (index, func) in &hoisted {
+            let line = stmts[*index].line();
+            let (parameters, labels, ret) = self.local_signature(line, func)?;
+            let ty = self
+                .sigs
+                .func_ty(parameters.iter().map(|(_, ty)| *ty).collect(), ret);
+            let local = self.declare(line, func.name(), ty, false)?;
+            self.labels.insert(local, labels);
+            checked.push(TStmt::Let {
+                local,
+                init: TExpr::Zero(ty),
+            });
+            self.hoisted.push(local);
+        }
+        for (index, func) in &hoisted {
+            let mut unsafe_names = vec![func.name().to_string()];
+            loop {
+                let before = unsafe_names.len();
+                for (earlier, other) in &funcs {
+                    if earlier < index
+                        && !unsafe_names.iter().any(|n| n == other.name())
+                        && crate::free::names_in(other.body())
+                            .iter()
+                            .any(|n| unsafe_names.contains(n))
+                    {
+                        unsafe_names.push(other.name().to_string());
+                    }
+                }
+                if unsafe_names.len() == before {
+                    break;
+                }
+            }
+            for stmt in &stmts[..*index] {
+                if matches!(stmt.kind(), StmtKind::LocalFunc(_)) {
+                    continue;
+                }
+                let used = crate::free::names_in(std::slice::from_ref(stmt));
+                if let Some(name) = used.iter().find(|n| unsafe_names.contains(n)) {
+                    return Err(CheckError::at(
+                        stmt.line(),
+                        format!(
+                            "'{name}' is used before the local function '{}' that it needs is declared",
+                            func.name()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn in_target<R>(
@@ -6215,6 +6305,8 @@ impl<'a> FnCx<'a> {
             captured: Vec::new(),
             environment: Vec::new(),
             labels: HashMap::new(),
+            hoisted: Vec::new(),
+            templates: self.templates.clone(),
         }
     }
 
@@ -6222,8 +6314,12 @@ impl<'a> FnCx<'a> {
         let count = self
             .scope
             .iter()
-            .filter(|(_, ty)| matches!(ty, Ty::Param(_)))
-            .count();
+            .filter_map(|(_, ty)| match ty {
+                Ty::Param(index) => Some(index + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
         if count == 0 {
             vec![Ty::Int]
         } else {
@@ -6256,6 +6352,7 @@ impl<'a> FnCx<'a> {
             cx.declare(line, param, *ty, false)?;
         }
         let mut candidates: Vec<String> = names.to_vec();
+        self.extend_with_template_names(&mut candidates);
         if !candidates.iter().any(|n| n == "self") {
             candidates.push("self".to_string());
         }
@@ -6573,14 +6670,8 @@ impl<'a> FnCx<'a> {
         )
     }
 
-    fn local_function(&mut self, line: u32, func: &FuncDecl) -> CResult<TStmt> {
+    fn local_signature(&self, line: u32, func: &FuncDecl) -> CResult<LocalSignature> {
         let sigs = self.sigs;
-        if !func.generics().is_empty() {
-            return Err(CheckError::at(
-                line,
-                "a function declared inside another function cannot be generic yet",
-            ));
-        }
         let mut parameters = Vec::new();
         let mut labels = Vec::new();
         for param in func.params() {
@@ -6593,13 +6684,50 @@ impl<'a> FnCx<'a> {
             Some(tr) => sigs.resolve_type(tr, &self.scope, line)?,
             None => Ty::Void,
         };
+        Ok((parameters, labels, ret))
+    }
+
+    fn local_function(&mut self, line: u32, func: &FuncDecl) -> CResult<TStmt> {
+        if !func.generics().is_empty() {
+            return Ok(TStmt::Block(Vec::new()));
+        }
+        let (parameters, labels, ret) = self.local_signature(line, func)?;
+        let (closure, own_ty) = self.lift_local_function(line, func, &parameters, ret)?;
+        let hoisted = self
+            .scopes
+            .last()
+            .and_then(|scope| scope.get(func.name()))
+            .map(|binding| binding.local)
+            .filter(|local| self.hoisted.contains(local));
+        if let Some(local) = hoisted {
+            return Ok(TStmt::Assign {
+                local,
+                value: closure,
+            });
+        }
+        let local = self.declare(line, func.name(), own_ty, false)?;
+        self.labels.insert(local, labels);
+        Ok(TStmt::Let {
+            local,
+            init: closure,
+        })
+    }
+
+    fn lift_local_function(
+        &mut self,
+        line: u32,
+        func: &FuncDecl,
+        parameters: &[(String, Ty)],
+        ret: Ty,
+    ) -> CResult<(TExpr, Ty)> {
+        let sigs = self.sigs;
         let own_ty = sigs.func_ty(parameters.iter().map(|(_, ty)| *ty).collect(), ret);
         let names = crate::free::names_in(func.body());
         let body = func.body();
         let closure = self.lift(
             line,
             &names,
-            &parameters,
+            parameters,
             ret,
             Some((func.name(), own_ty)),
             &[],
@@ -6617,11 +6745,134 @@ impl<'a> FnCx<'a> {
                 Ok(statements)
             },
         )?;
-        let local = self.declare(line, func.name(), own_ty, false)?;
-        self.labels.insert(local, labels);
-        Ok(TStmt::Let {
-            local,
-            init: closure,
+        Ok((closure, own_ty))
+    }
+
+    fn extend_with_template_names(&self, names: &mut Vec<String>) {
+        let mut index = 0;
+        while index < names.len() {
+            let name = names[index].clone();
+            index += 1;
+            if let Some((_, template)) = self.templates.iter().rev().find(|(n, _)| *n == name) {
+                for inner in crate::free::names_in(template.body()) {
+                    if !names.contains(&inner) {
+                        names.push(inner);
+                    }
+                }
+            }
+        }
+    }
+
+    fn template_call(
+        &mut self,
+        line: u32,
+        func: Rc<FuncDecl>,
+        args: &[Arg],
+        expected: Option<Ty>,
+        explicit: Option<&[TypeRef]>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let name = func.name().to_string();
+        let outer: Vec<String> = {
+            let mut found: Vec<(usize, String)> = self
+                .scope
+                .iter()
+                .filter_map(|(n, ty)| match ty {
+                    Ty::Param(index) => Some((*index, n.clone())),
+                    _ => None,
+                })
+                .collect();
+            found.sort_by_key(|(index, _)| *index);
+            found.dedup_by_key(|(index, _)| *index);
+            found.into_iter().map(|(_, n)| n).collect()
+        };
+        let count = outer.len();
+        let mut pattern_scope = self.scope.clone();
+        pattern_scope.retain(|(n, _)| !func.generics().contains(n));
+        for (index, generic) in func.generics().iter().enumerate() {
+            pattern_scope.push((generic.clone(), Ty::Param(count + index)));
+        }
+        let mut params = Vec::new();
+        for param in func.params() {
+            params.push(ParamSig::new(
+                param.label().map(str::to_string),
+                sigs.resolve_type(param.ty(), &pattern_scope, line)?,
+            ));
+        }
+        let ret = match func.ret() {
+            Some(tr) if tr.name() == "Void" && tr.args().is_empty() => Ty::Void,
+            Some(tr) => sigs.resolve_type(tr, &pattern_scope, line)?,
+            None => Ty::Void,
+        };
+        let mut generics = outer.clone();
+        generics.extend(func.generics().iter().cloned());
+        let mut bounds: Vec<Vec<String>> = vec![Vec::new(); count];
+        bounds.extend((0..func.generics().len()).map(|i| func.bound(i).to_vec()));
+        let sig = FuncSig::new(generics.clone(), bounds, params, ret);
+        if args.len() != sig.params().len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "'{name}' takes {} argument(s), but {} were given",
+                    sig.params().len(),
+                    args.len()
+                ),
+            ));
+        }
+        let checked = self.check_values(line, &sig, sig.params(), args, Vec::new())?;
+        let mut prebound: Vec<Option<Ty>> = (0..count).map(|i| Some(Ty::Param(i))).collect();
+        prebound.resize(generics.len(), None);
+        let type_args = match explicit {
+            Some(given) => {
+                let mut all: Vec<Ty> = (0..count).map(Ty::Param).collect();
+                all.extend(self.explicit_args(line, &name, func.generics().len(), given)?);
+                all
+            }
+            None => {
+                let patterns: Vec<Ty> = sig.params().iter().map(ParamSig::ty).collect();
+                let context = expected.map(|e| (sig.ret(), e));
+                self.infer_from(
+                    prebound, line, &name, &generics, &patterns, &checked, context,
+                )?
+            }
+        };
+        if let Some((ty, protocol)) = sigs.unsatisfied_bound(sig.bounds(), &type_args, &self.bounds)
+        {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "type '{}' does not conform to the protocol '{protocol}' required by '{name}'",
+                    self.name_of(ty)
+                ),
+            ));
+        }
+        let saved = self.scope.clone();
+        self.scope.retain(|(n, _)| !func.generics().contains(n));
+        for (generic, ty) in func.generics().iter().zip(&type_args[count..]) {
+            self.scope.push((generic.clone(), *ty));
+        }
+        let instance = self.template_instance(line, &func, checked);
+        self.scope = saved;
+        instance
+    }
+
+    fn template_instance(
+        &mut self,
+        line: u32,
+        func: &FuncDecl,
+        checked: Vec<TExpr>,
+    ) -> CResult<TExpr> {
+        let (parameters, _, ret) = self.local_signature(line, func)?;
+        let mut args = Vec::with_capacity(checked.len());
+        for ((_, wanted), value) in parameters.iter().zip(checked) {
+            args.push(self.coerce(line, *wanted, value)?);
+        }
+        let (closure, _) = self.lift_local_function(line, func, &parameters, ret)?;
+        Ok(TExpr::CallValue {
+            params: parameters.iter().map(|(_, ty)| *ty).collect(),
+            func: Box::new(closure),
+            args,
+            ret,
         })
     }
 
@@ -9230,7 +9481,21 @@ impl<'a> FnCx<'a> {
         values: &[TExpr],
         context: Option<(Ty, Ty)>,
     ) -> CResult<Vec<Ty>> {
-        let mut bound = vec![None; generics.len()];
+        let bound = vec![None; generics.len()];
+        self.infer_from(bound, line, owner, generics, patterns, values, context)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn infer_from(
+        &self,
+        mut bound: Vec<Option<Ty>>,
+        line: u32,
+        owner: &str,
+        generics: &[String],
+        patterns: &[Ty],
+        values: &[TExpr],
+        context: Option<(Ty, Ty)>,
+    ) -> CResult<Vec<Ty>> {
         if let Some((result, expected)) = context {
             let mut attempt = bound.clone();
             if self.sigs.unify(result, expected, &mut attempt) {
@@ -9936,6 +10201,10 @@ impl<'a> FnCx<'a> {
             && self.sigs.func_parts(binding.ty).is_some()
         {
             return self.call_value(line, callee, binding, args);
+        }
+        if let Some((_, template)) = self.templates.iter().rev().find(|(n, _)| n == callee) {
+            let template = Rc::clone(template);
+            return self.template_call(line, template, args, expected, explicit);
         }
         if callee == "String" {
             return self.string_conversion(line, args);

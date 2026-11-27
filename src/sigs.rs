@@ -303,6 +303,10 @@ pub struct ParamSig {
 }
 
 impl ParamSig {
+    pub fn new(label: Option<String>, ty: Ty) -> Self {
+        Self { label, ty }
+    }
+
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
@@ -323,6 +327,22 @@ pub struct FuncSig {
 }
 
 impl FuncSig {
+    pub fn new(
+        generics: Vec<String>,
+        bounds: Vec<Vec<String>>,
+        params: Vec<ParamSig>,
+        ret: Ty,
+    ) -> Self {
+        Self {
+            generics,
+            bounds,
+            params,
+            ret,
+            receiver: false,
+            mutating: false,
+        }
+    }
+
     pub fn has_receiver(&self) -> bool {
         self.receiver
     }

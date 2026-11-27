@@ -6050,10 +6050,6 @@ fn closure_misuse_is_rejected_with_a_message() {
 #[test]
 fn a_local_function_checks_its_signature_and_labels() {
     assert!(
-        build_error("func main() {\n  func f<T>(_ x: T) -> T { return x }\n}")
-            .contains("cannot be generic")
-    );
-    assert!(
         build_error("func main() {\n  func f(a: Int) -> Int { return a }\n  print(f(1))\n}")
             .contains("label")
     );
@@ -7228,4 +7224,84 @@ fn parentheses_around_one_name_group_it_because_there_is_no_one_element_tuple() 
         ),
         "16\n"
     );
+}
+
+#[test]
+fn local_functions_may_call_each_other_before_the_later_one_is_declared() {
+    assert_eq!(
+        main_printing(
+            "var calls = 0\nfunc isEven(_ n: Int) -> Bool {\n  calls += 1\n  if n == 0 { return true }\n  return isOdd(n - 1)\n}\nfunc isOdd(_ n: Int) -> Bool {\n  if n == 0 { return false }\n  return isEven(n - 1)\n}\nprint(isEven(10))\nprint(isOdd(7))\nprint(isEven(7))\nprint(calls)"
+        ),
+        "true\ntrue\nfalse\n14\n"
+    );
+}
+
+#[test]
+fn a_local_function_called_before_a_function_it_needs_is_declared_is_rejected() {
+    let source = "func main() {\n  func a() -> Int { return b() }\n  print(a())\n  func b() -> Int { return 1 }\n}";
+    assert!(build_error(source).contains("before"));
+}
+
+#[test]
+fn a_local_function_may_have_type_parameters_inferred_at_each_call() {
+    assert_eq!(
+        main_printing(
+            "var calls = 0\nfunc twice<T>(_ x: T, _ f: (T) -> T) -> T {\n  calls += 1\n  return f(f(x))\n}\nfunc pick<A, B>(_ a: A, _ b: B) -> B { return b }\nprint(twice(3) { $0 + 1 })\nprint(twice(\"a\") { $0 + \"b\" })\nprint(pick(1, \"two\"))\nprint(pick(true, [1, 2]).count)\nprint(calls)"
+        ),
+        "5\nabb\ntwo\n2\n2\n"
+    );
+}
+
+#[test]
+fn a_generic_local_function_may_recurse_use_bounds_and_be_called_from_a_closure() {
+    assert_eq!(
+        main_printing(
+            "let base = 10\nfunc largest<T: Comparable>(_ xs: [T]) -> T {\n  var best = xs[0]\n  for x in xs { if x > best { best = x } }\n  return best\n}\nfunc depth<T>(_ x: T, _ n: Int) -> Int {\n  if n == 0 { return base }\n  return depth(x, n - 1) + 1\n}\nlet viaClosure = { (n: Int) -> Int in largest([n, base, 3]) }\nprint(largest([3, 9, 2]))\nprint(largest([\"b\", \"z\", \"a\"]))\nprint(depth(\"x\", 3))\nprint(viaClosure(42))"
+        ),
+        "9\nz\n13\n42\n"
+    );
+}
+
+#[test]
+fn a_generic_local_function_is_checked_against_its_bounds_and_type_parameters() {
+    for (body, message) in [
+        (
+            "func big<T: Comparable>(_ a: T) -> T { return a }\n  let r = big([1])",
+            "does not conform",
+        ),
+        (
+            "func none<T>() -> T? { return nil }\n  let v = none()",
+            "cannot infer the type parameter",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        assert!(build_error(&source).contains(message), "{body}");
+    }
+}
+
+#[test]
+fn a_generic_local_function_works_inside_a_generic_function_and_with_explicit_arguments() {
+    assert_eq!(
+        run(
+            "func wrap<T>(_ x: T) -> [T] {\n  func pair<U>(_ a: T, _ b: U) -> [T] { return [a] }\n  func noop() { }\n  func empty<U>() -> [U] { return [] }\n  noop()\n  let e: [Int] = empty<Int>()\n  return pair(x, e.count) + pair(x, \"s\")\n}\nfunc main() {\n  print(wrap(7).count)\n  print(wrap(\"a\")[1])\n}"
+        ),
+        "2\na\n"
+    );
+}
+
+#[test]
+fn generic_local_functions_may_call_each_other_through_a_closure() {
+    assert_eq!(
+        main_printing(
+            "var seed = 5\nfunc inner<T>(_ x: T) -> Int { return seed }\nfunc outer<T>(_ x: T) -> Int { return inner(x) + 1 }\nlet f = { outer(\"s\") }\nseed = 7\nprint(f())"
+        ),
+        "8\n"
+    );
+}
+
+#[test]
+fn a_generic_local_function_checks_the_number_of_arguments() {
+    let error =
+        build_error("func main() {\n  func f<T>(_ a: T) -> T { return a }\n  let x = f(1, 2)\n}");
+    assert!(error.contains("takes 1 argument(s), but 2 were given"));
 }
