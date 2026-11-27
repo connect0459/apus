@@ -7145,3 +7145,43 @@ fn zip_rejects_what_is_not_a_sequence() {
         assert!(error.contains(message), "{body}: {error}");
     }
 }
+
+#[test]
+fn a_tuple_pattern_nests_tuples_and_enum_patterns_with_their_own_let() {
+    assert_eq!(
+        run(
+            "enum Shape {\n  case circle(Int)\n  case square(Int)\n}\nfunc nested(_ t: ((Int, Int), String)) -> String {\n  switch t {\n  case ((0, let y), _): return \"origin column \" + String(y)\n  case ((let a, let b), \"x\") where a == b: return \"diagonal x\"\n  case (_, let s): return s\n  }\n}\nfunc pair(_ t: (Shape, Int)) -> Int {\n  switch t {\n  case (.circle(let r), let n): return r * n\n  case (.square(let w), 0...3): return w\n  case (.square, _): return -1\n  default: return 0\n  }\n}\nfunc main() {\n  print(nested(((0, 5), \"q\")))\n  print(nested(((2, 2), \"x\")))\n  print(nested(((2, 3), \"x\")))\n  print(pair((.circle(3), 4)))\n  print(pair((.square(7), 2)))\n  print(pair((Shape.square(7), 9)))\n  if case (.circle(let r), (1, let k)) = (Shape.circle(5), (1, 8)) { print(r + k) }\n  if case ((_, _), .square(let w)) = ((1, 2), Shape.square(6)) { print(w) } else { print(\"no\") }\n}"
+        ),
+        "origin column 5\ndiagonal x\nx\n12\n7\n-1\n13\n6\n"
+    );
+}
+
+#[test]
+fn nested_tuple_patterns_are_checked() {
+    for (body, message) in [
+        (
+            "let t = (1, 2)\n  switch t {\n  case ((let a, let b), _): print(a)\n  default: print(0)\n  }",
+            "cannot match",
+        ),
+        (
+            "let t = ((1, 2), 3)\n  switch t {\n  case ((let a, _), _), (_, let a): print(a)\n  default: print(0)\n  }",
+            "cannot bind names",
+        ),
+        (
+            "let t = ((1, 2), 3)\n  switch t {\n  case ((let a, _, _), _): print(a)\n  default: print(0)\n  }",
+            "element(s)",
+        ),
+        (
+            "let t = (1, 2)\n  switch t {\n  case (.some(let a), _): print(a)\n  default: print(0)\n  }",
+            "cannot match",
+        ),
+        (
+            "let t = ((1, 2), 3)\n  switch t {\n  case ((let a, _), let a): print(a)\n  default: print(0)\n  }",
+            "a",
+        ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}

@@ -81,7 +81,7 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
             match label {
                 CaseLabel::Values(values) => values.iter().for_each(|v| expression(v, found)),
                 CaseLabel::Tuples(alternatives) => {
-                    for part in alternatives.iter().flatten() {
+                    for part in TuplePart::leaves(alternatives) {
                         if let TuplePart::Value(value) = part {
                             expression(value, found);
                         }
@@ -136,7 +136,7 @@ fn statement(stmt: &Stmt, found: &mut Vec<String>) {
                         }
                     }
                     CaseLabel::Tuples(alternatives) => {
-                        for part in alternatives.iter().flatten() {
+                        for part in TuplePart::leaves(alternatives) {
                             if let TuplePart::Value(value) = part {
                                 expression(value, found);
                             }
@@ -162,7 +162,7 @@ fn condition(condition: &Condition, found: &mut Vec<String>) {
             match label {
                 CaseLabel::Values(values) => values.iter().for_each(|v| expression(v, found)),
                 CaseLabel::Tuples(alternatives) => {
-                    for part in alternatives.iter().flatten() {
+                    for part in TuplePart::leaves(alternatives) {
                         if let TuplePart::Value(value) = part {
                             expression(value, found);
                         }

@@ -762,6 +762,17 @@ impl Parser<'_> {
         }
     }
 
+    fn at_enum_pattern(&self) -> bool {
+        match self.peek() {
+            Some(Token::Punct(p)) => p == ".",
+            Some(Token::Ident(s)) => {
+                !KEYWORDS.contains(&s.as_str())
+                    && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ".")
+            }
+            _ => false,
+        }
+    }
+
     fn tuple_pattern(&mut self) -> PResult<Vec<TuplePart>> {
         self.expect_punct("(")?;
         let mut parts = Vec::new();
@@ -774,6 +785,13 @@ impl Parser<'_> {
                 parts.push(TuplePart::Wild);
             } else if self.eat_keyword("let") {
                 parts.push(TuplePart::Bind(self.name()?));
+            } else if self.is_punct("(") {
+                self.enter()?;
+                let nested = self.tuple_pattern();
+                self.leave();
+                parts.push(TuplePart::Tuple(nested?));
+            } else if self.at_enum_pattern() {
+                parts.push(TuplePart::Enum(self.pattern(false)?));
             } else {
                 parts.push(TuplePart::Value(self.range()?));
             }

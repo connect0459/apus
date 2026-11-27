@@ -284,6 +284,12 @@ fn guarded(guard: TExpr, matched: LocalId, body: Vec<TStmt>) -> TStmt {
     }
 }
 
+struct PartNode {
+    local: LocalId,
+    ty: Ty,
+    children: Vec<PartNode>,
+}
+
 fn synthetic_cx<'a>(sigs: &'a Signatures, name: &str, ret: Ty) -> FnCx<'a> {
     FnCx {
         sigs,
@@ -3720,31 +3726,10 @@ impl<'a> FnCx<'a> {
         cases: &[SwitchCase],
         out: &mut Vec<TStmt>,
     ) -> CResult<()> {
-        let ty = subject.ty();
-        let Some(elements) = self.sigs.tuple_elements(ty) else {
-            return Ok(());
-        };
         if cases.is_empty() {
             return Err(CheckError::at(line, "a switch needs at least one case"));
         }
-        let held = self.temp(ty);
-        out.push(TStmt::Let {
-            local: held,
-            init: subject,
-        });
-        let mut parts = Vec::with_capacity(elements.len());
-        for (index, element) in elements.iter().enumerate() {
-            let local = self.temp(*element);
-            out.push(TStmt::Let {
-                local,
-                init: TExpr::Field {
-                    base: Box::new(TExpr::Local(held, ty)),
-                    index,
-                    ty: *element,
-                },
-            });
-            parts.push(local);
-        }
+        let nodes = self.explode_tuple(subject, out);
         let flag = cases
             .iter()
             .any(|case| {
@@ -3773,7 +3758,7 @@ impl<'a> FnCx<'a> {
                 }
                 CaseLabel::Tuples(alternatives) => {
                     self.scopes.push(HashMap::new());
-                    let checked = self.tuple_case(case, alternatives, (&elements, &parts), flag);
+                    let checked = self.tuple_case(case, alternatives, &nodes, flag);
                     self.scopes.pop();
                     branches.push(checked?);
                 }
@@ -3804,16 +3789,52 @@ impl<'a> FnCx<'a> {
         Ok(())
     }
 
+    fn explode_tuple(&mut self, subject: TExpr, out: &mut Vec<TStmt>) -> Vec<PartNode> {
+        let ty = subject.ty();
+        let held = self.temp(ty);
+        out.push(TStmt::Let {
+            local: held,
+            init: subject,
+        });
+        self.explode_local(held, ty, out)
+    }
+
+    fn explode_local(&mut self, held: LocalId, ty: Ty, out: &mut Vec<TStmt>) -> Vec<PartNode> {
+        let elements = self.sigs.tuple_elements(ty).unwrap_or_default();
+        let mut nodes = Vec::with_capacity(elements.len());
+        for (index, element) in elements.iter().enumerate() {
+            let local = self.temp(*element);
+            out.push(TStmt::Let {
+                local,
+                init: TExpr::Field {
+                    base: Box::new(TExpr::Local(held, ty)),
+                    index,
+                    ty: *element,
+                },
+            });
+            let children = if self.sigs.tuple_elements(*element).is_some() {
+                self.explode_local(local, *element, out)
+            } else {
+                Vec::new()
+            };
+            nodes.push(PartNode {
+                local,
+                ty: *element,
+                children,
+            });
+        }
+        nodes
+    }
+
     fn tuple_case(
         &mut self,
         case: &SwitchCase,
         alternatives: &[Vec<TuplePart>],
-        subject: (&[Ty], &[LocalId]),
+        nodes: &[PartNode],
         flag: Option<LocalId>,
     ) -> CResult<(TExpr, Vec<TStmt>)> {
-        let (elements, parts) = subject;
         let line = case.line();
-        let (condition, mut body) = self.tuple_bindings(line, alternatives, elements, parts)?;
+        let (condition, mut body) = self.tuple_bindings(line, alternatives, nodes)?;
         let Some(guard) = case.guard() else {
             body.extend(self.block(case.body())?);
             return Ok((condition, body));
@@ -3825,8 +3846,8 @@ impl<'a> FnCx<'a> {
             return Ok((condition, body));
         }
         let split = alternatives.len() - 1;
-        let (head, _) = self.tuple_bindings(line, &alternatives[..split], elements, parts)?;
-        let (last, _) = self.tuple_bindings(line, &alternatives[split..], elements, parts)?;
+        let (head, _) = self.tuple_bindings(line, &alternatives[..split], nodes)?;
+        let (last, _) = self.tuple_bindings(line, &alternatives[split..], nodes)?;
         let guard = self.condition(guard)?;
         body.extend(self.block(case.body())?);
         let condition = compare(BinOp::Or, head, compare(BinOp::And, last, guard));
@@ -3837,64 +3858,102 @@ impl<'a> FnCx<'a> {
         &mut self,
         line: u32,
         alternatives: &[Vec<TuplePart>],
-        elements: &[Ty],
-        parts: &[LocalId],
+        nodes: &[PartNode],
     ) -> CResult<(TExpr, Vec<TStmt>)> {
-        let mut tests: Vec<TExpr> = Vec::new();
-        let mut bindings: Vec<(&str, usize)> = Vec::new();
-        for alternative in alternatives {
-            if alternative.len() != elements.len() {
-                return Err(CheckError::at(
-                    line,
-                    format!(
-                        "this pattern has {} element(s), but the tuple has {}",
-                        alternative.len(),
-                        elements.len()
-                    ),
-                ));
-            }
-            let mut condition: Option<TExpr> = None;
-            for (index, part) in alternative.iter().enumerate() {
-                match part {
-                    TuplePart::Wild => {}
-                    TuplePart::Bind(name) => {
-                        if alternatives.len() > 1 {
-                            return Err(CheckError::at(
-                                line,
-                                "a case with several tuple patterns cannot bind names",
-                            ));
-                        }
-                        bindings.push((name, index));
-                    }
-                    TuplePart::Value(expr) => {
-                        let mut bools = [false, false];
-                        let test =
-                            self.value_test(line, parts[index], elements[index], expr, &mut bools)?;
-                        condition = Some(match condition {
-                            None => test,
-                            Some(before) => compare(BinOp::And, before, test),
-                        });
-                    }
-                }
-            }
-            tests.push(condition.unwrap_or(TExpr::Bool(true)));
-        }
         let mut combined: Option<TExpr> = None;
-        for test in tests {
+        let mut body = Vec::new();
+        for alternative in alternatives {
+            let mut tests = Vec::new();
+            self.match_parts(
+                line,
+                alternative,
+                nodes,
+                alternatives.len() == 1,
+                (&mut tests, &mut body),
+            )?;
+            let test = tests
+                .into_iter()
+                .reduce(|before, test| compare(BinOp::And, before, test))
+                .unwrap_or(TExpr::Bool(true));
             combined = Some(match combined {
                 None => test,
                 Some(before) => compare(BinOp::Or, before, test),
             });
         }
-        let mut body = Vec::new();
-        for (name, index) in bindings {
-            let local = self.declare(line, name, elements[index], false)?;
-            body.push(TStmt::Let {
-                local,
-                init: TExpr::Local(parts[index], elements[index]),
-            });
-        }
         Ok((combined.unwrap_or(TExpr::Bool(true)), body))
+    }
+
+    fn match_parts(
+        &mut self,
+        line: u32,
+        parts: &[TuplePart],
+        nodes: &[PartNode],
+        may_bind: bool,
+        found: (&mut Vec<TExpr>, &mut Vec<TStmt>),
+    ) -> CResult<()> {
+        let (tests, body) = found;
+        if parts.len() != nodes.len() {
+            return Err(CheckError::at(
+                line,
+                format!(
+                    "this pattern has {} element(s), but the tuple has {}",
+                    parts.len(),
+                    nodes.len()
+                ),
+            ));
+        }
+        let no_names = "a case with several tuple patterns cannot bind names";
+        for (part, node) in parts.iter().zip(nodes) {
+            match part {
+                TuplePart::Wild => {}
+                TuplePart::Bind(name) => {
+                    if !may_bind {
+                        return Err(CheckError::at(line, no_names));
+                    }
+                    let local = self.declare(line, name, node.ty, false)?;
+                    body.push(TStmt::Let {
+                        local,
+                        init: TExpr::Local(node.local, node.ty),
+                    });
+                }
+                TuplePart::Value(expr) => {
+                    let mut bools = [false, false];
+                    tests.push(self.value_test(line, node.local, node.ty, expr, &mut bools)?);
+                }
+                TuplePart::Tuple(inner) => {
+                    if node.children.is_empty() {
+                        return Err(CheckError::at(
+                            line,
+                            format!("a tuple pattern cannot match a {}", self.name_of(node.ty)),
+                        ));
+                    }
+                    self.match_parts(line, inner, &node.children, may_bind, (tests, body))?;
+                }
+                TuplePart::Enum(pattern) => {
+                    let Some(sig) = self.sigs.enum_of(node.ty) else {
+                        return Err(CheckError::at(
+                            line,
+                            format!("an enum pattern cannot match a {}", self.name_of(node.ty)),
+                        ));
+                    };
+                    let probe = SwitchCase::new(line, CaseLabel::Patterns(Vec::new()), Vec::new());
+                    let mut covered = vec![false; sig.cases().len()];
+                    let mut checked = self.case_patterns(
+                        &probe,
+                        std::slice::from_ref(pattern),
+                        (&sig, node.local, node.ty),
+                        &mut covered,
+                    )?;
+                    let (test, prelude) = checked.remove(0);
+                    if !prelude.is_empty() && !may_bind {
+                        return Err(CheckError::at(line, no_names));
+                    }
+                    tests.push(test);
+                    body.extend(prelude);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn case_condition(
@@ -3945,31 +4004,14 @@ impl<'a> FnCx<'a> {
                 Ok((test, prelude))
             }
             CaseLabel::Tuples(alternatives) => {
-                let Some(elements) = self.sigs.tuple_elements(ty) else {
+                if self.sigs.tuple_elements(ty).is_none() {
                     return Err(CheckError::at(
                         line,
                         format!("a tuple pattern cannot match a {}", self.name_of(ty)),
                     ));
-                };
-                let held = self.temp(ty);
-                out.push(TStmt::Let {
-                    local: held,
-                    init: subject,
-                });
-                let mut parts = Vec::with_capacity(elements.len());
-                for (index, element) in elements.iter().enumerate() {
-                    let local = self.temp(*element);
-                    out.push(TStmt::Let {
-                        local,
-                        init: TExpr::Field {
-                            base: Box::new(TExpr::Local(held, ty)),
-                            index,
-                            ty: *element,
-                        },
-                    });
-                    parts.push(local);
                 }
-                self.tuple_bindings(line, alternatives, &elements, &parts)
+                let nodes = self.explode_tuple(subject, out);
+                self.tuple_bindings(line, alternatives, &nodes)
             }
             CaseLabel::Values(values) => {
                 if !matches!(ty, Ty::Int | Ty::Bool | Ty::Str | Ty::Char) {

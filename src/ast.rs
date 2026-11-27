@@ -722,6 +722,25 @@ pub enum TuplePart {
     Wild,
     Bind(String),
     Value(Expr),
+    Tuple(Vec<TuplePart>),
+    Enum(Pattern),
+}
+
+impl TuplePart {
+    pub fn leaves(alternatives: &[Vec<TuplePart>]) -> Vec<&TuplePart> {
+        let mut found = Vec::new();
+        for part in alternatives.iter().flatten() {
+            part.collect_leaves(&mut found);
+        }
+        found
+    }
+
+    fn collect_leaves<'a>(&'a self, found: &mut Vec<&'a TuplePart>) {
+        match self {
+            TuplePart::Tuple(parts) => parts.iter().for_each(|part| part.collect_leaves(found)),
+            leaf => found.push(leaf),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

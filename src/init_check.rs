@@ -321,6 +321,18 @@ impl Scan<'_> {
         self.scope.members.contains(&name) && !self.locals.iter().any(|set| set.contains(name))
     }
 
+    fn declare_tuple_part(&mut self, part: &TuplePart) {
+        match part {
+            TuplePart::Bind(name) => self.declare(name),
+            TuplePart::Enum(pattern) => {
+                for name in pattern.bindings().unwrap_or_default().iter().flatten() {
+                    self.declare(name);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn declare(&mut self, name: &str) {
         if let Some(set) = self.locals.last_mut() {
             set.insert(name.to_string());
@@ -466,10 +478,8 @@ impl Scan<'_> {
                         }
                     }
                     CaseLabel::Tuples(alternatives) => {
-                        for part in alternatives.iter().flatten() {
-                            if let TuplePart::Bind(name) = part {
-                                self.declare(name);
-                            }
+                        for part in TuplePart::leaves(alternatives) {
+                            self.declare_tuple_part(part);
                         }
                     }
                     _ => {}
@@ -539,10 +549,8 @@ impl Scan<'_> {
                         }
                     }
                     if let CaseLabel::Tuples(alternatives) = case.label() {
-                        for part in alternatives.iter().flatten() {
-                            if let TuplePart::Bind(name) = part {
-                                self.declare(name);
-                            }
+                        for part in TuplePart::leaves(alternatives) {
+                            self.declare_tuple_part(part);
                         }
                     }
                     if let Some(guard) = case.guard() {
@@ -580,10 +588,8 @@ impl Scan<'_> {
                             }
                         }
                         CaseLabel::Tuples(alternatives) => {
-                            for part in alternatives.iter().flatten() {
-                                if let TuplePart::Bind(name) = part {
-                                    self.declare(name);
-                                }
+                            for part in TuplePart::leaves(alternatives) {
+                                self.declare_tuple_part(part);
                             }
                         }
                         _ => {}
