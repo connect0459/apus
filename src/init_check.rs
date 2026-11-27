@@ -605,6 +605,15 @@ impl Scan<'_> {
             ExprKind::Ident(name) => name == SELF || self.is_member(name),
             ExprKind::Unwrap(inner) => self.expr_uses_self(inner),
             ExprKind::Coalesce { lhs, rhs } => self.expr_uses_self(lhs) || self.expr_uses_self(rhs),
+            ExprKind::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.expr_uses_self(cond)
+                    || self.expr_uses_self(then)
+                    || self.expr_uses_self(otherwise)
+            }
             ExprKind::OptionalChain { subject, link } => {
                 self.expr_uses_self(subject) || self.expr_uses_self(link)
             }

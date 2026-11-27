@@ -45,6 +45,8 @@ impl LexError {
     }
 }
 
+pub const TERNARY: &str = "? ";
+
 const THREE_CHAR_PUNCTS: [&str; 4] = ["..<", "...", "===", "!=="];
 const TWO_CHAR_PUNCTS: [&str; 13] = [
     "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "??",
@@ -235,11 +237,15 @@ fn lex_from(src: &str, first_line: u32) -> Result<Vec<Spanned>, LexError> {
                 .iter()
                 .chain(TWO_CHAR_PUNCTS.iter())
                 .find(|p| rest.starts_with(**p));
-            let text = match matched {
+            let mut text = match matched {
                 Some(p) => p.to_string(),
                 None => c.to_string(),
             };
             i += text.chars().count();
+            let spaced = |at: usize| chars.get(at).is_some_and(|c| c.is_whitespace());
+            if text == "?" && i >= 2 && spaced(i - 2) && spaced(i) {
+                text = TERNARY.to_string();
+            }
             out.push(Spanned {
                 token: Token::Punct(text),
                 line,
@@ -380,5 +386,25 @@ mod tests {
     #[test]
     fn unterminated_block_comment_is_an_error() {
         assert!(lex("/* abc").is_err());
+    }
+
+    #[test]
+    fn a_question_mark_with_spaces_on_both_sides_is_the_ternary_mark() {
+        assert_eq!(
+            tokens("a ? b : c"),
+            vec![
+                ident("a"),
+                punct(TERNARY),
+                ident("b"),
+                punct(":"),
+                ident("c")
+            ]
+        );
+        assert_eq!(
+            tokens("a?.b"),
+            vec![ident("a"), punct("?"), punct("."), ident("b")]
+        );
+        assert_eq!(tokens("Int? x"), vec![ident("Int"), punct("?"), ident("x")]);
+        assert_eq!(tokens("a ?? b"), vec![ident("a"), punct("??"), ident("b")]);
     }
 }

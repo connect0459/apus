@@ -213,6 +213,15 @@ fn expression(expr: &Expr, found: &mut Vec<String>) {
             expression(lhs, found);
             expression(rhs, found);
         }
+        ExprKind::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
+            expression(cond, found);
+            expression(then, found);
+            expression(otherwise, found);
+        }
         ExprKind::OptionalChain { subject, link } => {
             expression(subject, found);
             expression(link, found);

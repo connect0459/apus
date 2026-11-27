@@ -2911,6 +2911,58 @@ impl<'a> FnCx<'a> {
         })
     }
 
+    fn ternary(
+        &mut self,
+        line: u32,
+        cond: &Expr,
+        then: &Expr,
+        otherwise: &Expr,
+        expected: Option<Ty>,
+    ) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        self.expected = Some(Ty::Bool);
+        let test = self.value(cond)?;
+        self.expect(line, Ty::Bool, test.ty())?;
+        let optional_of = |ty: Ty| match sigs.unwrapped(ty) {
+            Some(_) => Ok(ty),
+            None => sigs.optional_of(ty),
+        };
+        let then_is_nil = matches!(then.kind(), ExprKind::Nil);
+        let (a, b) = if then_is_nil && !matches!(otherwise.kind(), ExprKind::Nil) {
+            self.expected = expected;
+            let b = self.value(otherwise)?;
+            self.expected = Some(optional_of(b.ty())?);
+            let a = self.value(then)?;
+            (a, b)
+        } else {
+            self.expected = expected;
+            let a = self.value(then)?;
+            self.expected = Some(if matches!(otherwise.kind(), ExprKind::Nil) {
+                optional_of(a.ty())?
+            } else {
+                a.ty()
+            });
+            let b = self.value(otherwise)?;
+            (a, b)
+        };
+        let ty = if self.convertible(a.ty(), b.ty()) {
+            a.ty()
+        } else if self.convertible(b.ty(), a.ty()) {
+            b.ty()
+        } else {
+            self.expect(line, a.ty(), b.ty())?;
+            a.ty()
+        };
+        let then = self.coerce(line, ty, a)?;
+        let otherwise = self.coerce(line, ty, b)?;
+        Ok(TExpr::Select {
+            cond: Box::new(test),
+            then: Box::new(then),
+            otherwise: Box::new(otherwise),
+            ty,
+        })
+    }
+
     fn boxable(&self, expected: Ty, found: Ty) -> bool {
         self.sigs
             .existential_protocol(expected)
@@ -9253,6 +9305,11 @@ impl<'a> FnCx<'a> {
                 self.field_of(line, base, name)
             }
             ExprKind::Coalesce { lhs, rhs } => self.coalesce(line, lhs, rhs),
+            ExprKind::Ternary {
+                cond,
+                then,
+                otherwise,
+            } => self.ternary(line, cond, then, otherwise, expected),
             ExprKind::Cast {
                 expr,
                 ty,

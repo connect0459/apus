@@ -7398,3 +7398,55 @@ fn the_library_members_reject_wrong_arguments() {
         assert!(build_error(&source).contains(message), "{body}");
     }
 }
+
+#[test]
+fn a_ternary_picks_one_of_two_values_and_evaluates_only_that_one() {
+    assert_eq!(
+        main_printing(
+            "var calls = 0\nfunc side(_ n: Int) -> Int {\n  calls += 1\n  return n\n}\nlet a = 5\nprint(a > 3 ? side(1) : side(2))\nprint(a > 9 ? side(1) : side(2))\nprint(calls)\nprint(a > 3 ? \"big\" : \"small\")\nlet nested = a < 3 ? 0 : a < 10 ? 1 : 2\nprint(nested)\nprint(1 + (a > 3 ? 10 : 20) * 2)\nprint(a > 3 && a < 9 ? 1 : 0)\nlet flag: Bool = a == 5 ? true : false\nprint(flag)"
+        ),
+        "1\n2\n2\nbig\n1\n21\n1\ntrue\n"
+    );
+}
+
+#[test]
+fn a_ternary_takes_optionals_enum_cases_and_values_of_any_kind() {
+    assert_eq!(
+        run(
+            "enum Color {\n  case red\n  case green\n}\nclass Box {\n  var n: Int\n}\nstruct P {\n  var x: Int\n}\nfunc main() {\n  let t = true\n  let o: Int? = t ? 4 : nil\n  print(o ?? 0)\n  let p: Int? = t ? nil : 4\n  print(p ?? -1)\n  let c: Color = t ? .green : .red\n  print(c == .green)\n  let b = t ? Box(n: 1) : Box(n: 2)\n  print(b.n)\n  let s = t ? P(x: 3) : P(x: 4)\n  print(s.x)\n  let words = t ? [\"a\", \"b\"] : []\n  print(words.count)\n  let m = t ? \"x\" + \"y\" : \"z\"\n  print(m)\n  let q = t ? o : nil\n  print(q ?? 0)\n  let f = t ? { (x: Int) -> Int in x + 1 } : { (x: Int) -> Int in x }\n  print(f(1))\n}"
+        ),
+        "4\n-1\ntrue\n1\n3\n2\nxy\n4\n2\n"
+    );
+}
+
+#[test]
+fn a_ternary_may_span_lines_and_sit_in_arguments_and_returns() {
+    assert_eq!(
+        main_printing(
+            "func pick(_ a: Int, _ b: Int) -> Int {\n  return a > b ? a\n    : b\n}\nprint(pick(3, 8))\nlet xs = [1, 2, 3]\nprint(xs.map { $0 % 2 == 0 ? $0 * 10 : $0 }.reduce(0, +))\nprint(pick(xs.count > 2 ? 1 : 2, 0))\nlet maybe: Int? = nil\nprint(maybe ?? 0)\nprint(maybe == nil ? \"empty\" : \"full\")"
+        ),
+        "8\n24\n1\n0\nempty\n"
+    );
+}
+
+#[test]
+fn a_ternary_is_checked_for_its_condition_and_branch_types() {
+    for (body, message) in [
+        ("let x = 1 ? 2 : 3", "expected Bool"),
+        ("let x = true ? 1 : \"a\"", "expected"),
+        ("let x = true ? nil : nil", "nil"),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        assert!(build_error(&source).contains(message), "{body}");
+    }
+}
+
+#[test]
+fn a_ternary_releases_what_it_creates_and_keeps_what_it_borrows() {
+    assert_eq!(
+        run(
+            "class Tracked {\n  var n: Int\n  deinit { print(\"free \\(n)\") }\n}\nfunc make(_ c: Bool, _ k: Tracked) -> Tracked {\n  return c ? k : Tracked(n: 9)\n}\nfunc label(_ c: Bool) -> String {\n  let s = \"kept\"\n  return c ? s : \"x\" + \"y\"\n}\nfunc inner() {\n  let k = Tracked(n: 1)\n  let a = make(true, k)\n  let b = make(false, k)\n  print(a.n + b.n)\n  var total = 0\n  var i = 0\n  while i < 3 {\n    let t = i % 2 == 0 ? Tracked(n: 100 + i) : k\n    total += t.n\n    i += 1\n  }\n  print(total)\n  print(label(true) + label(false))\n}\nfunc main() {\n  inner()\n  print(\"done\")\n}"
+        ),
+        "10\nfree 100\nfree 102\n203\nkeptxy\nfree 9\nfree 1\ndone\n"
+    );
+}

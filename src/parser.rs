@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::{Piece, Spanned, Token};
+use crate::lexer::{Piece, Spanned, TERNARY, Token};
 use crate::limits::{MAX_DEPTH, MAX_NESTING};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1271,9 +1271,37 @@ impl Parser<'_> {
     }
 
     fn expr(&mut self) -> PResult<Expr> {
-        let expr = self.binary(LEVEL_OR)?;
+        let expr = self.ternary()?;
         self.check_depth(expr.depth())?;
         Ok(expr)
+    }
+
+    fn ternary(&mut self) -> PResult<Expr> {
+        let cond = self.binary(LEVEL_OR)?;
+        if !(self.on_same_line() && self.is_punct(TERNARY)) {
+            return Ok(cond);
+        }
+        self.pos += 1;
+        self.enter()?;
+        let branches = self.ternary_branches();
+        self.leave();
+        let (then, otherwise) = branches?;
+        let line = cond.line();
+        Ok(Expr::new(
+            line,
+            ExprKind::Ternary {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                otherwise: Box::new(otherwise),
+            },
+        ))
+    }
+
+    fn ternary_branches(&mut self) -> PResult<(Expr, Expr)> {
+        let then = self.expr()?;
+        self.expect_punct(":")?;
+        let otherwise = self.expr()?;
+        Ok((then, otherwise))
     }
 
     fn binary(&mut self, level: usize) -> PResult<Expr> {

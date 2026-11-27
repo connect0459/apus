@@ -835,6 +835,11 @@ fn depth_of(kind: &ExprKind) -> u32 {
         | ExprKind::Unary { expr, .. }
         | ExprKind::Cast { expr, .. }
         | ExprKind::Member { base: expr, .. } => expr.depth,
+        ExprKind::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => cond.depth.max(then.depth).max(otherwise.depth),
         ExprKind::Coalesce { lhs, rhs } | ExprKind::Binary { lhs, rhs, .. } => {
             lhs.depth.max(rhs.depth)
         }
@@ -997,6 +1002,11 @@ pub enum ExprKind {
     Coalesce {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+    },
+    Ternary {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        otherwise: Box<Expr>,
     },
     Cast {
         expr: Box<Expr>,
