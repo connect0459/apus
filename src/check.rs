@@ -11444,10 +11444,13 @@ mod tests {
     }
 
     #[test]
-    fn print_takes_exactly_one_unlabeled_argument() {
-        assert!(check_main("print()").is_err());
-        assert!(check_main("print(1, 2)").is_err());
+    fn print_takes_values_then_the_separator_and_terminator_labels() {
+        assert!(check_main("print()").is_ok());
+        assert!(check_main("print(1, 2)").is_ok());
+        assert!(check_main("print(1, separator: \"-\", terminator: \"\")").is_ok());
         assert!(check_main("print(x: 1)").is_err());
+        assert!(check_main("print(separator: \"-\", 1)").is_err());
+        assert!(check_main("print(1, terminator: \"a\", terminator: \"b\")").is_err());
     }
 
     #[test]
