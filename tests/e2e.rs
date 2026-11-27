@@ -6531,8 +6531,8 @@ fn tuple_misuse_is_rejected_with_a_message() {
             "let d = Dictionary(uniqueKeysWithValues: 3)",
             "needs an array of pairs",
         ),
-        ("print(zip([1]))", "zip takes two arrays"),
-        ("print(zip(1, 2))", "zip takes two arrays"),
+        ("print(zip([1]))", "zip takes two sequences"),
+        ("print(zip(1, 2))", "zip takes two sequences"),
         (
             "let xs = [1]\n  print(xs.enumerated(1))",
             "enumerated takes no arguments",
@@ -7116,6 +7116,29 @@ fn a_where_clause_does_not_make_a_switch_exhaustive_and_must_be_a_bool() {
             "let o: Int? = 1\n  switch o {\n  case .some(let v) where w > 0: print(v)\n  default: print(0)\n  }",
             "w",
         ),
+    ] {
+        let source = format!("func main() {{\n  {body}\n}}");
+        let error = build_error(&source);
+        assert!(error.contains(message), "{body}: {error}");
+    }
+}
+
+#[test]
+fn zip_pairs_a_range_a_string_a_set_and_a_dictionary_with_any_sequence() {
+    assert_eq!(
+        run(
+            "func main() {\n  let names = [\"a\", \"b\", \"c\"]\n  for (i, n) in zip(0..<3, names) { print(String(i) + n) }\n  for (n, i) in zip(names, 1...2) { print(n + String(i)) }\n  for (c, k) in zip(\"xyz\", [10, 20]) { print(String(c) + String(k)) }\n  let s: Set<Int> = [7]\n  for (v, w) in zip(s, \"q\") { print(String(v) + String(w)) }\n  let d = [\"k\": 1]\n  for (pair, flag) in zip(d, [true]) { print(pair.0 + String(pair.1) + String(flag)) }\n  let lo = 2\n  let pairs = zip(lo..<5, lo...6)\n  print(pairs.count)\n  print(pairs[2].0 + pairs[2].1)\n  print(zip(\"ab\", \"cd\").count)\n  print(zip(0..<0, names).count)\n}"
+        ),
+        "0a\n1b\n2c\na1\nb2\nx10\ny20\n7q\nk1true\n3\n8\n2\n0\n"
+    );
+}
+
+#[test]
+fn zip_rejects_what_is_not_a_sequence() {
+    for (body, message) in [
+        ("print(zip(1, [2]).count)", "zip takes two sequences"),
+        ("print(zip([1], true).count)", "zip takes two sequences"),
+        ("print(zip(0..<\"a\", [1]).count)", "expected Int"),
     ] {
         let source = format!("func main() {{\n  {body}\n}}");
         let error = build_error(&source);

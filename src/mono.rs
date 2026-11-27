@@ -4,14 +4,14 @@ use std::rc::Rc;
 
 use crate::ast::BinOp;
 use crate::check::{
-    EntryOp, HofOp, SetOp, boxed_requirement, contains_function, entry_function, env_drop_function,
-    equality_function, hash_function, higher_order_function, joined_function, pairs_function,
-    repeating_function, set_from_array_function, set_function, split_function,
-    table_listing_function,
+    EntryOp, HofOp, Listing, SetOp, boxed_requirement, characters_function, contains_function,
+    entry_function, env_drop_function, equality_function, hash_function, higher_order_function,
+    joined_function, pairs_function, range_function, repeating_function, set_from_array_function,
+    set_function, split_function, table_listing_function,
 };
 use crate::sigs::{
-    COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, KEYS, REPEATING, SPLIT,
-    Signatures, TO_SET, VALUES,
+    CHARACTERS, COMPARABLE, CONTAINS, Conformer, EQUAL, EQUATABLE, HASH, JOINED, RANGE, REPEATING,
+    SPLIT, Signatures, TO_SET,
 };
 use crate::tir::{Descriptor, TFunc, Witnessed};
 use crate::types::Ty;
@@ -320,12 +320,18 @@ impl<'a> Instantiator<'a> {
                     .ok_or_else(|| "internal error: no type for hash".to_string())?
                     .map_err(|e| e.message().to_string())?,
             )
-        } else if callee == KEYS || callee == VALUES {
+        } else if let Some(kind) = Listing::from_callee(callee) {
             Rc::new(
                 args.first()
-                    .map(|ty| table_listing_function(sigs, *ty, mangled.clone(), callee == KEYS))
+                    .map(|ty| table_listing_function(sigs, *ty, mangled.clone(), kind))
                     .ok_or_else(|| "internal error: no type for a listing".to_string())?
                     .map_err(|e| e.message().to_string())?,
+            )
+        } else if callee == RANGE {
+            Rc::new(range_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?)
+        } else if callee == CHARACTERS {
+            Rc::new(
+                characters_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?,
             )
         } else if callee == SPLIT {
             Rc::new(split_function(sigs, mangled.clone()).map_err(|e| e.message().to_string())?)

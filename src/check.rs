@@ -9,10 +9,10 @@ use crate::ast::{
 use crate::capture::EnvKind;
 use crate::init_check::{InitScope, check_enum_initialization, check_initialization};
 use crate::sigs::{
-    ARRAY, ARRAY_COUNT, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED, DICTIONARY,
-    ENUMERATED, EQUAL, EQUATABLE, EnumSig, FATAL_ERROR, FROM_PAIRS, FieldSig, FuncSig, HASH,
-    JOINED, KEYS, NONE_CASE, PRINT, ParamSig, REPEATING, SET, SOME_CASE, SPLIT, TO_SET, VALUES,
-    ZIP, bound_includes, scope_of,
+    ARRAY, ARRAY_COUNT, CHARACTERS, COMPARABLE, CONTAINS, CResult, DICT_COUNT, DICT_USED,
+    DICTIONARY, ENTRIES, ENUMERATED, EQUAL, EQUATABLE, EnumSig, FATAL_ERROR, FROM_PAIRS, FieldSig,
+    FuncSig, HASH, JOINED, KEYS, NONE_CASE, PRINT, ParamSig, RANGE, REPEATING, SET, SOME_CASE,
+    SPLIT, TO_SET, VALUES, ZIP, bound_includes, scope_of,
 };
 use crate::tir::{ArrayOp, DictOp, LocalId, StrOp, TExpr, TFunc, TStmt};
 use crate::types::{StructId, Ty};
@@ -1947,28 +1947,60 @@ pub fn repeating_function(sigs: &Signatures, array: Ty, name: String) -> CResult
     Ok(TFunc::new(name, 2, array, cx.locals, body))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    Keys,
+    Values,
+    Entries,
+}
+
+impl Listing {
+    pub fn from_callee(callee: &str) -> Option<Self> {
+        match callee {
+            KEYS => Some(Self::Keys),
+            VALUES => Some(Self::Values),
+            ENTRIES => Some(Self::Entries),
+            _ => None,
+        }
+    }
+}
+
 pub fn table_listing_function(
     sigs: &Signatures,
     ty: Ty,
     name: String,
-    keys: bool,
+    kind: Listing,
 ) -> CResult<TFunc> {
     let (key, value) = sigs
         .table_parts(ty)
         .ok_or_else(|| CheckError::at(0, "internal error: a listing needs a dictionary"))?;
-    let element = if keys { key } else { value };
+    let element = match kind {
+        Listing::Keys => key,
+        Listing::Values => value,
+        Listing::Entries => sigs.tuple_of(vec![key, value], 0)?,
+    };
     let listing = sigs.array_of(element, 0)?;
     let mut cx = synthetic_cx(sigs, &name, listing);
     let table = cx.declare(0, "table", ty, false)?;
     let result = cx.temp(listing);
     let position = cx.temp(Ty::Int);
-    let item = table_op(
-        if keys { DictOp::Key } else { DictOp::Value },
-        key,
-        value,
-        vec![local(table, ty), local(position, Ty::Int)],
-        element,
-    );
+    let part = |op: DictOp, ty_of: Ty| {
+        table_op(
+            op,
+            key,
+            value,
+            vec![local(table, ty), local(position, Ty::Int)],
+            ty_of,
+        )
+    };
+    let item = match kind {
+        Listing::Keys => part(DictOp::Key, key),
+        Listing::Values => part(DictOp::Value, value),
+        Listing::Entries => TExpr::StructInit {
+            ty: element,
+            args: vec![part(DictOp::Key, key), part(DictOp::Value, value)],
+        },
+    };
     let live = table_op(
         DictOp::Live,
         key,
@@ -2010,6 +2042,91 @@ pub fn table_listing_function(
                     else_body: Vec::new(),
                 },
                 step(position),
+            ],
+        },
+        TStmt::Return(Some(local(result, listing))),
+    ];
+    Ok(TFunc::new(name, 1, listing, cx.locals, body))
+}
+
+pub fn range_function(sigs: &Signatures, name: String) -> CResult<TFunc> {
+    let listing = sigs.array_of(Ty::Int, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, listing);
+    let lo = cx.declare(0, "lo", Ty::Int, false)?;
+    let hi = cx.declare(0, "hi", Ty::Int, false)?;
+    let result = cx.temp(listing);
+    let body = vec![
+        TStmt::Let {
+            local: result,
+            init: empty_array(sigs, listing, Ty::Int),
+        },
+        TStmt::While {
+            cond: compare(BinOp::Lt, local(lo, Ty::Int), local(hi, Ty::Int)),
+            body: vec![
+                TStmt::Assign {
+                    local: result,
+                    value: TExpr::ArrayOp {
+                        op: ArrayOp::Append,
+                        elem: Ty::Int,
+                        args: vec![local(result, listing), local(lo, Ty::Int)],
+                        ty: listing,
+                    },
+                },
+                step(lo),
+            ],
+        },
+        TStmt::Return(Some(local(result, listing))),
+    ];
+    Ok(TFunc::new(name, 2, listing, cx.locals, body))
+}
+
+pub fn characters_function(sigs: &Signatures, name: String) -> CResult<TFunc> {
+    let listing = sigs.array_of(Ty::Char, 0)?;
+    let mut cx = synthetic_cx(sigs, &name, listing);
+    let text = cx.declare(0, "text", Ty::Str, false)?;
+    let result = cx.temp(listing);
+    let offset = cx.temp(Ty::Int);
+    let current = cx.temp(Ty::Char);
+    let body = vec![
+        TStmt::Let {
+            local: result,
+            init: empty_array(sigs, listing, Ty::Char),
+        },
+        TStmt::Let {
+            local: offset,
+            init: TExpr::Int(0),
+        },
+        TStmt::While {
+            cond: compare(
+                BinOp::Lt,
+                local(offset, Ty::Int),
+                text_op(StrOp::Count, vec![local(text, Ty::Str)]),
+            ),
+            body: vec![
+                TStmt::Let {
+                    local: current,
+                    init: text_op(
+                        StrOp::CharAt,
+                        vec![local(text, Ty::Str), local(offset, Ty::Int)],
+                    ),
+                },
+                TStmt::Assign {
+                    local: result,
+                    value: TExpr::ArrayOp {
+                        op: ArrayOp::Append,
+                        elem: Ty::Char,
+                        args: vec![local(result, listing), local(current, Ty::Char)],
+                        ty: listing,
+                    },
+                },
+                TStmt::Assign {
+                    local: offset,
+                    value: compare(
+                        BinOp::Add,
+                        local(offset, Ty::Int),
+                        text_op(StrOp::CharWidth, vec![local(current, Ty::Char)]),
+                    ),
+                },
             ],
         },
         TStmt::Return(Some(local(result, listing))),
@@ -6877,22 +6994,68 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    fn sequence_array(&mut self, line: u32, expr: &Expr) -> CResult<TExpr> {
+        let sigs = self.sigs;
+        let converted = |callee: &str, source: TExpr, element: Ty| -> CResult<TExpr> {
+            Ok(TExpr::Call {
+                callee: callee.to_string(),
+                type_args: vec![source.ty()],
+                args: vec![source],
+                ret: sigs.array_of(element, line)?,
+            })
+        };
+        if let ExprKind::Range { lo, hi, inclusive } = expr.kind() {
+            let lo = self.int_value(lo)?;
+            let mut hi = self.int_value(hi)?;
+            if *inclusive {
+                hi = compare(BinOp::Add, hi, TExpr::Int(1));
+            }
+            return Ok(TExpr::Call {
+                callee: RANGE.to_string(),
+                type_args: vec![Ty::Int],
+                args: vec![lo, hi],
+                ret: sigs.array_of(Ty::Int, line)?,
+            });
+        }
+        let value = self.value(expr)?;
+        let ty = value.ty();
+        if sigs.array_element(ty).is_some() {
+            return Ok(value);
+        }
+        if ty == Ty::Str {
+            return Ok(TExpr::Call {
+                callee: CHARACTERS.to_string(),
+                type_args: vec![Ty::Str],
+                args: vec![value],
+                ret: sigs.array_of(Ty::Char, line)?,
+            });
+        }
+        if let Some((key, entry)) = sigs.table_parts(ty) {
+            if sigs.is_set(ty) {
+                return converted(KEYS, value, key);
+            }
+            let pair = sigs.tuple_of(vec![key, entry], line)?;
+            return converted(ENTRIES, value, pair);
+        }
+        Err(CheckError::at(line, "zip takes two sequences"))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn zip_call(&mut self, line: u32, args: &[Arg]) -> CResult<TExpr> {
         let sigs = self.sigs;
         let [left, right] = args else {
-            return Err(CheckError::at(line, "zip takes two arrays"));
+            return Err(CheckError::at(line, "zip takes two sequences"));
         };
         if left.label().is_some() || right.label().is_some() {
-            return Err(CheckError::at(line, "zip takes two unlabeled arrays"));
+            return Err(CheckError::at(line, "zip takes two unlabeled sequences"));
         }
-        let first = self.value(left.value())?;
-        let second = self.value(right.value())?;
+        let first = self.sequence_array(line, left.value())?;
+        let second = self.sequence_array(line, right.value())?;
         let (Some(a), Some(b)) = (
             sigs.array_element(first.ty()),
             sigs.array_element(second.ty()),
         ) else {
-            return Err(CheckError::at(line, "zip takes two arrays"));
+            return Err(CheckError::at(line, "zip takes two sequences"));
         };
         let tuple = sigs.tuple_of(vec![a, b], line)?;
         let ret = sigs.array_of(tuple, line)?;
