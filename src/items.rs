@@ -1,6 +1,8 @@
 use crate::hash::Fnv1a;
 use crate::lexer::{Piece, Spanned, Token};
 
+pub const TOP_LEVEL: &str = "$top-level";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Func,
@@ -178,16 +180,6 @@ pub fn split_items(tokens: &[Spanned]) -> Result<Vec<Item>, SplitError> {
         i = end;
     }
     if !top_level.is_empty() {
-        if let Some(main) = items
-            .iter()
-            .find(|i| i.kind == ItemKind::Func && i.name == "main")
-        {
-            return Err(SplitError {
-                line: main.tokens.first().map_or(1, Spanned::line),
-                message: "a program with top-level statements cannot define 'func main()'"
-                    .to_string(),
-            });
-        }
         items.push(top_level_item(top_level));
     }
     Ok(items)
@@ -247,7 +239,7 @@ fn top_level_item(statements: Vec<Spanned>) -> Item {
     let punct = |text: &str, line: u32| Spanned::new(Token::Punct(text.to_string()), line);
     let mut tokens = vec![
         Spanned::new(Token::Ident("func".to_string()), line),
-        Spanned::new(Token::Ident("main".to_string()), line),
+        Spanned::new(Token::Ident(TOP_LEVEL.to_string()), line),
         punct("(", line),
         punct(")", line),
         punct("{", line),
@@ -257,7 +249,7 @@ fn top_level_item(statements: Vec<Spanned>) -> Item {
     let hash = hash_tokens(&tokens);
     Item {
         kind: ItemKind::Func,
-        name: "main".to_string(),
+        name: TOP_LEVEL.to_string(),
         tokens,
         hash,
         signature_hash: hash,
@@ -755,7 +747,7 @@ mod tests {
             vec![
                 (ItemKind::Func, "f", false),
                 (ItemKind::Struct, "P", false),
-                (ItemKind::Func, "main", true),
+                (ItemKind::Func, TOP_LEVEL, true),
             ]
         );
     }
@@ -775,7 +767,7 @@ mod tests {
         assert_eq!(
             words,
             [
-                "func", "main", "let", "a", "if", "a", "func", "inner", "print", "a"
+                "func", TOP_LEVEL, "let", "a", "if", "a", "func", "inner", "print", "a"
             ]
         );
     }
@@ -798,10 +790,10 @@ mod tests {
     }
 
     #[test]
-    fn top_level_statements_and_a_main_function_cannot_be_mixed() {
-        let tokens = lex("func main() { }\nprint(1)").unwrap();
-        let error = split_items(&tokens).unwrap_err();
-        assert!(error.message().contains("cannot define 'func main()'"));
+    fn a_main_function_may_be_declared_next_to_top_level_statements() {
+        let found = items("func main() { }\nprint(1)");
+        let names: Vec<&str> = found.iter().map(|i| i.name()).collect();
+        assert_eq!(names, ["main", TOP_LEVEL]);
     }
 
     #[test]

@@ -7504,7 +7504,6 @@ fn top_level_control_flow_and_objects_are_released() {
 #[test]
 fn a_program_with_top_level_statements_is_checked_for_main_and_declarations() {
     for (source, message) in [
-        ("func main() {\n}\nprint(1)", "cannot define 'func main()'"),
         ("let a = 1\nlet a = 2", "already declared"),
         ("print(late)\nlet late = 1", "cannot find 'late'"),
         ("let c = 1\nc = 2", "constant"),
@@ -7516,4 +7515,12 @@ fn a_program_with_top_level_statements_is_checked_for_main_and_declarations() {
 #[test]
 fn a_program_without_top_level_statements_still_needs_main() {
     assert!(build_error("func other() {\n}").contains("main"));
+}
+
+#[test]
+fn a_function_named_main_is_an_ordinary_function_next_to_top_level_statements() {
+    assert_eq!(
+        run("func main() {\n  print(\"helper\")\n}\nprint(\"top\")\nmain()\nprint(\"end\")"),
+        "top\nhelper\nend\n"
+    );
 }

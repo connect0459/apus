@@ -22,6 +22,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ast::{BinOp, UnaryOp};
 use crate::entry::{EntryReloc, FuncEntry, Literal, SymbolRef};
 use crate::hash::Fnv1a;
+use crate::items::TOP_LEVEL;
 use crate::sigs::{
     ARRAY_BUFFER, ARRAY_CAPACITY, ARRAY_COUNT, DICT_CAPACITY, DICT_COUNT, DICT_ENTRIES, DICT_TABLE,
     DICT_USED,
@@ -3305,7 +3306,8 @@ fn define_entry(
     funcs: &HashMap<String, FuncId>,
 ) -> GResult<()> {
     let main_id = *funcs
-        .get(ENTRY_SYMBOL)
+        .get(&symbol(TOP_LEVEL))
+        .or_else(|| funcs.get(ENTRY_SYMBOL))
         .ok_or_else(|| CodegenError::from("no 'main' function"))?;
     let mut sig = module.make_signature();
     sig.returns.push(AbiParam::new(types::I32));

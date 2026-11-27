@@ -168,10 +168,9 @@ fn build_on_this_thread(
             unit: None,
         });
     }
-    if !items
-        .iter()
-        .any(|i| i.kind() == ItemKind::Func && !i.is_generic() && i.name() == "main")
-    {
+    if !items.iter().any(|i| {
+        i.is_top_level() || (i.kind() == ItemKind::Func && !i.is_generic() && i.name() == "main")
+    }) {
         return Err(BuildError::new("no 'main' function"));
     }
 
