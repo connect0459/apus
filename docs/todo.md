@@ -79,7 +79,8 @@
   - [x] `if case` with an enum, tuple, value or range pattern, `else` and `else if case` (see the if case decision)
   - [x] condition lists in `if`, `while` and `guard`: Bool expressions, `let`/`var` bindings of optionals and `case` patterns, mixed and separated by commas, so `guard case`, `while case` and several conditions in one `if case` work (see the condition list decision)
   - [x] the `case let .circle(r)` form in `switch`, `if case`, `guard case` and `while case` (see the shared let decision)
-  - [ ] `zip` of sequences other than arrays, `let` bindings inside nested tuple patterns, `where` clauses, a one-element or five-element tuple
+  - [x] `where` clauses on the cases of a `switch` (see the where clause decision)
+  - [ ] `zip` of sequences other than arrays, `let` bindings inside nested tuple patterns, `where` on `for`, `if case` and `guard case`, a one-element or five-element tuple
   - [x] a member of a struct or class value through a default entry: `d[k, default: P()].x = 1`, `.x += 1`, `.inner.x = 3`, `.tags.append("t")` (see the default entry member decision)
   - [x] optional-chain assignment and mutation: `d[k]?.member = x`, `d[k]?.a.b += 1`, `d[k]?.items.append(x)`, `d[k]?.append(x)`, the same on an optional variable or member (`maybe?.x = 5`, `holder.p?.x += 10`), and the optional subscript `d[k]?[i]` (see the optional chain update decision)
 - [ ] M11: closures
@@ -693,4 +694,10 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `case let .circle(r)` and `case let .rect(w, h)` are read as `case .circle(let r)` and `case .rect(let w, let h)`: after `case`, an optional `let` makes every payload position of the first pattern a bare name or `_`. The parser has one `case_label` for `switch`, `if case`, `guard case` and `while case`. As in Swift, the `let` covers only the first pattern of a list; a later alternative spells its own `let` (`case let .a(r), .b(let r)`), and a `let` inside a pattern that is already under a shared `let` is an error.
 
 **Consequences.** No checker or code generation change, since the parser produces the same `Pattern`. `case let (a, b)` for tuples and `case var` are still unsupported.
+
+### A where clause guards a case and a failed guard falls to the next case (2026-11-27)
+
+**Decision.** `case <pattern> where <condition>:` (`SwitchCase::guard`) is accepted on every kind of `switch`. As in Swift, the guard belongs to the last pattern of the case only: `case .a, .b(let n) where n > 5` matches `.a` unconditionally. A case with a guard never counts toward exhaustiveness for the pattern the guard belongs to, and a last tuple case with a guard is not taken as the default. On values and on tuple cases with several patterns, which bind no names, the guard is `&&`-ed into the test of the last pattern. Where names are bound (enum payloads, a tuple pattern with `let`), the checker allocates a hidden `matched` flag per switch and lowers the cases to sequential `if !matched && test { matched = true; bindings; if guard { body } else { matched = false } }` followed by `if !matched { default }`, because the guard can run only after the bindings and a failed guard must continue with the later cases. A switch without a guard keeps the `else if` chain.
+
+**Consequences.** A guarded switch costs one flag and the tests of the cases before the match. `where` on `for`, `if case` and `guard case` is not supported (the condition lists already take `, condition`). The Bool switch error named the case that was present instead of the missing one; it is fixed.
 
