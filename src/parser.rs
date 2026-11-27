@@ -352,6 +352,9 @@ impl Parser<'_> {
     }
 
     fn type_ref(&mut self) -> PResult<TypeRef> {
+        if self.is_keyword("any") && self.peek_at(1).is_some_and(is_name) {
+            self.pos += 1;
+        }
         let mut ty = if self.is_punct("(") {
             self.function_type()?
         } else if self.eat_punct("[") {

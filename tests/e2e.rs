@@ -7917,3 +7917,13 @@ fn a_function_type_may_name_its_parameters_with_underscores() {
         "3\n7\n20\n"
     );
 }
+
+#[test]
+fn any_before_a_protocol_name_writes_the_protocol_type() {
+    assert_eq!(
+        run(
+            "protocol Shape {\n  func area() -> Int\n}\nstruct Sq: Shape {\n  var s: Int\n  func area() -> Int {\n    return s * s\n  }\n}\nstruct Rect: Shape {\n  var w: Int\n  var h: Int\n  func area() -> Int {\n    return w * h\n  }\n}\nfunc total(_ shapes: [any Shape]) -> Int {\n  var sum = 0\n  for s in shapes {\n    sum += s.area()\n  }\n  return sum\n}\nlet first: any Shape = Sq(s: 3)\nlet maybe: (any Shape)? = Rect(w: 2, h: 5)\nprint(first.area() + (maybe?.area() ?? 0))\nprint(total([Sq(s: 2), Rect(w: 1, h: 6)]))"
+        ),
+        "19\n10\n"
+    );
+}
