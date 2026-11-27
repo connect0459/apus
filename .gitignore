@@ -18,3 +18,6 @@ tmp/
 .agents/
 .claude/
 
+
+# python
+__pycache__/

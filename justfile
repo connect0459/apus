@@ -25,8 +25,16 @@ bench-front n="1000":
 bench-vs-swiftc:
     python3 bench/vs_swiftc.py
 
+swift-tests *args:
+    cargo build --release -q
+    python3 bench/swift_tests.py --baseline bench/swift_tests_passing.txt {{args}}
+
+swift-tests-selftest:
+    python3 bench/test_swift_tests.py
+
 verify:
     cargo fmt --all --check
     cargo clippy --all-targets --all-features -- -D warnings
+    just swift-tests-selftest
     just test
     just coverage
