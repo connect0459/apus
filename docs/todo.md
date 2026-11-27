@@ -80,7 +80,8 @@
   - [x] condition lists in `if`, `while` and `guard`: Bool expressions, `let`/`var` bindings of optionals and `case` patterns, mixed and separated by commas, so `guard case`, `while case` and several conditions in one `if case` work (see the condition list decision)
   - [x] the `case let .circle(r)` form in `switch`, `if case`, `guard case` and `while case` (see the shared let decision)
   - [x] `where` clauses on the cases of a `switch` (see the where clause decision)
-  - [ ] `zip` of sequences other than arrays, `let` bindings inside nested tuple patterns, `where` on `for`, `if case` and `guard case`, a one-element or five-element tuple
+  - [x] `zip` of a `String`, `Set`, `Dictionary`, a range literal or an array, in any combination (see the zip sequence decision)
+  - [ ] `let` bindings inside nested tuple patterns, `where` on `for`, `if case` and `guard case`, a one-element or five-element tuple
   - [x] a member of a struct or class value through a default entry: `d[k, default: P()].x = 1`, `.x += 1`, `.inner.x = 3`, `.tags.append("t")` (see the default entry member decision)
   - [x] optional-chain assignment and mutation: `d[k]?.member = x`, `d[k]?.a.b += 1`, `d[k]?.items.append(x)`, `d[k]?.append(x)`, the same on an optional variable or member (`maybe?.x = 5`, `holder.p?.x += 10`), and the optional subscript `d[k]?[i]` (see the optional chain update decision)
 - [ ] M11: closures
@@ -700,4 +701,10 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `case <pattern> where <condition>:` (`SwitchCase::guard`) is accepted on every kind of `switch`. As in Swift, the guard belongs to the last pattern of the case only: `case .a, .b(let n) where n > 5` matches `.a` unconditionally. A case with a guard never counts toward exhaustiveness for the pattern the guard belongs to, and a last tuple case with a guard is not taken as the default. On values and on tuple cases with several patterns, which bind no names, the guard is `&&`-ed into the test of the last pattern. Where names are bound (enum payloads, a tuple pattern with `let`), the checker allocates a hidden `matched` flag per switch and lowers the cases to sequential `if !matched && test { matched = true; bindings; if guard { body } else { matched = false } }` followed by `if !matched { default }`, because the guard can run only after the bindings and a failed guard must continue with the later cases. A switch without a guard keeps the `else if` chain.
 
 **Consequences.** A guarded switch costs one flag and the tests of the cases before the match. `where` on `for`, `if case` and `guard case` is not supported (the condition lists already take `, condition`). The Bool switch error named the case that was present instead of the missing one; it is fixed.
+
+### zip converts each sequence to an array before pairing (2026-11-27)
+
+**Decision.** `zip(a, b)` accepts anything a `for` loop walks: an array, a `String` (elements are `Character`), a `Set` (insertion order), a `Dictionary` (elements are `(key, value)` pairs) and a range written in the argument (`zip(0..<3, xs)`, `zip(xs, 1...2)`). The checker converts each argument to an array and passes both to the existing `$zip`: a string through the synthesized `$characters`, a set through `$keys`, a dictionary through `$entries` (a mode of the table listing function that builds pairs), and a range through `$range(lo, hi)`, where an inclusive range passes `hi + 1`. The result is still an array of pairs, so `zip(...)` of any sequences can be looped over, indexed and counted.
+
+**Consequences.** Each converted sequence costs one array allocation before `zip` allocates its own. An inclusive range ending at `Int.max` traps on the addition instead of iterating. A range with no upper bound (`zip(0..., xs)`) and a range held in a variable are not supported, since ranges are not values.
 
