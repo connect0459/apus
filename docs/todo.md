@@ -83,7 +83,7 @@
   - [x] `zip` of a `String`, `Set`, `Dictionary`, a range literal or an array, in any combination (see the zip sequence decision)
   - [x] tuple patterns nested in tuple patterns (`case ((0, let y), _)`) and enum patterns inside them (`case (.circle(let r), let n)`), in `switch` and `if case` (see the nested pattern decision)
   - [x] `where` on `for` and after the pattern of `if case`, `guard case` and `while case` (see the where desugaring decision)
-  - [ ] a one-element or five-element tuple
+  - [x] a tuple of five elements, and parentheses around one name (`let (a) = 4`, `(Int)`) as plain grouping, since there is no one-element tuple (see the tuple size decision)
   - [x] a member of a struct or class value through a default entry: `d[k, default: P()].x = 1`, `.x += 1`, `.inner.x = 3`, `.tags.append("t")` (see the default entry member decision)
   - [x] optional-chain assignment and mutation: `d[k]?.member = x`, `d[k]?.a.b += 1`, `d[k]?.items.append(x)`, `d[k]?.append(x)`, the same on an optional variable or member (`maybe?.x = 5`, `holder.p?.x += 10`), and the optional subscript `d[k]?[i]` (see the optional chain update decision)
 - [ ] M11: closures
@@ -722,3 +722,9 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 
 **Consequences.** A filtered loop costs one comparison per element. Errors in the condition are reported against the line of the `for` or the condition list, not of a separate clause.
 
+
+### A tuple holds two to five elements and one parenthesized name is a grouping (2026-11-27)
+
+**Decision.** `MAX_TUPLE` (5) bounds the tuple types, literals and patterns. Tuple struct definitions are registered for two to five elements, and the weak and unowned cell definitions follow them in the definition table. A single element in parentheses is not a tuple, as in Swift: `(Int)` is `Int`, `(x)` is `x`, and `let (a) = e` or `var (a) = e` binds one name.
+
+**Consequences.** A six-element tuple is rejected with a message naming the limit. A one-element tuple with a label (`(x: 1)`) is not supported.
