@@ -671,12 +671,17 @@ impl Parser<'_> {
             } else {
                 return self.fail("expected 'var' or 'let' in a struct or class body");
             };
-            let field_name = self.name()?;
+            let mut names = vec![self.name()?];
+            while self.eat_punct(",") {
+                names.push(self.name()?);
+            }
             self.expect_punct(":")?;
             let ty = self.type_ref()?;
-            let field = Field::new(field_name, mutable, ty);
-            let field = if unowned { field.as_unowned() } else { field };
-            fields.push(if weak { field.as_weak() } else { field });
+            for field_name in names {
+                let field = Field::new(field_name, mutable, ty.clone());
+                let field = if unowned { field.as_unowned() } else { field };
+                fields.push(if weak { field.as_weak() } else { field });
+            }
             self.end_of_statement()?;
         }
         let decl = StructDecl::new(line, name, fields)
@@ -846,7 +851,7 @@ impl Parser<'_> {
             if self.peek().is_none() {
                 return self.fail("unterminated switch, expected '}'");
             }
-            body.push(self.stmt()?);
+            self.push_statement(&mut body)?;
             self.end_of_statement()?;
         }
     }
@@ -913,9 +918,64 @@ impl Parser<'_> {
             if self.peek().is_none() {
                 return self.fail("unterminated block, expected '}'");
             }
-            stmts.push(self.stmt()?);
+            self.push_statement(&mut stmts)?;
             self.end_of_statement()?;
         }
+    }
+
+    fn push_statement(&mut self, out: &mut Vec<Stmt>) -> PResult<()> {
+        let first = self.stmt()?;
+        let StmtKind::Let {
+            name,
+            mutable,
+            ty,
+            init,
+        } = first.kind()
+        else {
+            out.push(first);
+            return Ok(());
+        };
+        if !(self.is_punct(",") && self.on_same_line()) {
+            out.push(first);
+            return Ok(());
+        }
+        let mutable = *mutable;
+        let line = first.line();
+        let mut declarators = vec![(name.clone(), ty.clone(), init.clone())];
+        while self.eat_punct(",") {
+            let name = self.name()?;
+            let ty = if self.eat_punct(":") {
+                Some(self.type_ref()?)
+            } else {
+                None
+            };
+            let init = if self.eat_punct("=") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            declarators.push((name, ty, init));
+        }
+        let mut shared: Option<TypeRef> = None;
+        for (_, ty, init) in declarators.iter_mut().rev() {
+            match (&*ty, &*init) {
+                (Some(own), _) => shared = Some(own.clone()),
+                (None, None) => *ty = shared.clone(),
+                (None, Some(_)) => {}
+            }
+        }
+        for (name, ty, init) in declarators {
+            out.push(Stmt::new(
+                line,
+                StmtKind::Let {
+                    name,
+                    mutable,
+                    ty,
+                    init,
+                },
+            ));
+        }
+        Ok(())
     }
 
     fn end_of_statement(&self) -> PResult<()> {
@@ -3740,5 +3800,40 @@ mod tests {
         let names: Vec<&str> = decl.params().iter().map(|p| p.name()).collect();
         assert_eq!(names, ["$unnamed0", "x", "$unnamed2"]);
         assert!(decl.params().iter().all(|p| p.label().is_none()));
+    }
+
+    #[test]
+    fn several_names_in_one_declaration_share_the_type_that_follows_them() {
+        let stmts = body("var a, b: Int\nlet c = 1, d = 2");
+        let shown: Vec<(String, Option<String>, bool)> = stmts
+            .iter()
+            .map(|s| match s.kind() {
+                StmtKind::Let { name, ty, init, .. } => (
+                    name.clone(),
+                    ty.as_ref().map(|t| t.to_string()),
+                    init.is_some(),
+                ),
+                other => panic!("expected a declaration, found {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("a".to_string(), Some("Int".to_string()), false),
+                ("b".to_string(), Some("Int".to_string()), false),
+                ("c".to_string(), None, true),
+                ("d".to_string(), None, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_struct_declares_several_members_with_one_type() {
+        let Decl::Struct(decl) = try_parse("struct P { var x, y: Int\n let z: Bool }").unwrap()
+        else {
+            panic!("expected a struct");
+        };
+        let names: Vec<&str> = decl.fields().iter().map(|f| f.name()).collect();
+        assert_eq!(names, ["x", "y", "z"]);
     }
 }

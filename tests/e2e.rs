@@ -7564,3 +7564,13 @@ fn access_modifiers_and_inline_attributes_are_accepted_and_ignored() {
         "31\n"
     );
 }
+
+#[test]
+fn several_names_may_be_declared_together() {
+    assert_eq!(
+        run(
+            "struct P {\n  var x, y: Int\n  let tag: String\n}\nclass C {\n  var a, b, c: Int\n}\nlet one = 1, two = 2\nvar p = P(x: 3, y: 4, tag: \"t\")\nfunc f() -> Int {\n  var s = 0, t = 10\n  s += 5\n  return s + t\n}\nprint(one + two + p.x + p.y + C(a: 1, b: 2, c: 3).c + f())"
+        ),
+        "28\n"
+    );
+}
