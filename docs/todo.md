@@ -81,7 +81,8 @@
   - [x] the `case let .circle(r)` form in `switch`, `if case`, `guard case` and `while case` (see the shared let decision)
   - [x] `where` clauses on the cases of a `switch` (see the where clause decision)
   - [x] `zip` of a `String`, `Set`, `Dictionary`, a range literal or an array, in any combination (see the zip sequence decision)
-  - [ ] `let` bindings inside nested tuple patterns, `where` on `for`, `if case` and `guard case`, a one-element or five-element tuple
+  - [x] tuple patterns nested in tuple patterns (`case ((0, let y), _)`) and enum patterns inside them (`case (.circle(let r), let n)`), in `switch` and `if case` (see the nested pattern decision)
+  - [ ] `where` on `for`, `if case` and `guard case`, a one-element or five-element tuple
   - [x] a member of a struct or class value through a default entry: `d[k, default: P()].x = 1`, `.x += 1`, `.inner.x = 3`, `.tags.append("t")` (see the default entry member decision)
   - [x] optional-chain assignment and mutation: `d[k]?.member = x`, `d[k]?.a.b += 1`, `d[k]?.items.append(x)`, `d[k]?.append(x)`, the same on an optional variable or member (`maybe?.x = 5`, `holder.p?.x += 10`), and the optional subscript `d[k]?[i]` (see the optional chain update decision)
 - [ ] M11: closures
@@ -707,4 +708,10 @@ A `weak` member has the type `Optional<Class>`, must be a `var`, and counts thro
 **Decision.** `zip(a, b)` accepts anything a `for` loop walks: an array, a `String` (elements are `Character`), a `Set` (insertion order), a `Dictionary` (elements are `(key, value)` pairs) and a range written in the argument (`zip(0..<3, xs)`, `zip(xs, 1...2)`). The checker converts each argument to an array and passes both to the existing `$zip`: a string through the synthesized `$characters`, a set through `$keys`, a dictionary through `$entries` (a mode of the table listing function that builds pairs), and a range through `$range(lo, hi)`, where an inclusive range passes `hi + 1`. The result is still an array of pairs, so `zip(...)` of any sequences can be looped over, indexed and counted.
 
 **Consequences.** Each converted sequence costs one array allocation before `zip` allocates its own. An inclusive range ending at `Int.max` traps on the addition instead of iterating. A range with no upper bound (`zip(0..., xs)`) and a range held in a variable are not supported, since ranges are not values.
+
+### A tuple pattern element is a pattern of its own (2026-11-27)
+
+**Decision.** An element of a tuple pattern is `_`, `let x`, a value or range, another tuple pattern in parentheses (`TuplePart::Tuple`), or an enum pattern such as `.circle(let r)` or `Shape.square` (`TuplePart::Enum`). The checker splits the subject once into hidden locals, one per element and recursively one per element of a nested tuple (`explode_tuple`), then `match_parts` walks the pattern and the locals together: a value goes through the existing value test, an enum pattern through `case_patterns` (a tag test, with the payload bindings as statements that run in the body), a `let` binds a copy of the element, and the tests of all elements are joined with `&&`. The rules of the flat form carry over: a case with several tuple patterns cannot bind names, an arity mismatch is an error at any depth, and the names must be distinct.
+
+**Consequences.** A nested pattern costs the hidden locals and one comparison per tested element. A switch whose last case contains an enum pattern or a value is not taken as matching every tuple, so such a switch needs a `default`; the exhaustiveness of enum cases inside tuples is not computed. Tuples still hold at most four elements. `case let (a, b)` is still unsupported.
 
