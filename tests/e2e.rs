@@ -7907,3 +7907,13 @@ fn a_ternary_may_start_its_branches_on_new_lines() {
         "fizzbuzz\n1\n"
     );
 }
+
+#[test]
+fn a_function_type_may_name_its_parameters_with_underscores() {
+    assert_eq!(
+        run(
+            "func adder(_ x: Int) -> (_ y: Int) -> Int {\n  return { y in x + y }\n}\nfunc apply(_ f: (_: Int, _ by: Int) -> Int, _ a: Int) -> Int {\n  return f(a, 3)\n}\nvar g: (_ left: Int, _ right: Int) -> Int = { a, b in a * b }\nprint(adder(1)(2))\nprint(apply({ a, b in a - b }, 10))\nprint(g(4, 5))"
+        ),
+        "3\n7\n20\n"
+    );
+}

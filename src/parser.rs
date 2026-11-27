@@ -319,9 +319,20 @@ impl Parser<'_> {
             }
             let labeled = self.peek_name().is_some()
                 && matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":");
+            let ignored = self.is_keyword("_")
+                && (matches!(self.peek_at(1), Some(Token::Punct(p)) if p == ":")
+                    || (self.peek_at(1).is_some_and(is_name)
+                        && matches!(self.peek_at(2), Some(Token::Punct(p)) if p == ":")));
             if labeled {
                 labels.push(Some(self.name()?));
                 self.expect_punct(":")?;
+            } else if ignored {
+                self.pos += 1;
+                if !self.is_punct(":") {
+                    self.pos += 1;
+                }
+                self.expect_punct(":")?;
+                labels.push(None);
             } else {
                 labels.push(None);
             }
