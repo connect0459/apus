@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    Decl, EnumCaseDecl, EnumDecl, Field, FuncDecl, MAX_TUPLE, ProtocolDecl, StructDecl, TypeRef,
+    Decl, EnumCaseDecl, EnumDecl, Expr, Field, FuncDecl, MAX_TUPLE, ProtocolDecl, StructDecl,
+    TypeRef,
 };
 use crate::tir::{TExpr, TFunc, TStruct};
 use crate::types::{EnumId, StructId, Ty};
@@ -2358,6 +2359,23 @@ impl Signatures {
 
     pub fn func(&self, name: &str) -> Option<&FuncSig> {
         self.funcs.get(name)
+    }
+
+    pub fn field_default(&self, struct_name: &str, field: &str) -> Option<&Expr> {
+        let def = self.struct_def_ids.get(struct_name)?;
+        self.struct_defs
+            .get(*def)?
+            .fields()
+            .iter()
+            .find(|f| f.name() == field)?
+            .default()
+    }
+
+    pub fn has_field_defaults(&self, struct_name: &str) -> bool {
+        self.struct_def_ids
+            .get(struct_name)
+            .and_then(|def| self.struct_defs.get(*def))
+            .is_some_and(|decl| decl.fields().iter().any(|f| f.default().is_some()))
     }
 
     pub fn struct_def(&self, name: &str) -> Option<usize> {

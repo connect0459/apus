@@ -511,6 +511,7 @@ pub struct Field {
     ty: TypeName,
     unowned: bool,
     weak: bool,
+    default: Option<Expr>,
 }
 
 impl Field {
@@ -521,7 +522,17 @@ impl Field {
             ty: ty.into(),
             unowned: false,
             weak: false,
+            default: None,
         }
+    }
+
+    pub fn with_default(mut self, default: Expr) -> Self {
+        self.default = Some(default);
+        self
+    }
+
+    pub fn default(&self) -> Option<&Expr> {
+        self.default.as_ref()
     }
 
     pub fn as_weak(mut self) -> Self {

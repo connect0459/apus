@@ -82,7 +82,7 @@ impl SplitError {
     }
 }
 
-const ACCESS_MODIFIERS: [&str; 7] = [
+const ACCESS_MODIFIERS: [&str; 9] = [
     "public",
     "private",
     "internal",
@@ -90,6 +90,8 @@ const ACCESS_MODIFIERS: [&str; 7] = [
     "open",
     "package",
     "final",
+    "convenience",
+    "required",
 ];
 
 const IGNORED_ATTRIBUTES: [&str; 13] = [
@@ -110,7 +112,7 @@ const IGNORED_ATTRIBUTES: [&str; 13] = [
 
 const ATTRIBUTES_WITH_ARGUMENTS: [&str; 4] = ["inline", "_optimize", "_semantics", "_effects"];
 
-const DECLARATION_WORDS: [&str; 22] = [
+const DECLARATION_WORDS: [&str; 20] = [
     "func",
     "var",
     "let",
@@ -129,8 +131,6 @@ const DECLARATION_WORDS: [&str; 22] = [
     "lazy",
     "weak",
     "unowned",
-    "required",
-    "convenience",
     "indirect",
     "associatedtype",
 ];

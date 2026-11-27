@@ -89,8 +89,12 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
             }
         }
     }
+    let init_body = func
+        .is_init()
+        .then(|| with_member_defaults(sigs, func, sig.ret()));
+    let statements: &[Stmt] = init_body.as_deref().unwrap_or(func.body());
     let prelude = if func.is_init() {
-        init_prelude(&mut cx, func, sig.ret())?
+        init_prelude(&mut cx, func, sig.ret(), statements)?
     } else if let Some((cell, enum_ty)) = cell_enum {
         let value = cx.declare(func.line(), "self", enum_ty, true)?;
         cx.cell_self = Some(CellSelf {
@@ -112,7 +116,7 @@ pub fn check_func(func: &FuncDecl, sigs: &Signatures) -> CResult<TFunc> {
     let mut body = if func.is_top_level() {
         cx.top_level_block(func.body())?
     } else {
-        cx.block(func.body())?
+        cx.block(statements)?
     };
     if func.is_top_level() {
         let mut allocation = Vec::new();
@@ -167,13 +171,13 @@ impl CellSelf {
     }
 }
 
-fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
+fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty, body: &[Stmt]) -> CResult<Vec<TStmt>> {
     let methods = cx.sigs.method_names(ty);
     let methods: Vec<&str> = methods.iter().map(String::as_str).collect();
     let params: Vec<&str> = func.params().iter().map(|p| p.name()).collect();
     let init = if cx.sigs.is_enum_ty(ty) {
         let scope = InitScope::new(&[], &methods, &params);
-        check_enum_initialization(func.body(), scope, func.line())
+        check_enum_initialization(body, scope, func.line())
             .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
         match ty {
             Ty::Struct(id) => zero_struct(cx, func, id, ty)?,
@@ -206,13 +210,59 @@ fn init_prelude(cx: &mut FnCx, func: &FuncDecl, ty: Ty) -> CResult<Vec<TStmt>> {
         } else {
             scope
         };
-        check_initialization(func.body(), scope, func.line())
+        check_initialization(body, scope, func.line())
             .map_err(|violation| CheckError::at(violation.line(), violation.message()))?;
         zero_struct(cx, func, id, ty)?
     };
     let local = cx.declare(func.line(), "self", ty, true)?;
     cx.init_self = Some(local);
     Ok(vec![TStmt::Let { local, init }])
+}
+
+fn with_member_defaults(sigs: &Signatures, func: &FuncDecl, ty: Ty) -> Vec<Stmt> {
+    let delegates = func.body().iter().any(|stmt| {
+        matches!(stmt.kind(), StmtKind::Expr(expr)
+            if matches!(expr.kind(), ExprKind::MemberCall { base, name, .. }
+                if name == "init" && matches!(base.kind(), ExprKind::Ident(n) if n == "self")))
+    });
+    let (Ty::Struct(id) | Ty::Class(id)) = ty else {
+        return func.body().to_vec();
+    };
+    let (Some(sig), Some(owner)) = (sigs.struct_sig(id), sigs.owner_name(ty)) else {
+        return func.body().to_vec();
+    };
+    if delegates || !sigs.has_field_defaults(&owner) {
+        return func.body().to_vec();
+    }
+    let inherited = match sigs.superclass(ty) {
+        Some(Ty::Class(parent)) => sigs.struct_sig(parent).map_or(0, |s| s.members().count()),
+        _ => 0,
+    };
+    let line = func.line();
+    let mut body: Vec<Stmt> = sig
+        .members()
+        .skip(inherited)
+        .filter_map(|(_, field)| {
+            let value = sigs.field_default(&owner, field.name())?;
+            let target = Expr::new(
+                line,
+                ExprKind::Member {
+                    base: Box::new(Expr::new(line, ExprKind::Ident("self".to_string()))),
+                    name: field.name().to_string(),
+                },
+            );
+            Some(Stmt::new(
+                line,
+                StmtKind::Assign {
+                    target,
+                    op: None,
+                    value: value.clone(),
+                },
+            ))
+        })
+        .collect();
+    body.extend(func.body().iter().cloned());
+    body
 }
 
 fn zero_struct(cx: &FnCx, func: &FuncDecl, id: StructId, ty: Ty) -> CResult<TExpr> {
@@ -10941,7 +10991,14 @@ impl<'a> FnCx<'a> {
                 ),
             ));
         }
-        if args.len() != members.len() {
+        let defaults = sigs.has_field_defaults(&base_name);
+        if defaults && inferring {
+            return Err(CheckError::at(
+                line,
+                "a member with a default value is not supported in a generic type yet",
+            ));
+        }
+        if args.len() != members.len() && !defaults {
             return Err(CheckError::at(
                 line,
                 format!(
@@ -10952,25 +11009,46 @@ impl<'a> FnCx<'a> {
                 ),
             ));
         }
-        let mut values = Vec::with_capacity(args.len());
-        for (arg, field) in args.iter().zip(&members) {
-            if arg.label() != Some(field.name()) {
-                return Err(CheckError::at(
-                    line,
-                    format!(
-                        "expected the label '{}' here, in the order the members are declared",
-                        field.name()
-                    ),
-                ));
-            }
+        let mut values = Vec::with_capacity(members.len());
+        let mut given = args.iter().peekable();
+        for field in &members {
+            let wanted = given
+                .peek()
+                .is_some_and(|a| a.label() == Some(field.name()));
+            let default = sigs.field_default(&base_name, field.name());
+            let value = match (wanted, default) {
+                (true, _) => given.next().map(Arg::value),
+                (false, Some(default)) => Some(default),
+                (false, None) => {
+                    return Err(CheckError::at(
+                        line,
+                        format!(
+                            "expected the label '{}' here, in the order the members are declared",
+                            field.name()
+                        ),
+                    ));
+                }
+            };
+            let Some(value) = value else { continue };
             if !inferring {
                 self.expected = Some(field.ty());
             }
-            let mut value = self.value(arg.value())?;
+            let mut value = self.value(value)?;
             if !inferring {
                 value = self.coerce(line, field.ty(), value)?;
             }
             values.push(value);
+        }
+        if let Some(extra) = given.next() {
+            return Err(CheckError::at(
+                line,
+                match extra.label() {
+                    Some(label) => format!(
+                        "'{label}' is not a member that can be given here, in the order the members are declared"
+                    ),
+                    None => format!("'{}' takes labeled values", sig.name()),
+                },
+            ));
         }
         let id = if inferring {
             let patterns: Vec<Ty> = members.iter().map(|f| f.ty()).collect();

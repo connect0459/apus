@@ -675,10 +675,38 @@ impl Parser<'_> {
             while self.eat_punct(",") {
                 names.push(self.name()?);
             }
-            self.expect_punct(":")?;
-            let ty = self.type_ref()?;
+            let declared = if self.is_punct("=") {
+                None
+            } else {
+                self.expect_punct(":")?;
+                Some(self.type_ref()?)
+            };
+            let default = if self.eat_punct("=") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            if default.is_some() && names.len() > 1 {
+                return self.fail("a member with a default value is declared with one name");
+            }
+            let ty = match (declared, &default) {
+                (Some(ty), _) => ty,
+                (None, Some(value)) => match value.kind() {
+                    ExprKind::Int(_) => TypeRef::from("Int"),
+                    ExprKind::Bool(_) => TypeRef::from("Bool"),
+                    ExprKind::Str(_) => TypeRef::from("String"),
+                    _ => {
+                        return self.fail(&format!("give the member '{}' a type", names[0]));
+                    }
+                },
+                (None, None) => return self.fail("expected ':'"),
+            };
             for field_name in names {
                 let field = Field::new(field_name, mutable, ty.clone());
+                let field = match &default {
+                    Some(value) => field.with_default(value.clone()),
+                    None => field,
+                };
                 let field = if unowned { field.as_unowned() } else { field };
                 fields.push(if weak { field.as_weak() } else { field });
             }

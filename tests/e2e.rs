@@ -7574,3 +7574,47 @@ fn several_names_may_be_declared_together() {
         "28\n"
     );
 }
+
+#[test]
+fn a_stored_property_may_have_a_default_value() {
+    assert_eq!(
+        run(
+            "struct S {\n  var a = 1\n  var b: Int\n  var tag = \"t\"\n  var on = true\n  var xs: [Int] = []\n}\nclass Node {\n  var value = 7\n  var next: Node? = nil\n}\nlet s = S(b: 2)\nlet t = S(a: 5, b: 6, tag: \"u\", on: false, xs: [1])\nlet n = Node()\nlet m = Node(value: 9, next: n)\nprint(s.a + s.b + t.a + t.b)\nprint(s.tag + t.tag)\nprint(s.on)\nprint(t.on)\nprint(s.xs.count + t.xs.count)\nprint(n.value + (m.next?.value ?? 0) + m.value)\nprint(n.next == nil)"
+        ),
+        "14\ntu\ntrue\nfalse\n1\n23\ntrue\n"
+    );
+}
+
+#[test]
+fn an_initializer_starts_from_the_default_values_of_its_type() {
+    assert_eq!(
+        run(
+            "class C {\n  var a = 3\n  var b: Int\n  var c = \"x\"\n  init(b: Int) {\n    self.b = b\n  }\n  init(a: Int, b: Int) {\n    self.a = a\n    self.b = b\n    self.c = \"y\"\n  }\n  convenience init() {\n    self.init(b: 40)\n  }\n}\nstruct P {\n  var x = 1\n  var y: Int\n  init(y: Int) {\n    self.y = y\n  }\n}\nlet c = C(b: 4)\nlet d = C(a: 1, b: 2)\nprint(c.a + c.b)\nprint(c.c + d.c)\nprint(d.a + d.b)\nprint(C().b)\nprint(P(y: 5).x + P(y: 5).y)"
+        ),
+        "7\nxy\n3\n40\n6\n"
+    );
+}
+
+#[test]
+fn a_member_default_that_is_not_a_literal_needs_a_type_and_labels_stay_in_order() {
+    for (source, message) in [
+        (
+            "struct S {\n  var a = [1]\n}\nfunc main() {\n}",
+            "give the member 'a' a type",
+        ),
+        (
+            "struct S {\n  var a = 1\n  var b: Int\n}\nfunc main() {\n  let s = S(b: 1, a: 2)\n}",
+            "in the order",
+        ),
+        (
+            "struct S {\n  var a = 1\n  var b: Int\n}\nfunc main() {\n  let s = S()\n}",
+            "'b'",
+        ),
+        (
+            "struct S {\n  var a, b = 1\n}\nfunc main() {\n}",
+            "one name",
+        ),
+    ] {
+        assert!(build_error(source).contains(message), "{source}");
+    }
+}
