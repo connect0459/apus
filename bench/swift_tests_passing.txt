@@ -8,3 +8,5 @@ hello_func.swift
 hello_toplevel.swift
 interpolation.swift
 object.swift
+slices.swift
+ternary_expr.swift
